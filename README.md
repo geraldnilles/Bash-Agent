@@ -47,10 +47,10 @@ The agent operates entirely through the command line. Since it has access to a r
 ### Installation
 
 ```bash
-git clone https://github.com/geraldnilles/bash-agent.git  # REPLACE WITH YOUR FORK URL
-cd bash-agent
+git clone https://github.com/geraldnilles/Bash-Agent
+cd Bash-Agent
 python3 -m venv venv
-source venv/bin/activate
+. venv/bin/activate
 pip install -e .
 ```
 
