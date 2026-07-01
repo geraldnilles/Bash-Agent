@@ -1,0 +1,4 @@
+openai
+numpy
+Pillow
+requests

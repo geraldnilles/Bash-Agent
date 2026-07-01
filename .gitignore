@@ -1,0 +1,7 @@
+.aider*
+venv
+.bash_agent_tmp
+__pycache__
+*.opus
+*.mp3
+bash_agent.egg-info
