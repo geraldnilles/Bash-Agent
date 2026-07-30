@@ -131,7 +131,18 @@ class Agent:
                 return False, warning_msg
             
             # No blocks found at all
-            default_msg = "Please execute a bash command to proceed or type 'exit' in a bash block to end the session."
+            default_msg = (
+                    f"⚠️ [SYSTEM WARNING] You did not provide any code block.\n"
+                    "Either provide a bash command:\n"
+                    f"---START_BASH_COMMAND-{self.uuid}---\n"
+                    f"[bash commands go here]\n"
+                    f"---END_BASH_COMMAND-{self.uuid}---\n\n"
+                    "Or provide some python code: \n"
+                    f"---START_BASH_COMMAND-{self.uuid}---\n"
+                    f"[bash commands go here]\n"
+                    f"---END_BASH_COMMAND-{self.uuid}---\n\n"
+                    "Please provide a bash or python block to execute to procced, or put 'exit' in a bash block to end the session."
+                    )
             return False, default_msg
             
         combined_outputs = []
