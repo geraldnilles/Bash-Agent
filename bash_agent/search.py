@@ -20,8 +20,9 @@ from bash_agent import llm
 
 # Constants
 EMBEDDINGS_DB = os.path.abspath(".bash_agent_tmp/embeddings.json")
-EMBEDDING_MODEL = "qwen/qwen3-embedding-8b"
-RERANK_MODEL = "cohere/rerank-4-pro"
+#EMBEDDING_MODEL = "qwen/qwen3-embedding-8b"
+EMBEDDING_MODEL = "perplexity/pplx-embed-v1-4b"
+#RERANK_MODEL = "cohere/rerank-4-pro"
 RERANK_MODEL = "nvidia/llama-nemotron-rerank-vl-1b-v2:free"
 SEARCH_DISABLED_FLAG = os.path.abspath(".bash_agent_tmp/search_disabled")
 
@@ -73,6 +74,8 @@ def load_embeddings_db():
 
 def save_embeddings_db(db):
     """Save the embeddings database to JSON file."""
+    # Record which embedding model was used
+    db["_model"] = EMBEDDING_MODEL
     os.makedirs(os.path.dirname(EMBEDDINGS_DB), exist_ok=True)
     with open(EMBEDDINGS_DB, "w") as f:
         json.dump(db, f, indent=2)
@@ -175,6 +178,15 @@ def main():
     # Load existing embeddings database
     db = load_embeddings_db()
     
+    # Check if the embedding model has changed; if so, clear all entries to force full re-embedding
+    stored_model = db.get("_model", None)
+    if stored_model and stored_model != EMBEDDING_MODEL:
+        debug_print(f"Embedding model changed from '{stored_model}' to '{EMBEDDING_MODEL}'. Re-embedding all files.", file=sys.stderr)
+        db = {}
+    elif not stored_model:
+        debug_print("No model recorded in existing database; treating as model change. Re-embedding all files.", file=sys.stderr)
+        db = {}
+    
     # Get all files in the directory
     all_files = get_all_files(root_dir)
     debug_print(f"Found {len(all_files)} files to consider.", file=sys.stderr)
@@ -182,6 +194,8 @@ def main():
     # Remove stale entries from database (files that no longer exist)
     stale_keys = []
     for db_file_path in list(db.keys()):
+        if db_file_path == "_model":
+            continue  # skip metadata key, not a file path
         full_path = os.path.join(root_dir, db_file_path)
         if not os.path.exists(full_path):
             stale_keys.append(db_file_path)
