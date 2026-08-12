@@ -61,7 +61,7 @@ This is the heart of the project. The `Agent` class:
 |--------|---------|
 | `__init__()` | Sets up UUID, model, sandbox, context, budget. Handles `--resume`. Checks multimodal capabilities. |
 | `run(initial_task)` | The main loop. Sends prompts, parses responses, executes commands. |
-| `parse_and_execute(agent_msg)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Executes them via `Sandbox.execute()` or `Sandbox.execute_python()`. Handles special commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Returns `(executed: bool, feedback: str)`. |
+| `parse_and_execute(agent_msg)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Executes them via `Sandbox.execute()` or `Sandbox.execute_python()`. Handles special commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` fences, strips base64 payloads, and collects them in `self._pending_multimodal_images` for structured multimodal messages. Returns `(executed: bool, feedback: str)`. |
 | `_check_model_capabilities()` | Queries OpenRouter API or checks for Gemini prefix to determine if the model supports native image input. Sets `self.is_multimodal`. |
 
 **The fenced-block regex pattern** (used in `parse_and_execute`):
@@ -135,7 +135,7 @@ Manages the message list (`self.history: List[Dict[str, str]]`), context pruning
 
 Wraps `systemd-run` for isolated command execution.
 
-**Constructor:** Takes `scratchpad_path` and optional `timeout` override. Initializes `approved_write_paths` with at least the current working directory.
+**Constructor:** Takes `scratchpad_path`, an optional `timeout` override, and optional `uuid`/`is_multimodal` flags. Initializes `approved_write_paths` with at least the current working directory.
 
 **`execute(script_content: str) -> (exit_code, output)`**: Writes the script to a temp file in `.bash_agent_tmp/`, then runs:
 ```
@@ -157,6 +157,7 @@ systemd-run --user --quiet --wait --collect --pipe \
 - `stderr` is merged into `stdout` via `subprocess.STDOUT` — output is always a single string
 - Timeout produces exit code 124 (matching `timeout` command convention)
 - The host `PATH` and `OPENROUTER_API_KEY` are forwarded into the sandbox environment
+- When `uuid` and `is_multimodal` are set, `BASH_AGENT_UUID` and `BASH_AGENT_MULTIMODAL` are also forwarded so tools like `vision.py` can emit attached-image payloads
 
 ---
 
@@ -236,8 +237,11 @@ Standalone CLI (`search` command). Indexes the project directory using OpenAI-co
 Standalone CLI (`vision` command). Sends images to an LLM for description/analysis.
 
 **Flow:**
-1. If the active model is multimodal (`agent.is_multimodal == True`), the image is intercepted in `agent.py`'s main loop before traditional tool parsing. The image is base64-encoded and injected as an `image_url` content block.
-2. Otherwise, `vision.py` runs as a standalone tool that sends the image to OpenRouter's hosted vision endpoint.
+1. The sandbox is launched with `BASH_AGENT_UUID` and `BASH_AGENT_MULTIMODAL` environment variables (set by `Sandbox` from `Agent` state).
+2. When `BASH_AGENT_MULTIMODAL=1` and a session UUID is present, `vision.py` emits a fenced base64 payload (`---START_ATTACHED_IMAGE-{uuid}---`) on stdout instead of calling the API.
+3. `agent.py:parse_and_execute()` scans all sandbox output for these fences, strips the base64 from the visible output/context, and collects them in `self._pending_multimodal_images`.
+4. If images were collected, the user message is built as a structured content array with `image_url` blocks; otherwise it stays plain text.
+5. When the env vars are absent (standalone CLI or text-only model), `vision.py` runs its original OpenRouter call to a hosted vision endpoint.
 
 **Key functions:**
 - `encode_image(path)` — opens image, saves as PNG, base64-encodes
@@ -348,7 +352,7 @@ To add a new tool (like `vision` or `search`):
    foo = "bash_agent.foo:main"
    ```
 3. **Update the system prompt** in `prompts.py` to document the new tool for the LLM
-4. **Add any special interception logic** in `agent.py:parse_and_execute()` if the tool needs access to the agent's state (like vision does for multimodal models)
+4. **Pass agent state via environment variables** (e.g., `Sandbox` already exposes `BASH_AGENT_UUID` and `BASH_AGENT_MULTIMODAL`); have your tool emit `---START_ATTACHED_IMAGE-{uuid}---` fenced payloads on stdout if it needs to inject multimodal content, and `agent.py` will parse and attach them automatically.
 5. **Add test/example** if applicable
 
 ---

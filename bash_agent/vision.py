@@ -55,6 +55,22 @@ def main():
     # Encode image
     base64_image = encode_image(args.image)
 
+    # --- MULTIMODAL SANDBOX MODE ---
+    # When executed inside the agent sandbox with BASH_AGENT_MULTIMODAL=1 and a
+    # session UUID, emit the image as a fenced base64 payload on stdout. The
+    # agent harness parses these fences and attaches the image to its next LLM
+    # request. No HTTP call to OpenRouter is needed.
+    is_sandbox_multimodal = os.environ.get("BASH_AGENT_MULTIMODAL") == "1"
+    session_uuid = os.environ.get("BASH_AGENT_UUID")
+    if is_sandbox_multimodal and session_uuid:
+        data_url = f"data:image/png;base64,{base64_image}"
+        print(f"---START_ATTACHED_IMAGE-{session_uuid}---")
+        print(data_url)
+        print(f"---END_ATTACHED_IMAGE-{session_uuid}---")
+        print(f"Image '{args.image}' attached to conversation context.")
+        sys.exit(0)
+
+    # --- TEXT-ONLY FALLBACK / STANDALONE CLI ---
     try:
         response = llm.create_chat_completion(
             model=MODEL_ID,

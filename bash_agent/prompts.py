@@ -17,11 +17,10 @@ def get_system_prompt(uuid: str, cwd: str, scratchpad_path: str, role_text: str 
         vision_section = """## VISION CAPABILITIES
 ================================================================
 
-Use the `vision` command to attach a PNG or JPEG image. The `vision` command is a SPECIAL COMMAND that must be the SOLE CONTENT of a bash block. Do not combine it with other code.
+Use the `vision` command to attach an image (*.png or *.jpg, under 2MP) to the conversation.
 - Usage: `vision <path_to_image>`
-- The image will be directly attached to your message for native multimodal processing.
-- Input image should be `*.png` or `*.jpg` format"
-- Input image should be less than 2MP
+- You can execute `vision` as part of standard bash scripts, loops, or pipelines (e.g., convert PDF to image with `pdftoppm` or crop with `imagemagick`, then run `vision image.png`).
+- Attached images will automatically be added to your multimodal context for the next turn.
 """
     else:
         vision_section = """## VISION CAPABILITIES

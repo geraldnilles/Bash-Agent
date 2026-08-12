@@ -8,14 +8,10 @@ import sys
 import time
 import uuid
 import select
-import shlex
-import base64
-import io
-from PIL import Image
 from typing import List, Dict
 
 from bash_agent.prompts import get_system_prompt
-from bash_agent.config import DEFAULT_MODEL, OUTPUT_LIMIT, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, CONTEXT_LIMIT, MAX_PIXELS, DEFAULT_BUDGET
+from bash_agent.config import DEFAULT_MODEL, OUTPUT_LIMIT, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, CONTEXT_LIMIT, DEFAULT_BUDGET
 from bash_agent.utils import cleanup_tmp_folder, copy_project_to_clipboard, get_clipboard_content, get_vim_prompt
 from bash_agent import llm
 from bash_agent.context import ContextManager
@@ -40,6 +36,11 @@ class Agent:
         
         self.context = ContextManager(self.uuid)
         
+        # Multimodal detection (must happen before Sandbox instantiation so the
+        # sandbox environment can expose BASH_AGENT_MULTIMODAL to vision.py)
+        self.is_multimodal = False
+        self._check_model_capabilities()
+
         # Handle Resume: attempt to restore previous session
         history_loaded = False
         if resume:
@@ -47,19 +48,18 @@ class Agent:
             if history_loaded:
                 # Re-bind components to the restored UUID
                 self.uuid = self.context.uuid
-                self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout)
+                self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout, uuid=self.uuid, is_multimodal=self.is_multimodal)
                 print(f"[System] Resumed previous session. Re-bound to UUID: {self.uuid}")
         
         if not history_loaded:
-            self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout)
+            self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout, uuid=self.uuid, is_multimodal=self.is_multimodal)
         
         # Reasoning effort and max tokens from config
         self.reasoning_effort = reasoning_effort if reasoning_effort is not None and reasoning_effort != 'default' else None
         self.max_tokens = max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS
 
-        # Multimodal detection for native vision command interception
-        self.is_multimodal = False
-        self._check_model_capabilities()
+        # Track attached images emitted by the sandbox (e.g., via the vision command)
+        self._pending_multimodal_images = []
         
         # Check for custom role definition in ROLE.md (only if not resuming)
         if not history_loaded:
@@ -202,73 +202,6 @@ class Agent:
                 # Exit the agent loop as requested
                 sys.exit(0)
                 
-            elif (script.startswith("vision ") or script == "vision") and self.is_multimodal:
-                # --- NATIVE MULTIMODAL INTERCEPTION ---
-                # Parse arguments safely
-                try:
-                    args = shlex.split(script)
-                except ValueError:
-                    args = script.split()
-                
-                # Extract prompt and image path
-                extracted_prompt = "Convert the image into Markdown text."
-                image_path = None
-                
-                if len(args) > 1:
-                    # Look for -p or --prompt flag
-                    i = 1
-                    while i < len(args):
-                        if args[i] in ("-p", "--prompt"):
-                            if i + 1 < len(args):
-                                extracted_prompt = args[i + 1]
-                                i += 2
-                            else:
-                                i += 1
-                        elif not args[i].startswith("-"):
-                            image_path = args[i]
-                            i += 1
-                        else:
-                            i += 1
-                
-                if image_path and os.path.exists(image_path):
-                    # Validate image size before encoding
-                    try:
-                        with Image.open(image_path) as img:
-                            width, height = img.size
-                            total_pixels = width * height
-                            if total_pixels > MAX_PIXELS:
-                                error_msg = f"Error: Image is too large ({width}x{height} = {total_pixels} pixels). Maximum allowed is {MAX_PIXELS} pixels."
-                                formatted_out = self._format_output(1, error_msg, cmd_type)
-                                print(f"\n{COLOR_OUT}{formatted_out}{COLOR_RESET}")
-                                combined_outputs.append(formatted_out)
-                                continue
-                            # Encode the image
-                            buf = io.BytesIO()
-                            img.save(buf, format="PNG")
-                            b64_image = base64.b64encode(buf.getvalue()).decode("utf-8")
-                        
-                        # Build multimodal payload
-                        combined_outputs.append(
-                                self._format_output(0, "The image you requested has been attached.", cmd_type)
-                        )
-                        
-                        # Store the multimodal payload for injection into the final user message
-                        self._pending_multimodal = {
-                            "url": f"data:image/png;base64,{b64_image}"
-                        }
-                        continue
-                        
-                    except Exception as e:
-                        formatted_out = self._format_output(1, f"[SYSTEM ERROR] Image encoding failed: {e}", cmd_type)
-                        print(f"\n{COLOR_OUT}{formatted_out}{COLOR_RESET}")
-                        combined_outputs.append(formatted_out)
-                        continue
-                else:
-                    error_msg = f"[SYSTEM ERROR] File not found: {image_path or 'No path provided'}"
-                    formatted_out = self._format_output(1, error_msg, cmd_type)
-                    print(f"\n{COLOR_OUT}{formatted_out}{COLOR_RESET}")
-                    combined_outputs.append(formatted_out)
-                    continue
                     
             # 2. Execute the script (bash or python)
             if cmd_type == "BASH":
@@ -276,7 +209,21 @@ class Agent:
             elif cmd_type == "PYTHON":
                 exit_code, output = self.sandbox.execute_python(script)
                 
-            formatted_out = self._format_output(exit_code, output, cmd_type)
+            # Check for attached image payloads emitted by the sandbox (e.g., vision.py)
+            img_pattern = rf"---START_ATTACHED_IMAGE-{self.uuid}---\s*(.*?)\s*---END_ATTACHED_IMAGE-{self.uuid}---"
+            image_matches = re.findall(img_pattern, output, re.DOTALL)
+            clean_output = output
+            if image_matches:
+                for b64_url in image_matches:
+                    self._pending_multimodal_images.append({"url": b64_url.strip()})
+                # Strip the image fences out of the output so base64 doesn't pollute context
+                clean_output = re.sub(img_pattern, "", output, flags=re.DOTALL).strip()
+                if not clean_output:
+                    clean_output = "[Image attached to conversation context.]"
+                else:
+                    clean_output = clean_output + "\n[Image attached to conversation context.]"
+            
+            formatted_out = self._format_output(exit_code, clean_output, cmd_type)
             print(f"\n{COLOR_OUT}{formatted_out}{COLOR_RESET}")
             combined_outputs.append(formatted_out)
 
@@ -292,15 +239,14 @@ class Agent:
                 # No changes to the scratchpad, just send the outputs.
                 final_user_message = "\n".join(combined_outputs)
             
-            # If a native multimodal payload was intercepted, convert final_user_message to a structured content array
-            pending_mm = getattr(self, "_pending_multimodal", None)
-            if pending_mm is not None:
-                structured_content = [
-                    {"type": "text", "text": final_user_message},
-                    {"type": "image_url", "image_url": pending_mm}
-                ]
+            # If images were attached by commands executed in the sandbox, build a
+            # structured content array so the LLM receives them as multimodal input.
+            if self._pending_multimodal_images:
+                structured_content = [{"type": "text", "text": final_user_message}]
+                for img_obj in self._pending_multimodal_images:
+                    structured_content.append({"type": "image_url", "image_url": img_obj})
                 self.context.add_message("user", structured_content)
-                self._pending_multimodal = None
+                self._pending_multimodal_images.clear()
             else:
                 self.context.add_message("user", final_user_message)
             
