@@ -32,7 +32,8 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 #DEFAULT_MODEL = "xiaomi/mimo-v2.5-pro"
 DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
+DEFAULT_MODEL = "deepseek/deepseek-v4-pro-0813"
+#DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 
 # Limits & Timeouts
 HISTORY_FILE = os.path.abspath(".bash_agent_tmp/history.json")
@@ -62,6 +63,7 @@ DEFAULT_MAX_TOKENS = 1024*8
 # Maps model slugs to approved list of providers
 MODEL_PROVIDERS = {
     "deepseek/deepseek-v4-pro": ["deepseek"],
+    "deepseek/deepseek-v4-pro-0813": ["deepseek"],
     "deepseek/deepseek-v4-flash-0731": ["deepseek"],
     "xiaomi/mimo-v2.5-pro": ["xiaomi"],
     #"moonshotai/kimi-k3": ["modal","baseten"]
