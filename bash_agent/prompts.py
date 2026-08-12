@@ -9,11 +9,13 @@ OBJECTIVE: Write a detailed step-by-step plan instructing a junior developer exa
 ## CHANGE REQUEST
 """
 
-def get_system_prompt(uuid: str, cwd: str, scratchpad_path: str, role_text: str = None, is_multimodal: bool = False) -> str:
+def get_system_prompt(uuid: str, cwd: str, scratchpad_path: str, role_text: str = None, multimodal_capabilities: list = None) -> str:
     if not role_text:
         role_text = "You are an expert, autonomous Linux Scripting Agent."
-    # Conditional vision section for multimodal vs text-only models
-    if is_multimodal:
+    # Conditional vision section: native image attach mode if the model
+    # supports image input, otherwise text-only fallback.
+    has_image_capability = "image" in (multimodal_capabilities or [])
+    if has_image_capability:
         vision_section = """## VISION CAPABILITIES
 ================================================================
 

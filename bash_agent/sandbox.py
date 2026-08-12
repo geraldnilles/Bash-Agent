@@ -4,11 +4,11 @@ import tempfile
 from bash_agent.config import BASH_TIMEOUT
 
 class Sandbox:
-    def __init__(self, scratchpad_path: str, timeout: int = None, uuid: str = None, is_multimodal: bool = False):
+    def __init__(self, scratchpad_path: str, timeout: int = None, uuid: str = None, multimodal_capabilities: list = None):
         self.approved_write_paths = [os.path.abspath(".")]
         self.timeout = timeout if timeout is not None else BASH_TIMEOUT
         self.uuid = uuid
-        self.is_multimodal = is_multimodal
+        self.multimodal_capabilities = multimodal_capabilities or []
         
     def request_write(self, path: str) -> bool:
         abs_path = os.path.abspath(path)
@@ -51,7 +51,7 @@ class Sandbox:
 
         if self.uuid:
             cmd.append(f"--property=Environment=BASH_AGENT_UUID={self.uuid}")
-        cmd.append(f"--property=Environment=BASH_AGENT_MULTIMODAL={'1' if self.is_multimodal else '0'}")
+        cmd.append(f"--property=Environment=BASH_AGENT_MULTIMODAL={','.join(self.multimodal_capabilities)}")
         
         for path in self.approved_write_paths:
             cmd.append(f"--property=ReadWritePaths={path}")
@@ -115,7 +115,7 @@ class Sandbox:
 
         if self.uuid:
             cmd.append(f"--property=Environment=BASH_AGENT_UUID={self.uuid}")
-        cmd.append(f"--property=Environment=BASH_AGENT_MULTIMODAL={'1' if self.is_multimodal else '0'}")
+        cmd.append(f"--property=Environment=BASH_AGENT_MULTIMODAL={','.join(self.multimodal_capabilities)}")
 
         for path in self.approved_write_paths:
             cmd.append(f"--property=ReadWritePaths={path}")

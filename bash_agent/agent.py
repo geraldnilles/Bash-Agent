@@ -38,7 +38,7 @@ class Agent:
         
         # Multimodal detection (must happen before Sandbox instantiation so the
         # sandbox environment can expose BASH_AGENT_MULTIMODAL to vision.py)
-        self.is_multimodal = False
+        self.multimodal_capabilities = None
         self._check_model_capabilities()
 
         # Handle Resume: attempt to restore previous session
@@ -48,11 +48,11 @@ class Agent:
             if history_loaded:
                 # Re-bind components to the restored UUID
                 self.uuid = self.context.uuid
-                self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout, uuid=self.uuid, is_multimodal=self.is_multimodal)
+                self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout, uuid=self.uuid, multimodal_capabilities=self.multimodal_capabilities)
                 print(f"[System] Resumed previous session. Re-bound to UUID: {self.uuid}")
         
         if not history_loaded:
-            self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout, uuid=self.uuid, is_multimodal=self.is_multimodal)
+            self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout, uuid=self.uuid, multimodal_capabilities=self.multimodal_capabilities)
         
         # Reasoning effort and max tokens from config
         self.reasoning_effort = reasoning_effort if reasoning_effort is not None and reasoning_effort != 'default' else None
@@ -72,7 +72,7 @@ class Agent:
             if os.path.exists(role_file_path):
                 with open(role_file_path, "r", encoding="utf-8") as f:
                     custom_role = f.read().strip()
-            system_prompt = get_system_prompt(self.uuid, os.path.abspath("."), self.context.scratchpad_path, role_text=custom_role, is_multimodal=self.is_multimodal)
+            system_prompt = get_system_prompt(self.uuid, os.path.abspath("."), self.context.scratchpad_path, role_text=custom_role, multimodal_capabilities=self.multimodal_capabilities)
             self.context.add_message("system", system_prompt)
         self.budget = budget if budget is not None else DEFAULT_BUDGET
         self.session_cost = 0.0
@@ -81,10 +81,10 @@ class Agent:
         self.last_step_provider = None
 
     def _check_model_capabilities(self):
-        """Query OpenRouter API to detect if the active model supports image input natively."""
+        """Query OpenRouter API to detect the active model's input modalities."""
         # All Gemini models are multimodal, no API call needed
         if llm.get_backend(self.model) == "gemini":
-            self.is_multimodal = True
+            self.multimodal_capabilities = ["image"]
             if self.debug:
                 print(f"[Debug] Gemini backend: multimodal assumed for model '{self.model}'.")
             return
@@ -96,15 +96,15 @@ class Agent:
                 if m.get("id") == self.model:
                     arch = m.get("architecture", {}) or {}
                     input_modalities = arch.get("input_modalities", [])
-                    if "image" in input_modalities:
-                        self.is_multimodal = True
+                    if input_modalities:
+                        self.multimodal_capabilities = list(input_modalities)
                         if self.debug:
-                            print(f"[Debug] Model '{self.model}' supports native image input. Vision interception enabled.")
+                            print(f"[Debug] Model '{self.model}' supports input modalities: {self.multimodal_capabilities}. Vision interception enabled.")
                     return
         except Exception as e:
             if self.debug:
                 print(f"[Debug] Model capability check failed: {e}. Defaulting to text-only.")
-            self.is_multimodal = False
+            self.multimodal_capabilities = None
     def parse_and_execute(self, response_text: str) -> tuple[bool, str]:
         # Extract both BASH and PYTHON blocks using a capture group
         pattern = rf"---START_(BASH|PYTHON)_COMMAND-{self.uuid}---\s*(.*?)\s*---END_\1_COMMAND-{self.uuid}---"

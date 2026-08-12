@@ -56,11 +56,14 @@ def main():
     base64_image = encode_image(args.image)
 
     # --- MULTIMODAL SANDBOX MODE ---
-    # When executed inside the agent sandbox with BASH_AGENT_MULTIMODAL=1 and a
-    # session UUID, emit the image as a fenced base64 payload on stdout. The
-    # agent harness parses these fences and attaches the image to its next LLM
+    # When executed inside the agent sandbox, BASH_AGENT_MULTIMODAL is a
+    # comma-separated list of the active model's input modalities (e.g.
+    # "image", "image,audio"). If it includes "image" and a session UUID is
+    # present, emit the image as a fenced base64 payload on stdout. The agent
+    # harness parses these fences and attaches the image to its next LLM
     # request. No HTTP call to OpenRouter is needed.
-    is_sandbox_multimodal = os.environ.get("BASH_AGENT_MULTIMODAL") == "1"
+    sandbox_modalities = os.environ.get("BASH_AGENT_MULTIMODAL", "")
+    is_sandbox_multimodal = "image" in [m.strip() for m in sandbox_modalities.split(",") if m.strip()]
     session_uuid = os.environ.get("BASH_AGENT_UUID")
     if is_sandbox_multimodal and session_uuid:
         data_url = f"data:image/png;base64,{base64_image}"

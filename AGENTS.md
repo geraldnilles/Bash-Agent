@@ -62,7 +62,7 @@ This is the heart of the project. The `Agent` class:
 | `__init__()` | Sets up UUID, model, sandbox, context, budget. Handles `--resume`. Checks multimodal capabilities. |
 | `run(initial_task)` | The main loop. Sends prompts, parses responses, executes commands. |
 | `parse_and_execute(agent_msg)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Executes them via `Sandbox.execute()` or `Sandbox.execute_python()`. Handles special commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` fences, strips base64 payloads, and collects them in `self._pending_multimodal_images` for structured multimodal messages. Returns `(executed: bool, feedback: str)`. |
-| `_check_model_capabilities()` | Queries OpenRouter API or checks for Gemini prefix to determine if the model supports native image input. Sets `self.is_multimodal`. |
+| `_check_model_capabilities()` | Queries OpenRouter API or checks for Gemini prefix to determine the model's supported input modalities. Sets `self.multimodal_capabilities` to a list like `["image"]`, or `None` for text-only models. |
 
 **The fenced-block regex pattern** (used in `parse_and_execute`):
 - Bash: `---START_BASH_COMMAND-{uuid}---\n(.*?)\n---END_BASH_COMMAND-{uuid}---`
@@ -135,7 +135,7 @@ Manages the message list (`self.history: List[Dict[str, str]]`), context pruning
 
 Wraps `systemd-run` for isolated command execution.
 
-**Constructor:** Takes `scratchpad_path`, an optional `timeout` override, and optional `uuid`/`is_multimodal` flags. Initializes `approved_write_paths` with at least the current working directory.
+**Constructor:** Takes `scratchpad_path`, an optional `timeout` override, and optional `uuid`/`multimodal_capabilities` flags. Initializes `approved_write_paths` with at least the current working directory.
 
 **`execute(script_content: str) -> (exit_code, output)`**: Writes the script to a temp file in `.bash_agent_tmp/`, then runs:
 ```
@@ -157,7 +157,7 @@ systemd-run --user --quiet --wait --collect --pipe \
 - `stderr` is merged into `stdout` via `subprocess.STDOUT` — output is always a single string
 - Timeout produces exit code 124 (matching `timeout` command convention)
 - The host `PATH` and `OPENROUTER_API_KEY` are forwarded into the sandbox environment
-- When `uuid` and `is_multimodal` are set, `BASH_AGENT_UUID` and `BASH_AGENT_MULTIMODAL` are also forwarded so tools like `vision.py` can emit attached-image payloads
+- When `uuid` is set, `BASH_AGENT_UUID` is forwarded. `BASH_AGENT_MULTIMODAL` is set to a comma-separated list of the model's input modalities (e.g. `image` or `image,audio`, empty string when text-only) so tools like `vision.py` can emit attached-image payloads
 
 ---
 
@@ -185,10 +185,10 @@ Abstraction layer over OpenRouter and Gemini backends. Normalizes payloads and c
 
 Generates the massive system prompt that defines the agent's behavior. Key function:
 
-**`get_system_prompt(uuid, cwd, scratchpad_path, role_text, is_multimodal)`**:
+**`get_system_prompt(uuid, cwd, scratchpad_path, role_text, multimodal_capabilities)`**:
 - Returns a formatted string with all protocol rules
 - Injects the session UUID, working directory, current date
-- Conditionally includes multimodal instructions if `is_multimodal=True`
+- Conditionally includes native-image attach instructions when `"image"` is in `multimodal_capabilities` (e.g. `["image"]`); otherwise includes the text-only vision fallback instructions
 - Conditionally includes `role_text` if a `ROLE.md` file exists
 - Includes rules for: execution blocks, output metadata, special commands, file editing, semantic search, vision, transcription, PDF processing, scratchpad usage, workflow & error recovery
 
@@ -238,7 +238,7 @@ Standalone CLI (`vision` command). Sends images to an LLM for description/analys
 
 **Flow:**
 1. The sandbox is launched with `BASH_AGENT_UUID` and `BASH_AGENT_MULTIMODAL` environment variables (set by `Sandbox` from `Agent` state).
-2. When `BASH_AGENT_MULTIMODAL=1` and a session UUID is present, `vision.py` emits a fenced base64 payload (`---START_ATTACHED_IMAGE-{uuid}---`) on stdout instead of calling the API.
+2. When `BASH_AGENT_MULTIMODAL` includes `image` and a session UUID is present, `vision.py` emits a fenced base64 payload (`---START_ATTACHED_IMAGE-{uuid}---`) on stdout instead of calling the API.
 3. `agent.py:parse_and_execute()` scans all sandbox output for these fences, strips the base64 from the visible output/context, and collects them in `self._pending_multimodal_images`.
 4. If images were collected, the user message is built as a structured content array with `image_url` blocks; otherwise it stays plain text.
 5. When the env vars are absent (standalone CLI or text-only model), `vision.py` runs its original OpenRouter call to a hosted vision endpoint.
@@ -364,7 +364,7 @@ To add a new tool (like `vision` or `search`):
 - **Context pruning off-by-one**: The system prompt is at index 0. Pruning iterates from index 1. Don't change this without understanding the trimming loop.
 - **Gemini cost patching**: `llm.py` monkey-patches `response.model_dump`. If the OpenAI library changes its response object structure, this will break silently (cost will be None).
 - **Scratchpad hash caching**: `ContextManager.last_scratchpad_hash` prevents re-injecting unchanged scratchpad. If you modify scratchpad injection logic, reset this hash or you'll get stale behavior.
-- **Multimodal content format**: When `is_multimodal=True`, the agent constructs content as a list of content blocks `[{"type": "text", ...}, {"type": "image_url", ...}]` instead of a plain string. The `_content_length()` method and pruning logic must handle both formats.
+- **Multimodal content format**: When `multimodal_capabilities` includes `"image"`, images attached via `vision.py` cause the agent to construct content as a list of content blocks `[{"type": "text", ...}, {"type": "image_url", ...}]` instead of a plain string. The `_content_length()` method and pruning logic must handle both formats.
 
 ---
 
