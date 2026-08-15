@@ -138,10 +138,10 @@ class Agent:
                     f"[bash commands go here]\n"
                     f"---END_BASH_COMMAND-{self.uuid}---\n\n"
                     "Or provide some python code: \n"
-                    f"---START_BASH_COMMAND-{self.uuid}---\n"
-                    f"[bash commands go here]\n"
-                    f"---END_BASH_COMMAND-{self.uuid}---\n\n"
-                    "Please provide a bash or python block to execute to procced, or put 'exit' in a bash block to end the session."
+                    f"---START_PYTHON_COMMAND-{self.uuid}---\n"
+                    f"[python code goes here]\n"
+                    f"---END_PYTHON_COMMAND-{self.uuid}---\n\n"
+                    "Please provide a bash or python block to execute to proceed, or put 'exit' in a bash block to end the session."
                     )
             return False, default_msg
             
