@@ -61,7 +61,7 @@ This is the heart of the project. The `Agent` class:
 |--------|---------|
 | `__init__()` | Sets up UUID, model, sandbox, context, budget. Handles `--resume`. Checks multimodal capabilities. |
 | `run(initial_task)` | The main loop. Sends prompts, parses responses, executes commands. |
-| `parse_and_execute(agent_msg)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Executes them via `Sandbox.execute()` or `Sandbox.execute_python()`. Handles special commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` fences, strips base64 payloads, and collects them in `self._pending_multimodal_images` for structured multimodal messages. Returns `(executed: bool, feedback: str)`. |
+| `parse_and_execute(agent_msg)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Executes up to `MAX_CODE_BLOCKS` (default 5) of them in order via `Sandbox.execute()` or `Sandbox.execute_python()`; if more are present, appends a cutoff WARNING to the returned feedback. Handles special commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` fences, strips base64 payloads, and collects them in `self._pending_multimodal_images` for structured multimodal messages. Returns `(executed: bool, feedback: str)`. |
 | `_check_model_capabilities()` | Queries OpenRouter API or checks for Gemini prefix to determine the model's supported input modalities. Sets `self.multimodal_capabilities` to a list like `["image"]`, or `None` for text-only models. |
 
 **The fenced-block regex pattern** (used in `parse_and_execute`):
@@ -95,6 +95,7 @@ All tunable constants. **Modify this file to change defaults.**
 | `CONTEXT_LIMIT` | 256,000 chars | `context.py` — triggers pruning |
 | `SCRATCHPAD_LIMIT` | 80,000 chars | `context.py` — scratchpad truncation warning |
 | `OUTPUT_LIMIT` | 10,000 chars | `agent.py` — output block truncation |
+| `MAX_CODE_BLOCKS` | 5 | `agent.py` — max code blocks executed per LLM response |
 | `BASH_TIMEOUT` | 60 seconds | `sandbox.py` — subprocess timeout |
 | `DEFAULT_BUDGET` | 0.10 USD | `agent.py` — session cost limit |
 | `DEFAULT_REASONING_EFFORT` | `"low"` | `agent.py` — reasoning effort for OpenRouter |

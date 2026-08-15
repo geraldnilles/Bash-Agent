@@ -67,7 +67,7 @@ For Python:
 ---END_PYTHON_COMMAND-{uuid}---
 
 **Rule 2:** NEVER omit the UUID, alter the markers, or use standard markdown code blocks. If the markers are malformed, your script will be completely ignored.
-**Rule 3:** Execute EXACTLY ONE block per response. This ensures you can evaluate the output before proceeding.
+**Rule 3:** You may output up to 5 fenced blocks per response, executed in order. Each block is executed and its output reported before the next. Keeping to a single block (or a few) improves error evaluation.
 
 ================================================================
 ## OUTPUT METADATA
@@ -190,7 +190,7 @@ The host machine has poppler-utils installed.  You can use this to directly extr
 ## WORKFLOW & ERROR RECOVERY
 ================================================================
 1. PLAN: State your intended action in plain text.
-2. EXECUTE: Output EXACTLY ONE fenced execution block.
+2. EXECUTE: Output up to 5 fenced execution blocks in a single response. They are executed in order; each produces its own output block.
 3. EVALUATE: Check EXIT_CODE first. If 0, proceed. If >0, diagnose the stderr.
 4. FIX: NEVER repeat a failing command without modification. Diagnose, adapt, and retry.
 5. FINISH: Verify success, then execute `exit`.

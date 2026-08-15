@@ -11,7 +11,7 @@ import select
 from typing import List, Dict
 
 from bash_agent.prompts import get_system_prompt
-from bash_agent.config import DEFAULT_MODEL, OUTPUT_LIMIT, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, CONTEXT_LIMIT, DEFAULT_BUDGET
+from bash_agent.config import DEFAULT_MODEL, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, CONTEXT_LIMIT, DEFAULT_BUDGET
 from bash_agent.utils import cleanup_tmp_folder, copy_project_to_clipboard, get_clipboard_content, get_vim_prompt
 from bash_agent import llm
 from bash_agent.context import ContextManager
@@ -147,10 +147,10 @@ class Agent:
             
         combined_outputs = []
         
-        for i, match in enumerate(matches):
-            if i > 0:
-                # Only execute the first block, skip any additional ones
-                continue
+        total_blocks = len(matches)
+        blocks_to_execute = matches[:MAX_CODE_BLOCKS]
+        
+        for i, match in enumerate(blocks_to_execute):
             cmd_type = match.group(1) # "BASH" or "PYTHON"
             script = match.group(2).strip()
             
@@ -226,6 +226,17 @@ class Agent:
             formatted_out = self._format_output(exit_code, clean_output, cmd_type)
             print(f"\n{COLOR_OUT}{formatted_out}{COLOR_RESET}")
             combined_outputs.append(formatted_out)
+
+        # Warn if more blocks were provided than the maximum allowed
+        if total_blocks > MAX_CODE_BLOCKS:
+            cutoff_warning = (
+                f"⚠️ [SYSTEM WARNING] Only the first {MAX_CODE_BLOCKS} of {total_blocks} "
+                f"code block(s) were executed. The remaining {total_blocks - MAX_CODE_BLOCKS} "
+                f"block(s) were skipped. Please limit responses to at most {MAX_CODE_BLOCKS} "
+                f"code block(s) per message."
+            )
+            print(f"\n{COLOR_OUT}{cutoff_warning}{COLOR_RESET}")
+            combined_outputs.append(cutoff_warning)
 
         # 3. Compile the final response to feed back to the LLM
         if combined_outputs:
