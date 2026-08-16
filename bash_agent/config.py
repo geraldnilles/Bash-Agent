@@ -31,9 +31,9 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 #DEFAULT_MODEL = "google/gemini-3.5-flash"
 
 #DEFAULT_MODEL = "xiaomi/mimo-v2.5-pro"
-DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
+#DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
 DEFAULT_MODEL = "deepseek/deepseek-v4-pro-0813"
-#DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
+DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 
 # Limits & Timeouts
 HISTORY_FILE = os.path.abspath(".bash_agent_tmp/history.json")
