@@ -105,164 +105,165 @@ class Agent:
             if self.debug:
                 print(f"[Debug] Model capability check failed: {e}. Defaulting to text-only.")
             self.multimodal_capabilities = None
-    def parse_and_execute(self, response_text: str) -> tuple[bool, str]:
-        # Extract both BASH and PYTHON blocks using a capture group
+    def _extract_blocks(self, response_text: str) -> tuple[list[tuple[str, str]], str | None]:
+        """
+        Extracts valid (cmd_type, script) blocks from the LLM response.
+        Returns (blocks, None) on success, or ([], warning_message) if parsing fails.
+        """
         pattern = rf"---START_(BASH|PYTHON)_COMMAND-{self.uuid}---\s*(.*?)\s*---END_\1_COMMAND-{self.uuid}---"
         matches = list(re.finditer(pattern, response_text, re.DOTALL))
-        
-        if not matches:
-            # Fallback: Check for mangled blocks using a relaxed regex
-            relaxed_pattern = r"---START_(BASH|PYTHON)_COMMAND[^\n]*\n(.*?)\n?---END_\1_COMMAND"
-            relaxed_matches = list(re.finditer(relaxed_pattern, response_text, re.DOTALL))
-            
-            if relaxed_matches:
-                cmd_type = relaxed_matches[0].group(1)
-                script = relaxed_matches[0].group(2).strip()
-                
-                warning_msg = (
-                    f"⚠️ [SYSTEM WARNING] Malformed command block detected. The UUID was missing or incorrect.\n"
-                    f"The current session UUID is: {self.uuid}\n\n"
-                    f"Did you mean to execute this?\n\n"
-                    f"---START_{cmd_type}_COMMAND-{self.uuid}---\n"
-                    f"{script}\n"
-                    f"---END_{cmd_type}_COMMAND-{self.uuid}---\n\n"
-                    f"Please re-evaluate and output the exact, correctly formatted block above to execute it."
-                )
-                return False, warning_msg
-            
-            # No blocks found at all
-            default_msg = (
-                    f"⚠️ [SYSTEM WARNING] You did not provide any code block.\n"
-                    "Either provide a bash command:\n"
-                    f"---START_BASH_COMMAND-{self.uuid}---\n"
-                    f"[bash commands go here]\n"
-                    f"---END_BASH_COMMAND-{self.uuid}---\n\n"
-                    "Or provide some python code: \n"
-                    f"---START_PYTHON_COMMAND-{self.uuid}---\n"
-                    f"[python code goes here]\n"
-                    f"---END_PYTHON_COMMAND-{self.uuid}---\n\n"
-                    "Please provide a bash or python block to execute to proceed, or put 'exit' in a bash block to end the session."
-                    )
-            return False, default_msg
-            
+        if matches:
+            return [(m.group(1), m.group(2).strip()) for m in matches], None
+
+        # Relaxed pattern fallback for diagnosing malformed UUIDs
+        relaxed_pattern = r"---START_(BASH|PYTHON)_COMMAND[^\n]*\n(.*?)\n?---END_\1_COMMAND"
+        relaxed_matches = list(re.finditer(relaxed_pattern, response_text, re.DOTALL))
+        if relaxed_matches:
+            cmd_type = relaxed_matches[0].group(1)
+            script = relaxed_matches[0].group(2).strip()
+            warning = (
+                f"⚠️ [SYSTEM WARNING] Malformed command block detected. The UUID was missing or incorrect.\n"
+                f"The current session UUID is: {self.uuid}\n\n"
+                f"Did you mean to execute this?\n\n"
+                f"---START_{cmd_type}_COMMAND-{self.uuid}---\n"
+                f"{script}\n"
+                f"---END_{cmd_type}_COMMAND-{self.uuid}---\n\n"
+                f"Please re-evaluate and output the exact, correctly formatted block above to execute it."
+            )
+            return [], warning
+
+        default_msg = (
+            f"⚠️ [SYSTEM WARNING] You did not provide any code block.\n"
+            f"Either provide a bash command:\n"
+            f"---START_BASH_COMMAND-{self.uuid}---\n"
+            f"[bash commands go here]\n"
+            f"---END_BASH_COMMAND-{self.uuid}---\n\n"
+            f"Or provide some python code: \n"
+            f"---START_PYTHON_COMMAND-{self.uuid}---\n"
+            f"[python code goes here]\n"
+            f"---END_PYTHON_COMMAND-{self.uuid}---\n\n"
+            f"Please provide a bash or python block to execute to proceed, or put 'exit' in a bash block to end the session."
+        )
+        return [], default_msg
+
+    def _handle_special_command(self, cmd_type: str, script: str) -> tuple[bool, str]:
+        """
+        Checks if a script matches an intercepted agent command.
+        Returns (handled, formatted_output).
+        """
+        if script.startswith("request-write "):
+            path = script.split(" ", 1)[1]
+            success, msg = self.sandbox.request_write(path)
+            exit_code = 0 if success else 1
+            return True, self._format_output(exit_code, msg, cmd_type)
+
+        if script.startswith("ask-user "):
+            question = script.split(" ", 1)[1]
+            print(f"\n{COLOR_OUT}[Question to User] {question}{COLOR_RESET}")
+            try:
+                answer = input("[Human Response]: ")
+            except EOFError:
+                answer = "[User provided no response / EOF]"
+            return True, self._format_output(0, answer, cmd_type)
+
+        if script == "exit":
+            print("\n[System] Agent has initiated exit.")
+            self._log_debug_history()
+            sys.exit(0)
+
+        if script == "reset":
+            print("\n[System] Agent resetting context...")
+            self.context.history = [self.context.history[0]]
+            return True, self._format_output(0, "Context history has been reset.", cmd_type)
+
+        if script.startswith("copy-to-clipboard "):
+            file_paths = script.split(" ", 1)[1]
+            print(f"\n[System] Agent requested to copy files to clipboard: {file_paths}")
+            copy_project_to_clipboard(file_paths)
+            print("[System] Files copied to clipboard successfully. Exiting session.")
+            self._log_debug_history()
+            sys.exit(0)
+
+        return False, ""
+
+    def _execute_script(self, cmd_type: str, script: str) -> str:
+        """
+        Executes a bash or python script inside the sandbox, captures attached images,
+        and returns formatted output.
+        """
+        if cmd_type == "BASH":
+            exit_code, raw_output = self.sandbox.execute(script)
+        else:
+            exit_code, raw_output = self.sandbox.execute_python(script)
+
+        # Process and strip any attached image payloads
+        img_pattern = rf"---START_ATTACHED_IMAGE-{self.uuid}---\s*(.*?)\s*---END_ATTACHED_IMAGE-{self.uuid}---"
+        image_matches = re.findall(img_pattern, raw_output, re.DOTALL)
+        for b64_url in image_matches:
+            self._pending_multimodal_images.append({"url": b64_url.strip()})
+
+        clean_output = re.sub(img_pattern, "", raw_output, flags=re.DOTALL).strip()
+        if image_matches:
+            clean_output = f"{clean_output}\n[Image attached to conversation context.]".strip()
+
+        return self._format_output(exit_code, clean_output, cmd_type)
+
+    def _commit_execution_feedback(self, combined_outputs: list[str]) -> None:
+        """
+        Bundles output blocks and scratchpad updates into a message and appends to context.
+        """
+        if not combined_outputs:
+            return
+
+        scratchpad_block = self.context.get_scratchpad_block()
+        if scratchpad_block:
+            self.context.remove_old_scratchpads()
+            final_text = f"{scratchpad_block}\n" + "\n".join(combined_outputs)
+        else:
+            final_text = "\n".join(combined_outputs)
+
+        if self._pending_multimodal_images:
+            structured_content = [{"type": "text", "text": final_text}]
+            for img_obj in self._pending_multimodal_images:
+                structured_content.append({"type": "image_url", "image_url": img_obj})
+            self.context.add_message("user", structured_content)
+            self._pending_multimodal_images.clear()
+        else:
+            self.context.add_message("user", final_text)
+
+    def parse_and_execute(self, response_text: str) -> tuple[bool, str]:
+        """
+        Parses LLM response, executes code or special commands, and records output.
+        Returns (executed: bool, feedback: str).
+        """
+        blocks, error_feedback = self._extract_blocks(response_text)
+        if error_feedback:
+            return False, error_feedback
+
         combined_outputs = []
-        
-        total_blocks = len(matches)
-        blocks_to_execute = matches[:MAX_CODE_BLOCKS]
-        
-        for i, match in enumerate(blocks_to_execute):
-            cmd_type = match.group(1) # "BASH" or "PYTHON"
-            script = match.group(2).strip()
-            
-            # 1. Check for Special Commands (Must be the only thing in the block)
-            if script.startswith("request-write "):
-                path = script.split(" ", 1)[1]
-                success, msg = self.sandbox.request_write(path)
-                exit_code = 0 if success else 1
-                formatted_out = self._format_output(exit_code, msg, cmd_type)
-                print(f"\n{COLOR_OUT}{formatted_out}{COLOR_RESET}")
-                combined_outputs.append(formatted_out)
-                continue
-                
-            elif script.startswith("ask-user "):
-                question = script.split(" ", 1)[1]
-                print(f"\n{COLOR_OUT}[Question to User] {question}{COLOR_RESET}")
-                try:
-                    answer = input("[Human Response]: ")
-                except EOFError:
-                    answer = "[User provided no response / EOF]"
-                formatted_out = self._format_output(0, answer, cmd_type)
-                print(f"\n{COLOR_OUT}{formatted_out}{COLOR_RESET}")
-                combined_outputs.append(formatted_out)
-                continue
-                
-            elif script == "exit":
-                print("\n[System] Agent has initiated exit.")
-                self._log_debug_history()
-                sys.exit(0)
-                
-            elif script == "reset":
-                print("\n[System] Agent resetting context...")
-                self.context.history = [self.context.history[0]]
-                formatted_out = self._format_output(0, "Context history has been reset.", cmd_type)
-                print(f"\n{COLOR_OUT}{formatted_out}{COLOR_RESET}")
-                combined_outputs.append(formatted_out)
-                continue
+        blocks_to_execute = blocks[:MAX_CODE_BLOCKS]
 
-            elif script.startswith("copy-to-clipboard "):
-                # Extract the comma-separated file paths
-                file_paths = script.split(" ", 1)[1]
-                
-                print(f"\n[System] Agent requested to copy files to clipboard: {file_paths}")
-                
-                # Call the existing function
-                copy_project_to_clipboard(file_paths)
-                
-                print("[System] Files copied to clipboard successfully. Exiting session.")
-                self._log_debug_history()
+        for cmd_type, script in blocks_to_execute:
+            handled, special_output = self._handle_special_command(cmd_type, script)
+            if handled:
+                output = special_output
+            else:
+                output = self._execute_script(cmd_type, script)
 
-                # Exit the agent loop as requested
-                sys.exit(0)
-                
-                    
-            # 2. Execute the script (bash or python)
-            if cmd_type == "BASH":
-                exit_code, output = self.sandbox.execute(script)
-            elif cmd_type == "PYTHON":
-                exit_code, output = self.sandbox.execute_python(script)
-                
-            # Check for attached image payloads emitted by the sandbox (e.g., vision.py)
-            img_pattern = rf"---START_ATTACHED_IMAGE-{self.uuid}---\s*(.*?)\s*---END_ATTACHED_IMAGE-{self.uuid}---"
-            image_matches = re.findall(img_pattern, output, re.DOTALL)
-            clean_output = output
-            if image_matches:
-                for b64_url in image_matches:
-                    self._pending_multimodal_images.append({"url": b64_url.strip()})
-                # Strip the image fences out of the output so base64 doesn't pollute context
-                clean_output = re.sub(img_pattern, "", output, flags=re.DOTALL).strip()
-                if not clean_output:
-                    clean_output = "[Image attached to conversation context.]"
-                else:
-                    clean_output = clean_output + "\n[Image attached to conversation context.]"
-            
-            formatted_out = self._format_output(exit_code, clean_output, cmd_type)
-            print(f"\n{COLOR_OUT}{formatted_out}{COLOR_RESET}")
-            combined_outputs.append(formatted_out)
+            print(f"\n{COLOR_OUT}{output}{COLOR_RESET}")
+            combined_outputs.append(output)
 
-        # Warn if more blocks were provided than the maximum allowed
-        if total_blocks > MAX_CODE_BLOCKS:
+        if len(blocks) > MAX_CODE_BLOCKS:
+            skipped = len(blocks) - MAX_CODE_BLOCKS
             cutoff_warning = (
-                f"⚠️ [SYSTEM WARNING] Only the first {MAX_CODE_BLOCKS} of {total_blocks} "
-                f"code block(s) were executed. The remaining {total_blocks - MAX_CODE_BLOCKS} "
-                f"block(s) were skipped. Please limit responses to at most {MAX_CODE_BLOCKS} "
-                f"code block(s) per message."
+                f"⚠️ [SYSTEM WARNING] Only the first {MAX_CODE_BLOCKS} of {len(blocks)} "
+                f"code block(s) were executed. The remaining {skipped} block(s) were skipped. "
+                f"Please limit responses to at most {MAX_CODE_BLOCKS} code block(s) per message."
             )
             print(f"\n{COLOR_OUT}{cutoff_warning}{COLOR_RESET}")
             combined_outputs.append(cutoff_warning)
 
-        # 3. Compile the final response to feed back to the LLM
-        if combined_outputs:
-            scratchpad_block = self.context.get_scratchpad_block()
-            
-            if scratchpad_block:
-                # A change was detected! Scrub the old ones, then append the new one.
-                self.context.remove_old_scratchpads()
-                final_user_message = scratchpad_block + "\n" + "\n".join(combined_outputs)
-            else:
-                # No changes to the scratchpad, just send the outputs.
-                final_user_message = "\n".join(combined_outputs)
-            
-            # If images were attached by commands executed in the sandbox, build a
-            # structured content array so the LLM receives them as multimodal input.
-            if self._pending_multimodal_images:
-                structured_content = [{"type": "text", "text": final_user_message}]
-                for img_obj in self._pending_multimodal_images:
-                    structured_content.append({"type": "image_url", "image_url": img_obj})
-                self.context.add_message("user", structured_content)
-                self._pending_multimodal_images.clear()
-            else:
-                self.context.add_message("user", final_user_message)
-            
+        self._commit_execution_feedback(combined_outputs)
         return True, ""
 
     def _format_output(self, exit_code: int, output: str, cmd_type: str = "BASH") -> str:

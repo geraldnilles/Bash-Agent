@@ -61,10 +61,14 @@ This is the heart of the project. The `Agent` class:
 |--------|---------|
 | `__init__()` | Sets up UUID, model, sandbox, context, budget. Handles `--resume`. Checks multimodal capabilities. |
 | `run(initial_task)` | The main loop. Sends prompts, parses responses, executes commands. |
-| `parse_and_execute(agent_msg)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Executes up to `MAX_CODE_BLOCKS` (default 1) of them in order via `Sandbox.execute()` or `Sandbox.execute_python()`; if more are present, appends a cutoff WARNING to the returned feedback. Handles special commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` fences, strips base64 payloads, and collects them in `self._pending_multimodal_images` for structured multimodal messages. Returns `(executed: bool, feedback: str)`. |
+| `parse_and_execute(agent_msg)` | Coordination pipeline: extracts blocks via `_extract_blocks()`, dispatches each to `_handle_special_command()` or `_execute_script()`, enforces `MAX_CODE_BLOCKS` limit, and commits results via `_commit_execution_feedback()`. Returns `(executed: bool, feedback: str)`. |
+| `_extract_blocks(response_text)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Returns `(blocks, None)` on success, or `([], warning_message)` when no blocks or malformed UUID fences are found. |
+| `_handle_special_command(cmd_type, script)` | Intercepts built-in agent commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Returns `(handled: bool, formatted_output: str)`. Commands that terminate the session (`exit`, `copy-to-clipboard`) call `sys.exit()` in-process. |
+| `_execute_script(cmd_type, script)` | Executes a bash or python script via `Sandbox.execute()` / `Sandbox.execute_python()`. Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` fences, strips base64 payloads, collects them in `self._pending_multimodal_images`, and returns formatted output. |
+| `_commit_execution_feedback(outputs)` | Bundles output blocks and scratchpad updates into a user message and appends to context. Builds structured multimodal content when `self._pending_multimodal_images` is non-empty. |
 | `_check_model_capabilities()` | Queries OpenRouter API or checks for Gemini prefix to determine the model's supported input modalities. Sets `self.multimodal_capabilities` to a list like `["image"]`, or `None` for text-only models. |
 
-**The fenced-block regex pattern** (used in `parse_and_execute`):
+**The fenced-block regex pattern** (used in `_extract_blocks`):
 - Bash: `---START_BASH_COMMAND-{uuid}---\n(.*?)\n---END_BASH_COMMAND-{uuid}---`
 - Python: `---START_PYTHON_COMMAND-{uuid}---\n(.*?)\n---END_PYTHON_COMMAND-{uuid}---`
 
@@ -77,7 +81,7 @@ The agent strips leading/trailing whitespace from the captured code before execu
 ---END_BASH_OUTPUT-{uuid}---
 ```
 
-**Special commands** must be the SOLE content of a bash block. They are intercepted in `parse_and_execute()` BEFORE sandbox execution. See the system prompt in `prompts.py` for the complete list.
+**Special commands** must be the SOLE content of a bash block. They are intercepted in `_handle_special_command()` BEFORE sandbox execution. See the system prompt in `prompts.py` for the complete list.
 
 **Error handling:** On API failure, the agent uses exponential backoff (2^n seconds). During the wait, the user can type `2x` + Enter to double `max_tokens` and retry immediately. This is handled via `select.select()` on stdin.
 
@@ -240,7 +244,7 @@ Standalone CLI (`vision` command). Sends images to an LLM for description/analys
 **Flow:**
 1. The sandbox is launched with `BASH_AGENT_UUID` and `BASH_AGENT_MULTIMODAL` environment variables (set by `Sandbox` from `Agent` state).
 2. When `BASH_AGENT_MULTIMODAL` includes `image` and a session UUID is present, `vision.py` emits a fenced base64 payload (`---START_ATTACHED_IMAGE-{uuid}---`) on stdout instead of calling the API.
-3. `agent.py:parse_and_execute()` scans all sandbox output for these fences, strips the base64 from the visible output/context, and collects them in `self._pending_multimodal_images`.
+3. `agent.py:_execute_script()` scans all sandbox output for these fences, strips the base64 from the visible output/context, and collects them in `self._pending_multimodal_images`.
 4. If images were collected, the user message is built as a structured content array with `image_url` blocks; otherwise it stays plain text.
 5. When the env vars are absent (standalone CLI or text-only model), `vision.py` runs its original OpenRouter call to a hosted vision endpoint.
 
@@ -292,9 +296,11 @@ Agent.run() loop
     │
     ├─► Agent.parse_and_execute(response)
     │       │
-    │       ├─► Sandbox.execute(bash_code)      ──► systemd-run sandbox
-    │       ├─► Sandbox.execute_python(py_code) ──► systemd-run sandbox
-    │       ├─► Special commands (exit, etc.)   ──► Handled in-process
+    │       ├─► _extract_blocks()               ──► Parse UUID-fenced blocks
+    │       ├─► _handle_special_command()       ──► exit, reset, request-write, ask-user, copy-to-clipboard
+    │       ├─► _execute_script()               ──► Sandbox.execute / execute_python
+    │       │       └─► image fences extracted  ──► _pending_multimodal_images
+    │       ├─► _commit_execution_feedback()    ──► ContextManager.add_message (text or multimodal)
     │       │
     │       ▼ (output blocks injected into conversation)
     │
@@ -312,7 +318,7 @@ Agent.run() loop
 
 ### 1. UUID-Fenced Protocol
 - The session UUID is generated once at `Agent.__init__()` and embedded in ALL fenced block markers
-- Regex patterns in `parse_and_execute()` must match the exact UUID
+- Regex patterns in `_extract_blocks()` must match the exact UUID
 - The UUID is persisted in `history.json` for session resumption
 
 ### 2. File Paths
@@ -360,7 +366,7 @@ To add a new tool (like `vision` or `search`):
 
 ## Common Pitfalls When Editing
 
-- **Regex escaping in `parse_and_execute()`**: The fenced block patterns use raw strings (`r"..."`). Be careful with the UUID interpolation — it's a literal string, not a regex group.
+- **Regex escaping in `_extract_blocks()`**: The fenced block patterns use raw strings (`r"..."`). Be careful with the UUID interpolation — it's a literal string, not a regex group.
 - **`systemd-run` permissions**: Adding `--property=` flags can break isolation. Always test with a command that tries to write to `/etc` to confirm sandboxing.
 - **Context pruning off-by-one**: The system prompt is at index 0. Pruning iterates from index 1. Don't change this without understanding the trimming loop.
 - **Gemini cost patching**: `llm.py` monkey-patches `response.model_dump`. If the OpenAI library changes its response object structure, this will break silently (cost will be None).
