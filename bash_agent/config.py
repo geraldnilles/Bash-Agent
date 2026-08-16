@@ -41,7 +41,7 @@ CONTEXT_LIMIT = 256000
 SCRATCHPAD_LIMIT = 80000
 OUTPUT_LIMIT = 10000
 MAX_PIXELS = 2_000_000  # Maximum image resolution (2MP) for vision/multimodal features
-MAX_CODE_BLOCKS = 5      # Maximum number of code blocks executed per LLM response
+MAX_CODE_BLOCKS = 1      # Maximum number of code blocks executed per LLM response
 BASH_TIMEOUT = 60 # seconds
 
 # Session Budget
