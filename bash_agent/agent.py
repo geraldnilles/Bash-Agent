@@ -178,6 +178,7 @@ class Agent:
                 
             elif script == "exit":
                 print("\n[System] Agent has initiated exit.")
+                self._log_debug_history()
                 sys.exit(0)
                 
             elif script == "reset":
@@ -198,7 +199,8 @@ class Agent:
                 copy_project_to_clipboard(file_paths)
                 
                 print("[System] Files copied to clipboard successfully. Exiting session.")
-                
+                self._log_debug_history()
+
                 # Exit the agent loop as requested
                 sys.exit(0)
                 
@@ -279,149 +281,199 @@ class Agent:
     def _log_debug_history(self):
         if not self.debug:
             return
-            
-        with open(os.path.abspath("/tmp/bash_agent_log.txt"), "w") as f:
+
+        log_path = os.path.abspath("/tmp/bash_agent_log.txt")
+        tmp_path = log_path + ".tmp"
+
+        with open(tmp_path, "w", encoding="utf-8") as f:
             f.write("=== BASH AGENT CONVERSATION LOG ===\n")
             f.write(f"Agent UUID: {self.uuid}\n")
             f.write("===================================\n\n")
-            
+
             for msg in self.context.history:
                 role = msg.get("role", "UNKNOWN").upper()
-                content_text = msg.get("content") or ""
-                
+                content = msg.get("content") or ""
+
                 f.write(f"[{role}]\n")
                 f.write("-" * 40 + "\n")
-                f.write(f"{content_text}\n")
+
+                if isinstance(content, str):
+                    f.write(content + "\n")
+                elif isinstance(content, list):
+                    # Multimodal structured content (text + image_url blocks)
+                    for block in content:
+                        if not isinstance(block, dict):
+                            f.write(str(block) + "\n")
+                            continue
+                        block_type = block.get("type")
+                        if block_type == "text":
+                            f.write(block.get("text", "") + "\n")
+                        elif block_type == "image_url":
+                            f.write("[Image payload]\n")
+                        else:
+                            f.write(f"[{block_type} payload]\n")
+                else:
+                    f.write(str(content) + "\n")
+
                 f.write("=" * 80 + "\n\n")
+
+        # Write atomically so a crash mid-write never corrupts the log
+        os.replace(tmp_path, log_path)
+
+    def _get_llm_response(self) -> str:
+        """Call the LLM with the current history, applying retry/backoff and
+        extracting cost metadata. Returns the sanitized assistant message."""
+        retry_count = 0
+        response = None
+        while True:
+            try:
+                response = llm.create_chat_completion(
+                    model=self.model,
+                    messages=self.context.history,
+                    max_tokens=self.max_tokens,
+                    reasoning_effort=self.reasoning_effort
+                )
+
+                if not response.choices:
+                    raise ValueError("Empty choices in response.")
+                choice = response.choices[0]
+                agent_msg = choice.message.content
+                if choice.finish_reason == "length":
+                    raise ValueError(f"Output truncated due to token limit (finish_reason: length).")
+
+                if agent_msg is None:
+                    # Safely attempt to extract reasoning text if it exists
+                    reasoning_text = getattr(choice.message, "reasoning", None)
+
+                    # Check if the model naturally finished AND has reasoning text
+                    if choice.finish_reason == "stop" and reasoning_text:
+                        if self.debug:
+                            print("[Debug] API returned None for content. Falling back to reasoning text.")
+                        agent_msg = reasoning_text
+                    else:
+                        raise ValueError("API returned None for message content (likely a safety filter or model glitch).")
+
+                # Safely extract cost, accumulate
+                try:
+                    resp_dict = response.model_dump()
+                    step_cost = resp_dict.get("usage", {}).get("cost", 0.0)
+
+                    # OpenRouter sometimes returns None if the cost isn't calculated yet
+                    if step_cost is None:
+                        step_cost = 0.0
+                    input_tokens = resp_dict.get("usage", {}).get("prompt_tokens", 0)
+                    self.last_step_input_tokens = input_tokens
+
+                    self.last_step_cost = step_cost
+                    self.session_cost += step_cost
+                    self.last_step_provider = resp_dict.get("provider", {}).get("name") if isinstance(resp_dict.get("provider"), dict) else resp_dict.get("provider")
+                except Exception as e:
+                    if self.debug:
+                        print(f"[Debug] Failed to parse cost metadata: {e}")
+
+                return agent_msg
+
+            except Exception as e:
+                if response is not None:
+                    print(f"\n[INVALID RESPONSE] Failed to extract message: {e}")
+                    try:
+                        print(f"[Response JSON]:\n{response.model_dump_json(indent=2)}")
+                    except Exception:
+                        print(f"[Response JSON]:\n{response}")
+                else:
+                    print(f"\n[API ERROR] {e}")
+
+                retry_delay = 2 ** (retry_count + 1)
+                print(f"Retrying in {retry_delay} seconds... (Type '2x' and press Enter to double max_tokens to {self.max_tokens * 2})")
+
+                start_wait = time.time()
+                waited_fully = True
+                while time.time() - start_wait < retry_delay:
+                    # Check stdin for data for 0.5 seconds without blocking
+                    ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+                    if ready:
+                        user_input = sys.stdin.readline().strip().lower()
+                        if user_input == "2x":
+                            self.max_tokens = int(self.max_tokens * 2)
+                            print(f"\n[System] Max tokens doubled to {self.max_tokens}! Retrying immediately...")
+                            waited_fully = False
+                            break  # Exit the wait loop and retry immediately
+                if waited_fully:
+                    print(f"Retry delay ({retry_delay}s) complete. Retrying...")
+                retry_count += 1
+
+    def _colorize_commands(self, text: str) -> str:
+        """Apply terminal ANSI colors to BASH and PYTHON command blocks for display."""
+        display_msg = re.sub(
+            rf"(---START_BASH_COMMAND-{self.uuid}---\n.*?\n---END_BASH_COMMAND-{self.uuid}---)",
+            rf"{COLOR_CMD}\1{COLOR_RESET}",
+            text,
+            flags=re.DOTALL
+        )
+        display_msg = re.sub(
+            rf"(---START_PYTHON_COMMAND-{self.uuid}---\n.*?\n---END_PYTHON_COMMAND-{self.uuid}---)",
+            rf"{COLOR_PY_CMD}\1{COLOR_RESET}",
+            display_msg,
+            flags=re.DOTALL
+        )
+        return display_msg
+
+    def _handle_turn_budget_and_stats(self) -> bool:
+        """Report context/cost stats after a turn and enforce the session budget.
+        Returns True if the session should continue, False if the budget was exceeded."""
+        if self.last_step_cost <= 0.0:
+            return True
+
+        # Calculate current context size
+        current_context_chars = sum(ContextManager._content_length(m.get("content", "")) for m in self.context.history)
+        context_percent = (current_context_chars / CONTEXT_LIMIT) * 100
+
+        print(f"{COLOR_COST}[Session Stats] Context: {context_percent:.1f}% | This request: ${self.last_step_cost:.3f} ({self.last_step_input_tokens} tokens) | Total: ${self.session_cost:.2f} | Provider: {self.last_step_provider or 'N/A'}{COLOR_RESET}")
+
+        if self.budget > 0 and self.session_cost >= self.budget:
+            print(f"\n[Budget] Session cost ${self.session_cost:.2f} has reached the budget of ${self.budget:.2f}. Ending session.")
+            return False
+
+        self.last_step_cost = 0.0
+        self.last_step_input_tokens = 0
+        self.last_step_provider = None
+        return True
 
     def run(self, initial_task: str = None):
         print(f"Agent initialized with UUID: {self.uuid}")
         print("Provide a task to begin.")
-        
+
         task = initial_task if initial_task else get_vim_prompt()
-        
+
         # Inject scratchpad into the very first message
         scratchpad_block = self.context.get_scratchpad_block()
         if scratchpad_block:
             task = scratchpad_block + "\n" + task
-        
+
         self.context.add_message("user", task)
+        self.context.save_history()
+        self._log_debug_history()
+
         try:
-            retry_count = 0
             while True:
                 print("[Agent is thinking...]")
-                self._log_debug_history()
-                response = None
-                try:
-                    response = llm.create_chat_completion(
-                        model=self.model,
-                        messages=self.context.history,
-                        max_tokens=self.max_tokens,
-                        reasoning_effort=self.reasoning_effort
-                    )
-                    
-                    if not response.choices:
-                        raise ValueError("Empty choices in response.")
-                    choice = response.choices[0]
-                    agent_msg = choice.message.content
-                    if choice.finish_reason == "length":
-                        raise ValueError(f"Output truncated due to token limit (finish_reason: length).")
+                agent_msg = self._get_llm_response()
 
-                    if agent_msg is None:
-                        # Safely attempt to extract reasoning text if it exists
-                        reasoning_text = getattr(choice.message, "reasoning", None)
-
-                        # Check if the model naturally finished AND has reasoning text
-                        if choice.finish_reason == "stop" and reasoning_text:
-                            if self.debug:
-                                print("[Debug] API returned None for content. Falling back to reasoning text.")
-                            agent_msg = reasoning_text
-                        else:
-                            raise ValueError("API returned None for message content (likely a safety filter or model glitch).")
-                    # Safely extract cost, accumulate, and print
-                    try:
-                        resp_dict = response.model_dump()
-                        step_cost = resp_dict.get("usage", {}).get("cost", 0.0)
-                        
-                        # OpenRouter sometimes returns None if the cost isn't calculated yet
-                        if step_cost is None:
-                            step_cost = 0.0
-                        input_tokens = resp_dict.get("usage", {}).get("prompt_tokens", 0)
-                        self.last_step_input_tokens = input_tokens
-                            
-                        self.last_step_cost = step_cost
-                        self.session_cost += step_cost
-                        self.last_step_provider = resp_dict.get("provider", {}).get("name") if isinstance(resp_dict.get("provider"), dict) else resp_dict.get("provider")
-                    except Exception as e:
-                        if self.debug:
-                            print(f"[Debug] Failed to parse cost metadata: {e}")
-                except Exception as e:
-                    if response is not None:
-                        print(f"\n[INVALID RESPONSE] Failed to extract message: {e}")
-                        try:
-                            print(f"[Response JSON]:\n{response.model_dump_json(indent=2)}")
-                        except Exception:
-                            print(f"[Response JSON]:\n{response}")
-                    else:
-                        print(f"\n[API ERROR] {e}")
-
-                        
-                    retry_delay = 2 ** (retry_count + 1)
-                    print(f"Retrying in {retry_delay} seconds... (Type '2x' and press Enter to double max_tokens to {self.max_tokens * 2})")
-                    
-                    start_wait = time.time()
-                    waited_fully = True
-                    while time.time() - start_wait < retry_delay:
-                        # Check stdin for data for 0.5 seconds without blocking
-                        ready, _, _ = select.select([sys.stdin], [], [], 0.5)
-                        if ready:
-                            user_input = sys.stdin.readline().strip().lower()
-                            if user_input == "2x":
-                                self.max_tokens = int(self.max_tokens * 2)
-                                print(f"\n[System] Max tokens doubled to {self.max_tokens}! Retrying immediately...")
-                                waited_fully = False
-                                break # Exit the wait loop and retry immediately
-                    if waited_fully:
-                        print(f"Retry delay ({retry_delay}s) complete. Retrying...")
-                    retry_count += 1
-                    continue
-                
-                # Apply color to the BASH_COMMAND blocks for the console print
-                display_msg = re.sub(
-                    rf"(---START_BASH_COMMAND-{self.uuid}---\n.*?\n---END_BASH_COMMAND-{self.uuid}---)",
-                    rf"{COLOR_CMD}\1{COLOR_RESET}",
-                    agent_msg,
-                    flags=re.DOTALL
-                )
-                # Apply color to the PYTHON_COMMAND blocks for the console print
-                display_msg = re.sub(
-                    rf"(---START_PYTHON_COMMAND-{self.uuid}---\n.*?\n---END_PYTHON_COMMAND-{self.uuid}---)",
-                    rf"{COLOR_PY_CMD}\1{COLOR_RESET}",
-                    display_msg,
-                    flags=re.DOTALL
-                )
-                print(f"\n[Agent]:\n{display_msg}")
-                
+                print(f"\n[Agent]:\n{self._colorize_commands(agent_msg)}")
                 self.context.add_message("assistant", agent_msg)
                 self.context.save_history()
-                
+
                 executed, feedback_msg = self.parse_and_execute(agent_msg)
-                if self.last_step_cost > 0.0:
-                    # Calculate current context size
-                    current_context_chars = sum(ContextManager._content_length(m.get("content", "")) for m in self.context.history)
-                    context_percent = (current_context_chars / CONTEXT_LIMIT) * 100
-                    
-                    print(f"{COLOR_COST}[Session Stats] Context: {context_percent:.1f}% | This request: ${self.last_step_cost:.3f} ({self.last_step_input_tokens} tokens) | Total: ${self.session_cost:.2f} | Provider: {self.last_step_provider or "N/A"}{COLOR_RESET}")
-                    if self.budget > 0 and self.session_cost >= self.budget:
-                        print(f"\n[Budget] Session cost ${self.session_cost:.2f} has reached the budget of ${self.budget:.2f}. Ending session.")
-                        break
-                    self.last_step_cost = 0.0
-                    self.last_step_input_tokens = 0
-                    self.last_step_provider = None
                 if not executed:
                     self.context.add_message("user", feedback_msg)
                     self.context.save_history()
+
+                self._log_debug_history()
+
+                if not self._handle_turn_budget_and_stats():
+                    break
+
         except KeyboardInterrupt:
+            self._log_debug_history()
             print("\n[System] Session terminated by user (Ctrl+C). Exiting.")
             sys.exit(0)
-

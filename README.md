@@ -90,6 +90,14 @@ bagent --resume
 bagent --commit
 ```
 
+### Debuging
+
+Check if the sandbox is still running after an unexpected crash:
+
+```bash
+systemctl --user list-units --type=service --state=running 'run-*.service'
+```
+
 ---
 
 ## How It Works (In 60 Seconds)
