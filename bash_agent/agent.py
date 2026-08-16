@@ -321,12 +321,71 @@ class Agent:
         # Write atomically so a crash mid-write never corrupts the log
         os.replace(tmp_path, log_path)
 
+    def _extract_message_content(self, choice) -> str:
+        """Extract and validate textual content or fallback reasoning from a response choice."""
+        if choice.finish_reason == "length":
+            raise ValueError("Output truncated due to token limit (finish_reason: length).")
+
+        agent_msg = choice.message.content
+        if agent_msg is not None:
+            return agent_msg
+
+        # Safely attempt to extract reasoning text if content is None
+        reasoning_text = getattr(choice.message, "reasoning", None)
+        if choice.finish_reason == "stop" and reasoning_text:
+            if self.debug:
+                print("[Debug] API returned None for content. Falling back to reasoning text.")
+            return reasoning_text
+
+        raise ValueError("API returned None for message content (likely a safety filter or model glitch).")
+
+    def _record_response_usage(self, response) -> None:
+        """Extract cost, token count, and provider metadata from the API response."""
+        try:
+            resp_dict = response.model_dump()
+            usage = resp_dict.get("usage", {}) or {}
+
+            step_cost = usage.get("cost", 0.0)
+            if step_cost is None:
+                step_cost = 0.0
+
+            self.last_step_input_tokens = usage.get("prompt_tokens", 0) or 0
+            self.last_step_cost = step_cost
+            self.session_cost += step_cost
+
+            provider_info = resp_dict.get("provider")
+            if isinstance(provider_info, dict):
+                self.last_step_provider = provider_info.get("name")
+            else:
+                self.last_step_provider = provider_info
+        except Exception as e:
+            if self.debug:
+                print(f"[Debug] Failed to parse cost metadata: {e}")
+
+    def _handle_retry_backoff(self, retry_count: int) -> None:
+        """Wait with exponential backoff while allowing interactive token limit doubling."""
+        retry_delay = 2 ** (retry_count + 1)
+        print(f"Retrying in {retry_delay} seconds... (Type '2x' and press Enter to double max_tokens to {self.max_tokens * 2})")
+
+        start_wait = time.time()
+        waited_fully = True
+        while time.time() - start_wait < retry_delay:
+            ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+            if ready:
+                user_input = sys.stdin.readline().strip().lower()
+                if user_input == "2x":
+                    self.max_tokens = int(self.max_tokens * 2)
+                    print(f"\n[System] Max tokens doubled to {self.max_tokens}! Retrying immediately...")
+                    waited_fully = False
+                    break
+        if waited_fully:
+            print(f"Retry delay ({retry_delay}s) complete. Retrying...")
+
     def _get_llm_response(self) -> str:
-        """Call the LLM with the current history, applying retry/backoff and
-        extracting cost metadata. Returns the sanitized assistant message."""
+        """Call the LLM with the current history, applying retry/backoff and extracting cost metadata."""
         retry_count = 0
-        response = None
         while True:
+            response = None
             try:
                 response = llm.create_chat_completion(
                     model=self.model,
@@ -335,43 +394,11 @@ class Agent:
                     reasoning_effort=self.reasoning_effort
                 )
 
-                if not response.choices:
+                if not response or not response.choices:
                     raise ValueError("Empty choices in response.")
-                choice = response.choices[0]
-                agent_msg = choice.message.content
-                if choice.finish_reason == "length":
-                    raise ValueError(f"Output truncated due to token limit (finish_reason: length).")
 
-                if agent_msg is None:
-                    # Safely attempt to extract reasoning text if it exists
-                    reasoning_text = getattr(choice.message, "reasoning", None)
-
-                    # Check if the model naturally finished AND has reasoning text
-                    if choice.finish_reason == "stop" and reasoning_text:
-                        if self.debug:
-                            print("[Debug] API returned None for content. Falling back to reasoning text.")
-                        agent_msg = reasoning_text
-                    else:
-                        raise ValueError("API returned None for message content (likely a safety filter or model glitch).")
-
-                # Safely extract cost, accumulate
-                try:
-                    resp_dict = response.model_dump()
-                    step_cost = resp_dict.get("usage", {}).get("cost", 0.0)
-
-                    # OpenRouter sometimes returns None if the cost isn't calculated yet
-                    if step_cost is None:
-                        step_cost = 0.0
-                    input_tokens = resp_dict.get("usage", {}).get("prompt_tokens", 0)
-                    self.last_step_input_tokens = input_tokens
-
-                    self.last_step_cost = step_cost
-                    self.session_cost += step_cost
-                    self.last_step_provider = resp_dict.get("provider", {}).get("name") if isinstance(resp_dict.get("provider"), dict) else resp_dict.get("provider")
-                except Exception as e:
-                    if self.debug:
-                        print(f"[Debug] Failed to parse cost metadata: {e}")
-
+                agent_msg = self._extract_message_content(response.choices[0])
+                self._record_response_usage(response)
                 return agent_msg
 
             except Exception as e:
@@ -384,23 +411,7 @@ class Agent:
                 else:
                     print(f"\n[API ERROR] {e}")
 
-                retry_delay = 2 ** (retry_count + 1)
-                print(f"Retrying in {retry_delay} seconds... (Type '2x' and press Enter to double max_tokens to {self.max_tokens * 2})")
-
-                start_wait = time.time()
-                waited_fully = True
-                while time.time() - start_wait < retry_delay:
-                    # Check stdin for data for 0.5 seconds without blocking
-                    ready, _, _ = select.select([sys.stdin], [], [], 0.5)
-                    if ready:
-                        user_input = sys.stdin.readline().strip().lower()
-                        if user_input == "2x":
-                            self.max_tokens = int(self.max_tokens * 2)
-                            print(f"\n[System] Max tokens doubled to {self.max_tokens}! Retrying immediately...")
-                            waited_fully = False
-                            break  # Exit the wait loop and retry immediately
-                if waited_fully:
-                    print(f"Retry delay ({retry_delay}s) complete. Retrying...")
+                self._handle_retry_backoff(retry_count)
                 retry_count += 1
 
     def _colorize_commands(self, text: str) -> str:
