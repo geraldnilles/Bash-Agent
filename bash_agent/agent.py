@@ -17,6 +17,44 @@ from bash_agent import llm
 from bash_agent.context import ContextManager
 from bash_agent.sandbox import Sandbox
 
+_TMP_ERROR_PATTERN = re.compile(
+    r"("
+    r"\bno such file\b"
+    r"|\bnot found\b"
+    r"|\bcannot (open|find|access|locate)\b"
+    r"|\bcould not (open|find|access|locate)\b"
+    r"|\bunable to (open|find|access|locate)\b"
+    r"|\bfailed to (open|find|access|locate|read|write)\b"
+    r"|\bdoes not exist\b"
+    r")",
+    re.IGNORECASE,
+)
+
+def _build_tmp_file_warning(exit_code: int, output: str) -> str | None:
+    """
+    Detect a failed command that referenced a /tmp/ path and return a reminder
+    that /tmp/ is wiped after every turn, or None when no reminder is needed.
+
+    The heuristic only fires when ALL of the following are true:
+      * the command exited non-zero (failure)
+      * the output references /tmp/
+      * the output contains a familiar file-not-found style error phrase
+    """
+    if exit_code == 0:
+        return None
+    if "/tmp/" not in output:
+        return None
+    if not _TMP_ERROR_PATTERN.search(output):
+        return None
+
+    return (
+        "\u26a0\ufe0f [SYSTEM WARNING] The command failed because it referenced a file under /tmp/\n"
+        "The /tmp/ folder is refreshed after every turn on THIS host and does not persist between turns.\n"
+        "If you need a temporary file that lasts the whole session, write it into the "
+        ".bash_agent_tmp/ folder in the project directory instead."
+    )
+
+
 class Agent:
     def __init__(self, keep_tmp=False, debug=False, model=None, reasoning_effort=None, max_tokens=None, timeout=None, resume=False, budget=None):
         self.uuid = str(uuid.uuid4())
@@ -206,7 +244,15 @@ class Agent:
         if image_matches:
             clean_output = f"{clean_output}\n[Image attached to conversation context.]".strip()
 
-        return self._format_output(exit_code, clean_output, cmd_type)
+        formatted_output = self._format_output(exit_code, clean_output, cmd_type)
+
+        # Remind the model that /tmp/ is wiped every turn when a failed command
+        # references a missing file under /tmp/ (see ROADMAP 'Add /tmp/ warning').
+        tmp_warning = _build_tmp_file_warning(exit_code, clean_output)
+        if tmp_warning:
+            formatted_output = f"{formatted_output}\n\n{tmp_warning}"
+
+        return formatted_output
 
     def _commit_execution_feedback(self, combined_outputs: list[str]) -> None:
         """
