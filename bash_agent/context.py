@@ -67,6 +67,16 @@ class ContextManager:
                 msg = self.history[i]
                 original_content = msg["content"]
 
+                # Multimodal (image-containing) messages can't be block-trimmed because
+                # the regex operations below require a string (a list would raise
+                # TypeError). Drop the whole message to free the image data; the
+                # surrounding conversation makes it obvious what happened.
+                if not isinstance(msg["content"], str):
+                    self.history.pop(i)
+                    trimmed_something = True
+                    print("[System] Dropped an old image-bearing message to save context.")
+                    break
+
                 # 1. Try to delete the oldest BASH_OUTPUT first (biggest space savings)
                 pattern_out = rf"(---START_(?:BASH|PYTHON)_OUTPUT-[^-]+-[^-]+-{self.uuid}---\s*)(.*?)(\s*---END_(?:BASH|PYTHON)_OUTPUT-{self.uuid}---)"
                 if re.search(pattern_out, msg["content"], re.DOTALL):

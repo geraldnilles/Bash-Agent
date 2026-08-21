@@ -124,6 +124,7 @@ Manages the message list (`self.history: List[Dict[str, str]]`), context pruning
 
 1. **Message storage:** `add_message(role, content)` appends and triggers pruning.
 2. **Context pruning** (`_trim_context_if_needed()`): When total characters exceed `CONTEXT_LIMIT`, incrementally trims the oldest messages down to 80% of the limit:
+   - Multimodal messages (list content, e.g. `image_url` blocks) cannot be block-trimmed because the regex operations require strings (a list would raise `TypeError`). They are dropped entirely with no breadcrumb marker; surrounding context makes it obvious what happened.
    - Step 1: Delete the content of old `BASH_OUTPUT`/`PYTHON_OUTPUT` blocks entirely (replaced with `[BASH_OUTPUT DELETED TO SAVE CONTEXT]`)
    - Step 2: Truncate old `BASH_COMMAND`/`PYTHON_COMMAND` blocks to 80 chars
    - Step 3 (failsafe): Drop the oldest message entirely
