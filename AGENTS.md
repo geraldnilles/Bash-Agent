@@ -85,6 +85,11 @@ The agent strips leading/trailing whitespace from the captured code before execu
 
 **Error handling:** On API failure, the agent uses exponential backoff (2^n seconds). During the wait, the user can type `2x` + Enter to double `max_tokens` and retry immediately. This is handled via `select.select()` on stdin.
 
+When `finish_reason == "length"` occurs and `choice.message.reasoning` contains partial thoughts, the agent performs a three-step recovery:
+1. Temporarily appends `<thinking>{reasoning}</thinking>` as an assistant message and an instruction prompt as a user message.
+2. Issues a follow-up completion request with `reasoning_effort="none"`.
+3. Uses a `try...finally` block to pop both temporary recovery messages from `self.context.history` before returning the final response to the main loop.
+
 **Budget tracking:** After each LLM call, cost is extracted from the API response (OpenRouter provides it natively; Gemini cost is calculated manually in `llm.py`). When `session_cost >= budget`, the loop exits.
 
 ---

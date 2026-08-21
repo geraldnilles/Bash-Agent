@@ -367,6 +367,13 @@ class Agent:
         # Write atomically so a crash mid-write never corrupts the log
         os.replace(tmp_path, log_path)
 
+    def _extract_reasoning_content(self, choice) -> str | None:
+        """Extract reasoning text from response choice if available."""
+        reasoning = getattr(choice.message, "reasoning", None)
+        if not reasoning and hasattr(choice.message, "model_extra") and choice.message.model_extra:
+            reasoning = choice.message.model_extra.get("reasoning")
+        return reasoning.strip() if reasoning and isinstance(reasoning, str) else None
+
     def _extract_message_content(self, choice) -> str:
         """Extract and validate textual content or fallback reasoning from a response choice."""
         if choice.finish_reason == "length":
@@ -377,7 +384,7 @@ class Agent:
             return agent_msg
 
         # Safely attempt to extract reasoning text if content is None
-        reasoning_text = getattr(choice.message, "reasoning", None)
+        reasoning_text = self._extract_reasoning_content(choice)
         if choice.finish_reason == "stop" and reasoning_text:
             if self.debug:
                 print("[Debug] API returned None for content. Falling back to reasoning text.")
@@ -428,7 +435,7 @@ class Agent:
             print(f"Retry delay ({retry_delay}s) complete. Retrying...")
 
     def _get_llm_response(self) -> str:
-        """Call the LLM with the current history, applying retry/backoff and extracting cost metadata."""
+        """Call the LLM with the current history, applying retry/backoff, thinking recovery, and extracting cost metadata."""
         retry_count = 0
         while True:
             response = None
@@ -443,7 +450,51 @@ class Agent:
                 if not response or not response.choices:
                     raise ValueError("Empty choices in response.")
 
-                agent_msg = self._extract_message_content(response.choices[0])
+                choice = response.choices[0]
+
+                # Handle thinking token cutoff recovery
+                if choice.finish_reason == "length":
+                    reasoning_text = self._extract_reasoning_content(choice)
+                    if reasoning_text:
+                        self._record_response_usage(response)
+                        print(f"\n{COLOR_OUT}[System] Model exceeded max tokens during reasoning. Ingesting thinking tokens ({len(reasoning_text)} chars) and requesting immediate answer...{COLOR_RESET}")
+
+                        # 1. Inject temporary thinking and warning prompt
+                        self.context.add_message("assistant", f"<thinking>\n{reasoning_text}\n</thinking>")
+                        self.context.add_message(
+                            "user",
+                            "⚠️ [SYSTEM WARNING] You exceeded your max token budget during reasoning. "
+                            "Review your previous thinking above and provide your immediate final response "
+                            "and command execution blocks without restarting or repeating chain-of-thought reasoning."
+                        )
+
+                        try:
+                            # 2. Call LLM for the direct response with reasoning disabled
+                            recovery_response = llm.create_chat_completion(
+                                model=self.model,
+                                messages=self.context.history,
+                                max_tokens=self.max_tokens,
+                                # Keep the same reasoning effort, some models require a minimum level of reasoning.
+                                reasoning_effort="none" # self.reasoning_effort
+                            )
+
+                            if not recovery_response or not recovery_response.choices:
+                                raise ValueError("Empty choices in recovery response.")
+
+                            recovery_choice = recovery_response.choices[0]
+                            agent_msg = self._extract_message_content(recovery_choice)
+                            self._record_response_usage(recovery_response)
+                            return agent_msg
+
+                        finally:
+                            # 3. Always remove the temporary assistant and user messages
+                            if len(self.context.history) >= 3:
+                                self.context.history.pop()  # Remove user warning
+                                self.context.history.pop()  # Remove assistant thinking
+                    else:
+                        raise ValueError("Output truncated due to token limit (finish_reason: length).")
+
+                agent_msg = self._extract_message_content(choice)
                 self._record_response_usage(response)
                 return agent_msg
 

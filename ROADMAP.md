@@ -6,8 +6,6 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
 
 ## In Progress / High Priority
 
-- **Thinking token recovery on length termination:** When a model has a tight output token budget and exceeds it, capture the thinking tokens, add them to the assistant message, disable thinking for the next turn, and retry with a clean slate.
-    - We will also like want to remove those thinking tokens from the use message after the next turn.
 - **Context limit warning:** Add a warning message to the LLM when approaching the context limit, suggesting the agent store important notes in the SCRATCHPAD.md before history is pruned.
 - **Improved error recovery:** Better handling of API failures, model glitches, and safety filters with more graceful fallback strategies.
 
@@ -41,6 +39,7 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
 ---
 
 ## ✅ Completed
+- **Thinking token recovery on length termination** — captures reasoning tokens on `finish_reason: length`, injects `<thinking>` block and immediate answer prompt, then cleans up temporary messages from history upon completion.
 
 - **Add a budget for a particular session in $USD** — implemented via `--budget` / `-b` flag and `DEFAULT_BUDGET` config
 - **Add dict of providers for a given model slug in config.py** — implemented via `MODEL_PROVIDERS` dict in `config.py`
