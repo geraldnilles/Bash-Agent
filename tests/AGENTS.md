@@ -12,7 +12,8 @@ the authoritative inventory in `TEST_PLAN.md` (T-00 … T-41):
   and the mocking/seam strategy; its Progress Summary tracks implementation state
 - `helpers/fakes.py` — shared offline fakes (T-00a–d): `chdir_tmp`,
   fenced-block builders, `FakeLLMClient`, `FakeSandbox`, `_make_agent()`
-- `unit/` — fast pure-logic tests (e.g. `test_agent_blocks.py` for Group 1)
+- `unit/` — fast pure-logic tests (e.g. `test_agent_blocks.py` for Group 1,
+  `test_agent_special_commands.py` for Group 2)
 - `integration/` — real processes, still offline (systemd-run, fake-LLM loop)
 
 ## Non-negotiable rules

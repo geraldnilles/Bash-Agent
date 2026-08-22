@@ -21,14 +21,14 @@
 |---|---|---|
 | 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 4 |
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
-| 2. Special Commands — `agent._handle_special_command` | 6 | 0 |
+| 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 0 |
 | 4. Context Management — `context.ContextManager` | 5 | 0 |
 | 5. LLM Adapter — `llm.py` | 4 | 0 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **9** |
+| **Total** | **45** | **15** |
 
 ---
 
@@ -155,7 +155,7 @@ mismatched pairs.
 
 ### T-06 — `exit` terminates the process (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Asserts `SystemExit(0)` is raised when a bash block contains exactly `exit`.
 Uses `assertRaises(SystemExit)` around `parse_and_execute`; also asserts the
@@ -164,7 +164,7 @@ a FakeSandbox to prove interception happens *before* any real execution.
 
 ### T-07 — `reset` clears history but preserves system prompt (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Seeds `context.history` with `[system, user, assistant]`, invokes the reset
 command through `parse_and_execute`, and asserts exactly one message remains
@@ -174,7 +174,7 @@ raising `IndexError`.
 
 ### T-08 — `request-write` approval flows (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Three sub-cases driven by patching `builtins.input`: approval appends the
 absolute path to `sandbox.approved_write_paths` and returns formatted output
@@ -184,7 +184,7 @@ production code already relies on (`input()`), no other seams needed.
 
 ### T-09 — `ask-user` captures stdin answer (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Patches `input` to return a canned answer and asserts the question was printed
 and the answer comes back wrapped in a proper OUTPUT block. The EOF branch
@@ -194,7 +194,7 @@ runs non-interactively in CI-like environments.
 
 ### T-10 — `copy-to-clipboard` exits after copying (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Patches `bash_agent.agent.copy_project_to_clipboard` (imported into the agent
 namespace) with a recorder, asserts it received the comma-separated file list
@@ -203,7 +203,7 @@ before termination and that arbitrary file lists pass through unmodified.
 
 ### T-11 — Non-special scripts fall through to execution (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 A bash block containing `echo hi` must return `handled=False` from
 `_handle_special_command` and be routed to the sandbox. Guards against a
