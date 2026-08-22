@@ -3,6 +3,7 @@ import re
 import hashlib
 from typing import List, Dict, Union
 import json
+import sys
 from bash_agent.config import CONTEXT_LIMIT, SCRATCHPAD_LIMIT, HISTORY_FILE
 
 class ContextManager:
@@ -158,9 +159,10 @@ class ContextManager:
         
         visible = 100
         error_msg = ""
-        if len(content) > SCRATCHPAD_LIMIT:
+        original_len = len(content)
+        if original_len > SCRATCHPAD_LIMIT:
             content = content[:SCRATCHPAD_LIMIT]
-            visible = int((SCRATCHPAD_LIMIT / len(content)) * 100)
+            visible = int((SCRATCHPAD_LIMIT / original_len) * 100)
             error_msg = "\n[ERROR]: Scratchpad truncated. Please clean it up using bash commands."
             
         return f"\n---START_SCRATCHPAD.md-VISIBLE_{visible}%-{self.uuid}---\n{content}\n---END_SCRATCHPAD.md-{self.uuid}---{error_msg}\n"

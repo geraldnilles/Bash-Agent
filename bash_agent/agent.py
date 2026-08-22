@@ -211,7 +211,8 @@ class Agent:
 
         if script == "reset":
             print("\n[System] Agent resetting context...")
-            self.context.history = [self.context.history[0]]
+            # Preserve the system prompt (index 0); tolerate an empty history.
+            self.context.history = [self.context.history[0]] if self.context.history else []
             return True, self._format_output(0, "Context history has been reset.", cmd_type)
 
         if script.startswith("copy-to-clipboard "):
