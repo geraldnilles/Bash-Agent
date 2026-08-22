@@ -5,7 +5,8 @@
 > what is done. Helpers (`helpers/fakes.py`), the protocol-parsing group
 > (`unit/test_agent_blocks.py`), the special-commands group
 > (`unit/test_agent_special_commands.py`), the execution-pipeline group
-> (`unit/test_agent_pipeline.py`) and the output-formatting group
+> (`unit/test_agent_pipeline.py`), the context-management group
+> (`unit/test_context_pruning.py`), and the output-formatting group
 > (`unit/test_agent_output_format.py`) are live; run them with the command below.
 
 ---

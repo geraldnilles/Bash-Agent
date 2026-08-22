@@ -23,12 +23,12 @@
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 6 |
-| 4. Context Management — `context.ContextManager` | 5 | 0 |
+| 4. Context Management — `context.ContextManager` | 5 | 1 |
 | 5. LLM Adapter — `llm.py` | 4 | 0 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **21** |
+| **Total** | **45** | **22** |
 
 ---
 
@@ -284,7 +284,7 @@ runs a turn, asserts old fence gone + new fence present exactly once. Exercises
 
 ### T-18 — Multimodal content length accounting (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented** (`tests/unit/test_context_pruning.py`)
 
 `_content_length` on: plain string; list with text parts; list with N
 `image_url` parts (each ≈6400 chars); mixed; non-str/non-list → 0. These
