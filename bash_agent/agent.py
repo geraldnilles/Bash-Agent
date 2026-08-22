@@ -509,7 +509,7 @@ class Agent:
                                 messages=self.context.history,
                                 max_tokens=self.max_tokens,
                                 # Keep the same reasoning effort, some models require a minimum level of reasoning.
-                                reasoning_effort="none" # self.reasoning_effort
+                                reasoning_effort=self.reasoning_effort
                             )
 
                             if not recovery_response or not recovery_response.choices:
