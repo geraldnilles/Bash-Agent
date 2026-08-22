@@ -20,7 +20,7 @@
 | Group | Tests | Done |
 |---|---|---|
 | 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 4 |
-| 1. Protocol Parsing — `agent._extract_blocks` | 5 | 0 |
+| 1. Protocol Parsing — `agent._extract_blocks` | 5 | 1 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 0 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 0 |
 | 4. Context Management — `context.ContextManager` | 5 | 0 |
@@ -28,7 +28,7 @@
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **4** |
+| **Total** | **45** | **5** |
 
 ---
 
@@ -92,7 +92,7 @@ real-sandbox behavior is covered separately by T-24/T-25.
 
 ### T-01 — Valid bash and python block extraction (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Feeds `_extract_blocks()` a response containing one well-formed bash block and
 one python block built by T-00b, asserting it returns
