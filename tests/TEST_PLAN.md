@@ -19,7 +19,7 @@
 
 | Group | Tests | Done |
 |---|---|---|
-| 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 0 |
+| 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 4 |
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 0 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 0 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 0 |
@@ -28,7 +28,7 @@
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **0** |
+| **Total** | **45** | **4** |
 
 ---
 
@@ -36,7 +36,7 @@
 
 ### T-00a — `chdir_tmp` context manager (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Almost every module resolves paths against the process CWD at call time:
 `Sandbox` writes temp scripts to `.bash_agent_tmp/`, `ContextManager` creates
@@ -51,7 +51,7 @@ import-time constant, so persistence tests must patch
 
 ### T-00b — Fenced-block builders (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 The UUID-fenced protocol (`---START_BASH_COMMAND-{uuid}---` …) appears in
 nearly every agent test. Helpers `bash_block(uuid, script)`,
@@ -62,7 +62,7 @@ editing. This protects ~20 downstream tests from protocol drift.
 
 ### T-00c — `FakeLLMClient` + cache seeding (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 `llm.get_llm_client()` caches clients in the module-level dict
 `llm._CLIENT_CACHE`. A fake client object whose
@@ -76,7 +76,7 @@ provider whitelist).
 
 ### T-00d — `FakeSandbox` (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 `Agent.__init__` accepts no sandbox argument today, but the attribute is
 assigned directly (`self.sandbox = Sandbox(...)`), so tests construct an
