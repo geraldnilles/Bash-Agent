@@ -181,13 +181,19 @@ class Agent:
         Extracts valid (cmd_type, script) blocks from the LLM response.
         Returns (blocks, None) on success, or ([], warning_message) if parsing fails.
         """
-        pattern = rf"---START_(BASH|PYTHON)_COMMAND-{self.uuid}---\s*(.*?)\s*---END_\1_COMMAND-{self.uuid}---"
+        # A fenced body must never contain another command-fence marker. This
+        # prevents a mismatched START/END pair (e.g. START_BASH ... END_PYTHON,
+        # see test T-05) from gluing onto a later same-type END fence and
+        # yielding one spanning garbage match instead of a clean rejection.
+        fence_marker = r"---(?:START|END)_(?:BASH|PYTHON)_COMMAND"
+        body = rf"(?:(?!{fence_marker})[\s\S])*?"
+        pattern = rf"---START_(BASH|PYTHON)_COMMAND-{self.uuid}---\s*({body})\s*---END_\1_COMMAND-{self.uuid}---"
         matches = list(re.finditer(pattern, response_text, re.DOTALL))
         if matches:
             return [(m.group(1), m.group(2).strip()) for m in matches], None
 
         # Relaxed pattern fallback for diagnosing malformed UUIDs
-        relaxed_pattern = r"---START_(BASH|PYTHON)_COMMAND[^\n]*\n(.*?)\n?---END_\1_COMMAND"
+        relaxed_pattern = rf"---START_(BASH|PYTHON)_COMMAND[^\n]*\n({body})\n?---END_\1_COMMAND"
         relaxed_matches = list(re.finditer(relaxed_pattern, response_text, re.DOTALL))
         if relaxed_matches:
             cmd_type = relaxed_matches[0].group(1)

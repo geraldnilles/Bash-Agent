@@ -20,7 +20,7 @@
 | Group | Tests | Done |
 |---|---|---|
 | 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 4 |
-| 1. Protocol Parsing — `agent._extract_blocks` | 5 | 4 |
+| 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 0 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 0 |
 | 4. Context Management — `context.ContextManager` | 5 | 0 |
@@ -28,7 +28,7 @@
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **8** |
+| **Total** | **45** | **9** |
 
 ---
 
@@ -135,12 +135,19 @@ difference between a recoverable hiccup and a stuck session after `--resume`.
 
 ### T-05 — Cross-type fence mismatch rejected (P2)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 A response where START says BASH but END says PYTHON must not match the strict
 pattern (backreference `\1`) nor crash the relaxed fallback. Pins the
 regex backreference behavior so nobody "simplifies" it into accepting
 mismatched pairs.
+
+> **Bug found while implementing (fixed):** a cross-type pair adjacent to a
+> valid block made the strict pattern produce one *spanning* match whose
+> "script" contained fences and prose (`START_BASH ... END_PYTHON ... prose ...
+> START_BASH ... END_BASH` parsed as a single BASH block). Both patterns now
+> use a tempered body that forbids command-fence markers inside a block, so
+> mismatched pairs reject cleanly instead of gluing onto later fences.
 
 ---
 

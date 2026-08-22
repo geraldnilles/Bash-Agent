@@ -84,6 +84,17 @@ tests/
 
 ---
 
+## Known-Bug Register
+
+Bugs found by this suite are recorded here; fixes happen in separate,
+deliberate commits — never as a side effect of adding tests.
+
+| # | Status | Location | Description | Pinned by |
+|---|--------|----------|-------------|-----------|
+| 1 | **FIXED** | `agent._extract_blocks` | Cross-type fence pairs (e.g. `START_BASH`/`END_PYTHON`) could glue onto a later same-type END fence, producing one spanning garbage "script" containing fences and prose that would be executed as code. Both strict and relaxed patterns now use a tempered body forbidding command-fence markers inside a block body. | `unit/test_agent_blocks.py::TestCrossTypeFenceMismatch` (T-05) |
+
+---
+
 ## Running the Tests
 
 ```bash

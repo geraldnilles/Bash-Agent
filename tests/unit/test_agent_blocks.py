@@ -5,6 +5,7 @@ T-01  Valid bash and python block extraction (P0)
 T-02  Mixed prose and multiple blocks (P1)
 T-03  No-block response yields coaching warning (P1)
 T-04  Malformed UUID triggers relaxed-pattern rescue (P0)
+T-05  Cross-type fence mismatch rejected (P2)
 
 The UUID-fenced protocol is the front door of the entire agent: the LLM's
 response must be parsed into (cmd_type, script) pairs exactly. These tests
@@ -453,6 +454,194 @@ class TestNoBlockWarning(unittest.TestCase):
         self.assertNotIn("{self.uuid}", warning)
         self.assertNotIn("{uuid}", warning)
 
+
+class TestCrossTypeFenceMismatch(unittest.TestCase):
+    """T-05: A response where START says BASH but END says PYTHON must not
+    match the strict pattern (backreference \\1) nor crash the relaxed
+    fallback. Pins the regex backreference behavior so nobody "simplifies"
+    it into accepting mismatched pairs.
+
+    Two contracts are pinned here:
+
+    1. REJECTION — an isolated cross-type pair matches neither pattern and
+       falls through to the default coaching warning. The relaxed fallback
+       must NOT fire for it: its whole purpose is rescuing *UUID* typos,
+       not papering over structural garbage that would execute the wrong
+       thing if "rescued".
+
+    2. NO SPANNING — a mismatched pair must never glue onto a later
+       same-type END fence to form one spanning match whose "script" is a
+       chunk of prose laced with fence markers. Before the tempered body
+       was added to both patterns, `START_BASH ... END_PYTHON ... prose ...
+       START_BASH ... END_BASH` parsed as ONE BASH block containing the
+       intervening fences and prose — i.e. the agent would have executed
+       markdown as shell.
+    """
+
+    def _agent(self, uid):
+        return _make_agent(uuid_str=uid)
+
+    # -- helpers ----------------------------------------------------------
+
+    def _assert_coaching_warning(self, warning, uid):
+        """The shared no-block coaching contract (same wording T-03 pins)."""
+        self.assertIsInstance(warning, str)
+        self.assertTrue(warning.strip())
+        self.assertIn("You did not provide any code block", warning)
+        self.assertIn(f"---START_BASH_COMMAND-{uid}---", warning)
+        self.assertIn(f"---END_BASH_COMMAND-{uid}---", warning)
+        self.assertIn(f"---START_PYTHON_COMMAND-{uid}---", warning)
+        self.assertIn(f"---END_PYTHON_COMMAND-{uid}---", warning)
+
+    def _assert_not_rescue_warning(self, warning):
+        """The relaxed fallback must stay silent on cross-type mismatches:
+        it exists to correct UUIDs only."""
+        self.assertIsNotNone(warning)
+        self.assertNotIn("Malformed command block detected", warning)
+        self.assertNotIn("Did you mean to execute this?", warning)
+
+    def _fence(self, start_type, end_type, uid, script):
+        return (
+            f"---START_{start_type}_COMMAND-{uid}---\n"
+            f"{script}\n"
+            f"---END_{end_type}_COMMAND-{uid}---"
+        )
+
+    # -- contract 1: isolated mismatch is rejected -------------------------
+
+    def test_bash_start_python_end_is_rejected(self):
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        blocks, warning = agent._extract_blocks(
+            self._fence("BASH", "PYTHON", uid, "echo hi")
+        )
+        self.assertEqual(blocks, [])
+        self._assert_not_rescue_warning(warning)
+        self._assert_coaching_warning(warning, uid)
+
+    def test_python_start_bash_end_is_rejected(self):
+        """Symmetric case: the backreference must bind in both directions."""
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        blocks, warning = agent._extract_blocks(
+            self._fence("PYTHON", "BASH", uid, "print(1)")
+        )
+        self.assertEqual(blocks, [])
+        self._assert_not_rescue_warning(warning)
+        self._assert_coaching_warning(warning, uid)
+
+    def test_mismatch_with_stale_uuid_is_rejected_without_rescue(self):
+        """A wrong UUID AND crossed END type must not be 'rescued' either —
+        two independent malformations do not compose into a recovery path."""
+        uid = str(uuid.uuid4())
+        stale = str(uuid.uuid4())
+        agent = self._agent(uid)
+        blocks, warning = agent._extract_blocks(
+            self._fence("BASH", "PYTHON", stale, "echo hi")
+        )
+        self.assertEqual(blocks, [])
+        self._assert_not_rescue_warning(warning)
+        self._assert_coaching_warning(warning, uid)
+
+    def test_mismatch_script_never_leaks_into_any_warning(self):
+        """Whatever the fallback says, it must NOT propose the mismatched
+        script for execution — proposing it would coach the model into
+        re-sending structurally broken fences forever."""
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        _, warning = agent._extract_blocks(
+            self._fence("BASH", "PYTHON", uid, "echo poisoned")
+        )
+        self.assertNotIn("echo poisoned", warning)
+
+    def test_mismatch_inside_prose_is_rejected(self):
+        """Prose around the pair changes nothing: the strict pattern still
+        refuses, and the model gets coached rather than executed."""
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        response = (
+            "Let me check the layout first:\n"
+            + self._fence("BASH", "PYTHON", uid, "ls -la") + "\n"
+            "That should show us what we need."
+        )
+        blocks, warning = agent._extract_blocks(response)
+        self.assertEqual(blocks, [])
+        self._assert_coaching_warning(warning, uid)
+
+    # -- contract 2: no spanning across fences -----------------------------
+
+    def test_mismatch_plus_valid_block_extracts_only_valid_block(self):
+        """Regression guard: before the tempered-body fix, this input parsed
+        as ONE spanning BASH block whose script contained the END_PYTHON
+        fence, prose, and the second START fence. Only the well-formed block
+        may be extracted; the mismatched one must vanish cleanly."""
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        response = (
+            self._fence("BASH", "PYTHON", uid, "echo bad") + "\n"
+            "prose between\n"
+            + bash_block(uid, "echo good")
+        )
+        blocks, warning = agent._extract_blocks(response)
+        self.assertIsNone(warning)
+        self.assertEqual(blocks, [("BASH", "echo good")])
+
+    def test_compensating_pair_does_not_span_into_one_block(self):
+        """START_BASH..END_PYTHON followed by START_PYTHON..END_BASH must not
+        merge into a single 'BASH' block spanning both fences."""
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        response = (
+            self._fence("BASH", "PYTHON", uid, "echo a") + "\n"
+            + self._fence("PYTHON", "BASH", uid, "print(1)")
+        )
+        blocks, warning = agent._extract_blocks(response)
+        self.assertEqual(blocks, [])
+        self._assert_coaching_warning(warning, uid)
+
+    def test_two_independent_mismatches_do_not_span(self):
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        response = (
+            self._fence("BASH", "PYTHON", uid, "echo one") + "\n"
+            + self._fence("PYTHON", "BASH", uid, "print(2)")
+        )
+        blocks, warning = agent._extract_blocks(response)
+        self.assertEqual(blocks, [])
+        self._assert_coaching_warning(warning, uid)
+
+    def test_valid_block_after_mismatch_pair_parses_normally(self):
+        """The compensating-pair shape followed by a real block: only the
+        real block survives, nothing spans, nothing executes from the junk."""
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        response = (
+            self._fence("BASH", "PYTHON", uid, "echo a") + "\n"
+            + self._fence("PYTHON", "BASH", uid, "print(1)") + "\n"
+            + python_block(uid, "print('ok')")
+        )
+        blocks, warning = agent._extract_blocks(response)
+        self.assertIsNone(warning)
+        self.assertEqual(blocks, [("PYTHON", "print('ok')")])
+
+    def test_backreference_is_load_bearing_for_both_types(self):
+        """Directly pin WHY the backreference matters: replacing END_\\1_
+        with a fixed literal would make every block parse as whichever type
+        the START named. A same-type pair still parses; a crossed pair does
+        not — in both directions, at any position in the document."""
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        ok_bash = bash_block(uid, "true")
+        ok_py = python_block(uid, "pass")
+        bad = self._fence("BASH", "PYTHON", uid, "false")
+        for text, expected in (
+            (ok_bash, [("BASH", "true")]),
+            (ok_py, [("PYTHON", "pass")]),
+            (bad, []),
+        ):
+            blocks, warning = agent._extract_blocks(text)
+            self.assertEqual(blocks, expected)
+            self.assertEqual(warning is None, bool(expected))
 
 if __name__ == "__main__":
     unittest.main()
