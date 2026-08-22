@@ -3,8 +3,9 @@
 > **STATUS: IMPLEMENTATION IN PROGRESS.** Tests are being implemented group by
 > group following [`TEST_PLAN.md`](TEST_PLAN.md) — see its Progress Summary for
 > what is done. Helpers (`helpers/fakes.py`), the protocol-parsing group
-> (`unit/test_agent_blocks.py`) and the special-commands group
-> (`unit/test_agent_special_commands.py`) are live; run them with the command below.
+> (`unit/test_agent_blocks.py`), the special-commands group
+> (`unit/test_agent_special_commands.py`) and the execution-pipeline group
+> (`unit/test_agent_pipeline.py`) are live; run them with the command below.
 
 ---
 

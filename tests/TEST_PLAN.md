@@ -22,13 +22,13 @@
 | 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 4 |
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
-| 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 0 |
+| 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 1 |
 | 4. Context Management — `context.ContextManager` | 5 | 0 |
 | 5. LLM Adapter — `llm.py` | 4 | 0 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **15** |
+| **Total** | **45** | **16** |
 
 ---
 
@@ -217,7 +217,7 @@ recording to confirm dispatch.
 
 ### T-12 — Full happy-path turn (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 One response containing a valid bash block → FakeSandbox returns
 `(0, "hello")` → asserts: output block formatted with `EXIT_CODE_0`,
