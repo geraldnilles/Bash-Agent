@@ -4,6 +4,7 @@ Group 3 — Execution Pipeline tests for parse_and_execute / _execute_script.
 T-12  Full happy-path turn (P0)
 T-13  MAX_CODE_BLOCKS enforcement (P0)
 T-14  Attached-image fence extraction (P0)
+T-15  /tmp/ failure warning heuristic (P1)
 
 These tests pin the smallest end-to-end proof that
 parse -> dispatch -> format -> commit works as a unit:
@@ -29,6 +30,8 @@ import io
 import unittest
 import uuid
 from unittest import mock
+
+from bash_agent.agent import _build_tmp_file_warning
 
 from tests.helpers.fakes import (
     bash_block,
@@ -465,6 +468,135 @@ class TestAttachedImageFenceExtraction(PipelineCase):
         # Foreign fence passes through untouched, payload visible
         self.assertIn(foreign_fence, content)
         self.assertIn(self.DATA_URL, content)
+
+
+# ---------------------------------------------------------------------------
+# T-15 — /tmp/ failure warning heuristic
+# ---------------------------------------------------------------------------
+
+class TestTmpFileWarningHeuristic(unittest.TestCase):
+    """Parametrized matrix over Agent._build_tmp_file_warning.
+
+    Pure-function test per TEST_PLAN T-15: direct import, zero mocks, zero
+    filesystem. The heuristic must fire ONLY when ALL three conditions hold:
+
+      1. the command exited non-zero,
+      2. the output references a "/tmp/" path, and
+      3. the output contains a familiar file-not-found style error phrase.
+
+    Each condition individually violated must yield None so successful runs,
+    unrelated failures, and /tmp-free errors never get nagged.
+    """
+
+    # Phrasings drawn from every branch of agent._TMP_ERROR_PATTERN's
+    # alternation (case-insensitive).
+    ERROR_PHRASES = [
+        "No such file or directory",
+        "not found",
+        "command not found",
+        "does not exist",
+        "cannot open",
+        "cannot find",
+        "cannot access",
+        "cannot locate",
+        "could not open",
+        "could not find",
+        "unable to open",
+        "unable to locate",
+        "failed to open",
+        "failed to read",
+        "failed to write",
+    ]
+
+    def test_all_conditions_met_returns_warning(self):
+        """exit!=0 + '/tmp/' + error phrase -> a warning string."""
+        for phrase in self.ERROR_PHRASES:
+            with self.subTest(phrase=phrase):
+                out = f"tool: /tmp/session_state.json: {phrase}"
+                warning = _build_tmp_file_warning(exit_code=1, output=out)
+                self.assertIsNotNone(warning)
+                # The reminder must name the wiped directory AND the fix.
+                self.assertIn("/tmp/", warning)
+                self.assertIn(".bash_agent_tmp/", warning)
+
+    def test_warning_fires_for_various_exit_codes(self):
+        """Any non-zero exit code qualifies; 0 never does."""
+        out = "cat: /tmp/notes.txt: No such file or directory"
+        for code in (1, 2, 127, 255):
+            with self.subTest(exit_code=code):
+                self.assertIsNotNone(_build_tmp_file_warning(code, out))
+        self.assertIsNone(_build_tmp_file_warning(0, out))
+
+    def test_success_with_missing_file_is_silent(self):
+        """Condition 1 violated: exit 0 + /tmp/ + error phrase -> None.
+
+        A command may print 'No such file' while probing and still succeed;
+        nagging then would be noise."""
+        out = (
+            "if [ -f /tmp/cache.bin ]; then cat /tmp/cache.bin; "
+            "fi\ncat: /tmp/cache.bin: No such file or directory\ndone"
+        )
+        self.assertIsNone(_build_tmp_file_warning(0, out))
+
+    def test_failure_without_tmp_path_is_silent(self):
+        """Condition 2 violated: exit!=0 + error phrase but NO '/tmp/' -> None."""
+        outputs = [
+            "cat: config.yaml: No such file or directory",
+            "ls: cannot access './missing': No such file or directory",
+            "grep: pattern not found",
+        ]
+        for out in outputs:
+            with self.subTest(output=out):
+                self.assertIsNone(_build_tmp_file_warning(1, out))
+
+    def test_bare_tmp_without_slash_is_silent(self):
+        """/tmp without the trailing slash does not count as a path reference."""
+        out = "see notes under /tmp for details: No such file"
+        self.assertIsNone(_build_tmp_file_warning(1, out))
+
+    def test_failure_without_error_phrase_is_silent(self):
+        """Condition 3 violated: exit!=0 + '/tmp/' but no known phrase -> None."""
+        outputs = [
+            "/tmp/out.log: Permission denied",
+            "head: error reading /tmp/big.log: Input/output error",
+            "usage: tool [--flag] /tmp/input.dat",
+            "",
+        ]
+        for out in outputs:
+            with self.subTest(output=out):
+                self.assertIsNone(_build_tmp_file_warning(1, out))
+
+    def test_phrase_and_path_may_appear_on_different_lines(self):
+        """The regex scans the whole output, so a multi-line traceback whose
+        '/tmp/' reference and error phrase sit on separate lines still fires."""
+        out = (
+            "Traceback (most recent call last):\n"
+            "  File \"script.py\", line 3, in <module>\n"
+            "    data = open('/tmp/state.json').read()\n"
+            "FileNotFoundError: [Errno 2] No such file or directory"
+        )
+        warning = _build_tmp_file_warning(1, out)
+        self.assertIsNotNone(warning)
+        self.assertIn(".bash_agent_tmp/", warning)
+
+    def test_matching_is_case_insensitive(self):
+        """_TMP_ERROR_PATTERN compiles with re.IGNORECASE; SHOUTING errors
+        must trigger the same rescue as lowercase ones."""
+        out = "TOOL: COULD NOT FIND /tmp/model.bin"
+        self.assertIsNotNone(_build_tmp_file_warning(1, out))
+
+    def test_warning_text_is_actionable(self):
+        """The returned reminder tells the model exactly what happened and
+        what to do instead — this is coaching, not just logging."""
+        warning = _build_tmp_file_warning(
+            1, "cat: /tmp/x: No such file or directory"
+        )
+        self.assertIn("SYSTEM WARNING", warning)
+        # Must explain WHY it failed (non-persistent /tmp/) and WHERE to write
+        # session-persistent files instead.
+        self.assertIn("does not persist", warning)
+        self.assertIn(".bash_agent_tmp/", warning)
+
 
 
 if __name__ == "__main__":

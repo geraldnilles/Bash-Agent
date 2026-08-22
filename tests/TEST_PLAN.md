@@ -22,13 +22,13 @@
 | 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 4 |
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
-| 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 3 |
+| 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 4 |
 | 4. Context Management — `context.ContextManager` | 5 | 0 |
 | 5. LLM Adapter — `llm.py` | 4 | 0 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **18** |
+| **Total** | **45** | **19** |
 
 ---
 
@@ -249,7 +249,7 @@ the pending list is cleared. This exercises the exact path `vision` uses.
 
 ### T-15 — `/tmp/` failure warning heuristic (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Parametrized matrix over `_build_tmp_file_warning`: (exit≠0, "/tmp/" present,
 error phrase present) → warning returned; each condition individually violated
