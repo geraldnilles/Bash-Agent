@@ -22,13 +22,13 @@
 | 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 4 |
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
-| 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 4 |
+| 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 5 |
 | 4. Context Management — `context.ContextManager` | 5 | 0 |
 | 5. LLM Adapter — `llm.py` | 4 | 0 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **19** |
+| **Total** | **45** | **20** |
 
 ---
 
@@ -259,7 +259,7 @@ Protects a heuristic that keeps the LLM from repeatedly writing to host /tmp.
 
 ### T-16 — Output truncation formatting (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 `_format_output` with >10,000-char output must produce head+tail halves joined
 by `...[Output Truncated]...`, a `VISIBLE_%` header below 100, and the trailing
