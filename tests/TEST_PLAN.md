@@ -20,7 +20,7 @@
 | Group | Tests | Done |
 |---|---|---|
 | 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 4 |
-| 1. Protocol Parsing — `agent._extract_blocks` | 5 | 3 |
+| 1. Protocol Parsing — `agent._extract_blocks` | 5 | 4 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 0 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 0 |
 | 4. Context Management — `context.ContextManager` | 5 | 0 |
@@ -28,7 +28,7 @@
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **7** |
+| **Total** | **45** | **8** |
 
 ---
 
@@ -125,7 +125,7 @@ breaks recovery).
 
 ### T-04 — Malformed UUID triggers relaxed-pattern rescue (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Simulates the classic failure mode: the model emits correct fence structure
 but a wrong/stale UUID (e.g., from a resumed session). Asserts the relaxed

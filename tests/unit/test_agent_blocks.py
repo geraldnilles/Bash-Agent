@@ -4,6 +4,7 @@ Group 1 — Protocol Parsing tests for agent._extract_blocks.
 T-01  Valid bash and python block extraction (P0)
 T-02  Mixed prose and multiple blocks (P1)
 T-03  No-block response yields coaching warning (P1)
+T-04  Malformed UUID triggers relaxed-pattern rescue (P0)
 
 The UUID-fenced protocol is the front door of the entire agent: the LLM's
 response must be parsed into (cmd_type, script) pairs exactly. These tests
@@ -220,6 +221,133 @@ class TestExtractBlocksMixedProse(unittest.TestCase):
         self.assertIsNone(warning)
         self.assertEqual(blocks, [("BASH", "echo real")])
 
+
+class TestMalformedUuidRescue(unittest.TestCase):
+    """T-04: A block with correct fence structure but a wrong/stale UUID
+    (e.g. left over from a previous --resume session) triggers the relaxed
+    fallback: nothing is parsed for execution, and a coaching warning embeds
+    a CORRECTED block bound to the live session UUID carrying the model's
+    original script. This path is the difference between a recoverable
+    hiccup and a stuck session after --resume."""
+
+    def _agent(self, uid):
+        return _make_agent(uuid_str=uid)
+
+    def test_stale_uuid_bash_block_is_rescued(self):
+        uid = str(uuid.uuid4())
+        stale = str(uuid.uuid4())
+        agent = self._agent(uid)
+        blocks, warning = agent._extract_blocks(bash_block(stale, "echo hi"))
+        # Nothing is extracted for execution from a malformed block...
+        self.assertEqual(blocks, [])
+        self.assertIsNotNone(warning)
+        # ...but the model is handed a corrected fence bound to the LIVE uuid
+        # carrying the exact script it wrote.
+        self.assertIn(f"---START_BASH_COMMAND-{uid}---", warning)
+        self.assertIn(f"---END_BASH_COMMAND-{uid}---", warning)
+        self.assertIn("echo hi", warning)
+        # The stale UUID must not leak into the proposal: the model is told
+        # to copy the corrected block verbatim, and a stale fence would never
+        # match the strict parser.
+        self.assertNotIn(stale, warning)
+
+    def test_corrected_block_in_warning_round_trips_through_parser(self):
+        """Self-consistency: copying the proposed block verbatim MUST parse
+        under the strict pattern. If it did not, the rescue would coach the
+        model straight into another dead end."""
+        uid = str(uuid.uuid4())
+        stale = str(uuid.uuid4())
+        agent = self._agent(uid)
+        script = "git status --short"
+        _, warning = agent._extract_blocks(bash_block(stale, script))
+        corrected = (
+            f"---START_BASH_COMMAND-{uid}---\n{script}\n---END_BASH_COMMAND-{uid}---"
+        )
+        self.assertIn(corrected, warning)
+        blocks, err = agent._extract_blocks(corrected)
+        self.assertIsNone(err)
+        self.assertEqual(blocks, [("BASH", script)])
+
+    def test_stale_uuid_python_block_rescue_preserves_multiline_script(self):
+        uid = str(uuid.uuid4())
+        stale = str(uuid.uuid4())
+        agent = self._agent(uid)
+        code = "import sys\nprint(sys.version)\nfor i in range(3):\n    print(i)"
+        blocks, warning = agent._extract_blocks(python_block(stale, code))
+        self.assertEqual(blocks, [])
+        self.assertIsNotNone(warning)
+        self.assertIn(f"---START_PYTHON_COMMAND-{uid}---", warning)
+        self.assertIn(f"---END_PYTHON_COMMAND-{uid}---", warning)
+        self.assertIn(code, warning)
+
+    def test_missing_uuid_entirely_is_also_rescued(self):
+        """A fence with NO uuid at all still trips the relaxed fallback."""
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        response = "---START_BASH_COMMAND---\necho bare\n---END_BASH_COMMAND---"
+        blocks, warning = agent._extract_blocks(response)
+        self.assertEqual(blocks, [])
+        self.assertIsNotNone(warning)
+        self.assertIn(f"---START_BASH_COMMAND-{uid}---", warning)
+        self.assertIn("echo bare", warning)
+
+    def test_warning_names_the_problem_and_states_live_uuid(self):
+        uid = str(uuid.uuid4())
+        stale = str(uuid.uuid4())
+        agent = self._agent(uid)
+        _, warning = agent._extract_blocks(bash_block(stale, "ls"))
+        self.assertIn("Malformed command block detected", warning)
+        self.assertIn("UUID was missing or incorrect", warning)
+        self.assertIn(f"The current session UUID is: {uid}", warning)
+        self.assertIn("re-evaluate", warning)
+
+    def test_only_first_malformed_block_is_proposed(self):
+        """With several malformed blocks the rescue proposes only the first
+        (relaxed_matches[0]). Pinning the single-proposal contract keeps a
+        future multi-block proposal a deliberate change, not an accident."""
+        uid = str(uuid.uuid4())
+        stale = str(uuid.uuid4())
+        agent = self._agent(uid)
+        response = bash_block(stale, "echo one") + "\n\n" + bash_block(stale, "echo two")
+        blocks, warning = agent._extract_blocks(response)
+        self.assertEqual(blocks, [])
+        self.assertIsNotNone(warning)
+        self.assertIn("echo one", warning)
+        self.assertNotIn("echo two", warning)
+
+    def test_inline_single_line_fence_falls_through_to_default_coaching(self):
+        """The relaxed pattern requires the script body to start on its own
+        line; a whole fence collapsed onto one line is NOT rescued and gets
+        the generic no-block coaching instead."""
+        uid = str(uuid.uuid4())
+        stale = str(uuid.uuid4())
+        agent = self._agent(uid)
+        response = (
+            f"---START_BASH_COMMAND-{stale}--- echo inline "
+            f"---END_BASH_COMMAND-{stale}---"
+        )
+        blocks, warning = agent._extract_blocks(response)
+        self.assertEqual(blocks, [])
+        self.assertIsNotNone(warning)
+        self.assertIn("You did not provide any code block", warning)
+
+
+class TestMalformedUuidRescuePipeline(unittest.TestCase):
+    """T-04 (pipeline view): through parse_and_execute, a malformed-UUID
+    response must be pure feedback — nothing executed, nothing committed."""
+
+    def test_no_execution_and_no_commit_on_rescue_path(self):
+        uid = str(uuid.uuid4())
+        stale = str(uuid.uuid4())
+        agent = _make_agent(uuid_str=uid)
+        history_len_before = len(agent.context.history)
+        executed, feedback = agent.parse_and_execute(
+            bash_block(stale, "echo should-not-run")
+        )
+        self.assertFalse(executed)
+        self.assertIn(f"---START_BASH_COMMAND-{uid}---", feedback)
+        self.assertEqual(agent.sandbox.executed_scripts, [])
+        self.assertEqual(len(agent.context.history), history_len_before)
 
 class TestNoBlockWarning(unittest.TestCase):
     """T-03: A response with no command fences returns ([], warning) where the
