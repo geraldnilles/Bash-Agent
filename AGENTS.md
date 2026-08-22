@@ -61,6 +61,7 @@ This is the heart of the project. The `Agent` class:
 |--------|---------|
 | `__init__()` | Sets up UUID, model, sandbox, context, budget. Handles `--resume`. Checks multimodal capabilities. |
 | `run(initial_task)` | The main loop. Sends prompts, parses responses, executes commands. |
+| `_run_warmup_exchanges()` | Protocol warmup: on FRESH sessions only (`--resume` skips it), pre-fills history with two scripted assistant turns from the `WARMUP_TURNS` constant (a PYTHON version check, then a BASH `ls -la`). Each template is parsed via the production `_extract_blocks()` (raises if it ever fails to parse) and executed via `_execute_script()`, so the injected transcript is byte-for-byte identical in format to a live exchange. Called from `run()` right after the initial task is committed. |
 | `parse_and_execute(agent_msg)` | Coordination pipeline: extracts blocks via `_extract_blocks()`, dispatches each to `_handle_special_command()` or `_execute_script()`, enforces `MAX_CODE_BLOCKS` limit, and commits results via `_commit_execution_feedback()`. Returns `(executed: bool, feedback: str)`. |
 | `_extract_blocks(response_text)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Returns `(blocks, None)` on success, or `([], warning_message)` when no blocks or malformed UUID fences are found. |
 | `_handle_special_command(cmd_type, script)` | Intercepts built-in agent commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Returns `(handled: bool, formatted_output: str)`. Commands that terminate the session (`exit`, `copy-to-clipboard`) call `sys.exit()` in-process. |
@@ -324,6 +325,7 @@ Agent.run() loop
 
 ### 1. UUID-Fenced Protocol
 - The session UUID is generated once at `Agent.__init__()` and embedded in ALL fenced block markers
+- Fresh sessions are pre-filled with two scripted example exchanges (`WARMUP_TURNS` in `agent.py`) to teach new models the block format; edit those templates carefully — they are validated by the production parser at runtime
 - Regex patterns in `_extract_blocks()` must match the exact UUID
 - The UUID is persisted in `history.json` for session resumption
 

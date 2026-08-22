@@ -17,6 +17,36 @@ from bash_agent import llm
 from bash_agent.context import ContextManager
 from bash_agent.sandbox import Sandbox
 
+# ---------------------------------------------------------------------------
+# Warmup exchanges
+#
+# Fresh sessions are pre-filled with two scripted assistant turns (each
+# followed by its REAL sandbox output) so the model immediately sees concrete,
+# correctly-formatted examples of the UUID-fenced protocol. This shortens the
+# learning curve for models that struggle with the custom block format.
+# Skipped entirely on --resume, since restored history already contains turns.
+# Scripts are NOT duplicated here: _run_warmup_exchanges() parses each template
+# with the production _extract_blocks() and executes whatever it extracts.
+# ---------------------------------------------------------------------------
+WARMUP_TURNS = [
+    (
+        "I'll start by getting oriented. First, let me check which Python "
+        "version is available in the sandbox.\n\n"
+        "---START_PYTHON_COMMAND-{uuid}---\n"
+        "import sys\n"
+        "print(sys.version)\n"
+        "---END_PYTHON_COMMAND-{uuid}---"
+    ),
+    (
+        "Good. Now let me list the files in the current working directory to "
+        "see what I'm working with.\n\n"
+        "---START_BASH_COMMAND-{uuid}---\n"
+        "ls -la\n"
+        "---END_BASH_COMMAND-{uuid}---"
+    ),
+]
+
+
 _TMP_ERROR_PATTERN = re.compile(
     r"("
     r"\bno such file\b"
@@ -91,6 +121,9 @@ class Agent:
         
         if not history_loaded:
             self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout, uuid=self.uuid, multimodal_capabilities=self.multimodal_capabilities)
+        # Remember whether this session was restored from history.json;
+        # run() uses it to skip the protocol warmup exchanges on --resume.
+        self.resumed_session = history_loaded
         
         # Reasoning effort and max tokens from config
         self.reasoning_effort = reasoning_effort if reasoning_effort is not None and reasoning_effort != 'default' else None
@@ -554,6 +587,41 @@ class Agent:
         self.last_step_provider = None
         return True
 
+    def _run_warmup_exchanges(self):
+        """
+        Pre-fill a FRESH session with two scripted assistant turns -- a PYTHON
+        command printing the interpreter version, then a BASH command listing
+        the working directory -- executing each in the sandbox and recording
+        the real formatted output as the following user message.
+
+        Each template is parsed with the production _extract_blocks() and
+        executed via _execute_script(), so the injected transcript is
+        byte-for-byte identical in format to a live exchange. Never called for
+        resumed sessions (see self.resumed_session).
+        """
+        print("[System] Running protocol warmup exchanges...")
+        for template in WARMUP_TURNS:
+            agent_msg = template.format(uuid=self.uuid)
+
+            # Display exactly like a live turn
+            print(f"\n[Agent]:\n{self._colorize_commands(agent_msg)}")
+            self.context.add_message("assistant", agent_msg)
+            self.context.save_history()
+
+            # Dogfood the production parser: the fixed templates MUST parse.
+            blocks, error_feedback = self._extract_blocks(agent_msg)
+            if error_feedback or not blocks:
+                raise RuntimeError(
+                    f"Warmup template failed to parse: {error_feedback or 'no blocks found'}"
+                )
+
+            cmd_type, script = blocks[0]
+            output = self._execute_script(cmd_type, script)
+            print(f"\n{COLOR_OUT}{output}{COLOR_RESET}")
+            self.context.add_message("user", output)
+            self.context.save_history()
+            self._log_debug_history()
+
     def run(self, initial_task: str = None):
         print(f"Agent initialized with UUID: {self.uuid}")
         print("Provide a task to begin.")
@@ -568,6 +636,11 @@ class Agent:
         self.context.add_message("user", task)
         self.context.save_history()
         self._log_debug_history()
+
+        # Teach the protocol by example: two scripted turns with real sandbox
+        # output, skipped when resuming a session that already has history.
+        if not self.resumed_session:
+            self._run_warmup_exchanges()
 
         try:
             while True:
