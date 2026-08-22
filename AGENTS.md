@@ -398,11 +398,22 @@ All are declared in `pyproject.toml`. The project uses `setuptools` as the build
 
 ## Testing
 
-There is currently no formal test suite. When making changes:
-1. Test with `bagent -m "Run ls and tell me what you see"` for basic protocol validation
-2. Test sandbox changes with a command that tries to write to `/etc` (should fail)
-3. Test context pruning by artificially lowering `CONTEXT_LIMIT` and running a long session
-4. Test resume with `bagent --resume` after a short session
+A formal offline test suite lives in `tests/` (stdlib `unittest`, run via the
+project venv). See `tests/AGENTS.md` and `tests/TEST_PLAN.md` for the full
+inventory and implementation status:
+
+```bash
+./venv/bin/python -m unittest discover -s tests -v          # everything
+./venv/bin/python -m unittest discover -s tests/unit -v     # fast unit tests only
+```
+
+When making changes:
+1. Run the unit suite — it must stay green; add/extend tests for new behavior
+   following the seams documented in `tests/TEST_PLAN.md`
+2. Test with `bagent -m "Run ls and tell you what you see"` for live protocol validation
+3. Test sandbox changes with a command that tries to write to `/etc` (should fail)
+4. Test context pruning by artificially lowering `CONTEXT_LIMIT` and running a long session
+5. Test resume with `bagent --resume` after a short session
 
 ---
 

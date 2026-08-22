@@ -2,6 +2,7 @@
 Group 3 — Execution Pipeline tests for parse_and_execute / _execute_script.
 
 T-12  Full happy-path turn (P0)
+T-13  MAX_CODE_BLOCKS enforcement (P0)
 
 These tests pin the smallest end-to-end proof that
 parse -> dispatch -> format -> commit works as a unit:
@@ -26,6 +27,7 @@ import contextlib
 import io
 import unittest
 import uuid
+from unittest import mock
 
 from tests.helpers.fakes import (
     bash_block,
@@ -155,6 +157,125 @@ class TestFullHappyPathTurn(PipelineCase):
             content,
         )
         self.assertIn(f"---END_BASH_OUTPUT-{self.uid}---", content)
+
+
+# ---------------------------------------------------------------------------
+# T-13 — MAX_CODE_BLOCKS enforcement
+# ---------------------------------------------------------------------------
+
+class TestMaxCodeBlocksEnforcement(PipelineCase):
+    """T-13: runaway multi-execution guard.
+
+    parse_and_execute slices ``blocks[:MAX_CODE_BLOCKS]`` and appends a cutoff
+    warning whenever ``len(blocks)`` exceeds the limit. The production module
+    binds the constant with ``from bash_agent.config import MAX_CODE_BLOCKS``,
+    so the default-limit tests below run UNPATCHED (config ships MAX=1) while
+    the mirror tests patch ``bash_agent.agent.MAX_CODE_BLOCKS`` directly —
+    patching ``bash_agent.config.MAX_CODE_BLOCKS`` would be a silent no-op.
+    """
+
+    def test_default_limit_one_executes_only_first_block(self):
+        """Stock MAX_CODE_BLOCKS=1: two valid blocks -> only the first runs;
+        the commit carries its OUTPUT fence plus the 'first 1 of 2' warning."""
+        fake_sb = FakeSandbox(execute_result=(0, "first"))
+        self.agent.sandbox = fake_sb
+
+        response = "\n\n".join(
+            [bash_block(self.uid, "echo first"), bash_block(self.uid, "echo second")]
+        )
+        executed, feedback = self.agent.parse_and_execute(response)
+
+        # Return contract is unchanged by the cutoff
+        self.assertTrue(executed)
+        self.assertEqual(feedback, "")
+
+        # Exactly one sandbox call, and it was the FIRST fenced script
+        self.assertEqual(fake_sb.executed_scripts, ["echo first"])
+
+        # Commit: a single user message holding output + warning, in order
+        users = self.user_messages()
+        self.assertEqual(len(users), 1)
+        content = users[0]["content"]
+
+        self.assertIn(output_block(self.uid, 0, "first"), content)
+        self.assertIn("Only the first 1 of 2", content)
+        self.assertIn("The remaining 1 block(s) were skipped", content)
+        self.assertIn("at most 1 code block(s)", content)
+
+        out_idx = content.index(output_block(self.uid, 0, "first"))
+        warn_idx = content.index("[SYSTEM WARNING]")
+        self.assertLess(out_idx, warn_idx)
+
+        # No OUTPUT fence may exist for the skipped block
+        self.assertEqual(
+            content.count(
+                f"---START_BASH_OUTPUT-EXIT_CODE_0-VISIBLE_100%-{self.uid}---"
+            ),
+            1,
+        )
+
+    def test_skipped_python_block_never_reaches_sandbox(self):
+        """Mixed BASH+PYTHON response: enforcement happens BEFORE dispatch, so
+        execute_python() must never be called for the dropped block."""
+        fake_sb = FakeSandbox(execute_result=(0, "bash ran"))
+        self.agent.sandbox = fake_sb
+
+        response = "\n\n".join(
+            [
+                bash_block(self.uid, "echo bash ran"),
+                python_block(self.uid, "print('py')"),
+            ]
+        )
+        executed, feedback = self.agent.parse_and_execute(response)
+
+        self.assertTrue(executed)
+        self.assertEqual(feedback, "")
+        self.assertEqual(fake_sb.executed_scripts, ["echo bash ran"])
+        self.assertEqual(fake_sb.executed_python_scripts, [])
+
+        content = self.user_messages()[0]["content"]
+        self.assertIn("Only the first 1 of 2", content)
+        # The skipped python source must not leak into the commit either
+        self.assertNotIn("print('py')", content)
+
+    def test_limit_is_read_dynamically_when_patched_to_two(self):
+        """Mirror test: patch bash_agent.agent.MAX_CODE_BLOCKS to 2 -> BOTH
+        blocks execute and no warning fires. Proves the limit is consulted at
+        call time rather than baked into the slice."""
+        fake_sb = FakeSandbox(execute_result=[(0, "one"), (0, "two")])
+        self.agent.sandbox = fake_sb
+
+        response = "\n\n".join(
+            [bash_block(self.uid, "echo one"), bash_block(self.uid, "echo two")]
+        )
+        with mock.patch("bash_agent.agent.MAX_CODE_BLOCKS", 2):
+            executed, feedback = self.agent.parse_and_execute(response)
+
+        self.assertTrue(executed)
+        self.assertEqual(feedback, "")
+        self.assertEqual(fake_sb.executed_scripts, ["echo one", "echo two"])
+
+        content = self.user_messages()[0]["content"]
+        self.assertNotIn("SYSTEM WARNING", content)
+        self.assertIn(output_block(self.uid, 0, "one"), content)
+        self.assertIn(output_block(self.uid, 0, "two"), content)
+
+    def test_limit_above_block_count_stays_warning_free(self):
+        """Raising the limit PAST the block count must also suppress the
+        warning — pins the ``len(blocks) > MAX`` comparison direction."""
+        fake_sb = FakeSandbox(execute_result=[(0, "a"), (0, "b")])
+        self.agent.sandbox = fake_sb
+
+        response = "\n\n".join(
+            [bash_block(self.uid, "echo a"), bash_block(self.uid, "echo b")]
+        )
+        with mock.patch("bash_agent.agent.MAX_CODE_BLOCKS", 5):
+            executed, feedback = self.agent.parse_and_execute(response)
+
+        self.assertTrue(executed)
+        self.assertEqual(feedback, "")
+        self.assertEqual(len(fake_sb.executed_scripts), 2)
+        self.assertNotIn("SYSTEM WARNING", self.user_messages()[0]["content"])
 
 
 if __name__ == "__main__":

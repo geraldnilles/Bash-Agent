@@ -22,13 +22,13 @@
 | 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 4 |
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
-| 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 1 |
+| 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 2 |
 | 4. Context Management — `context.ContextManager` | 5 | 0 |
 | 5. LLM Adapter — `llm.py` | 4 | 0 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **16** |
+| **Total** | **45** | **17** |
 
 ---
 
@@ -227,7 +227,7 @@ that parse→dispatch→format→commit works as a unit.
 
 ### T-13 — MAX_CODE_BLOCKS enforcement (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 With `MAX_CODE_BLOCKS=1` (current config), a response with two valid blocks
 must execute only the first, append the cutoff warning mentioning counts
