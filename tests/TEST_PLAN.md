@@ -20,7 +20,7 @@
 | Group | Tests | Done |
 |---|---|---|
 | 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 4 |
-| 1. Protocol Parsing — `agent._extract_blocks` | 5 | 1 |
+| 1. Protocol Parsing — `agent._extract_blocks` | 5 | 2 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 0 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 0 |
 | 4. Context Management — `context.ContextManager` | 5 | 0 |
@@ -28,7 +28,7 @@
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **5** |
+| **Total** | **45** | **6** |
 
 ---
 
@@ -105,7 +105,7 @@ helper in `helpers/fakes.py` (patches `_check_model_capabilities`, swaps in
 
 ### T-02 — Mixed prose and multiple blocks (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Verifies blocks embedded inside explanatory markdown prose are still found,
 that non-matching fences (e.g., `---START_ATTACHED_IMAGE-…---`) are ignored,
