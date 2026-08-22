@@ -20,7 +20,7 @@
 | Group | Tests | Done |
 |---|---|---|
 | 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 4 |
-| 1. Protocol Parsing — `agent._extract_blocks` | 5 | 2 |
+| 1. Protocol Parsing — `agent._extract_blocks` | 5 | 3 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 0 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 0 |
 | 4. Context Management — `context.ContextManager` | 5 | 0 |
@@ -28,7 +28,7 @@
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **6** |
+| **Total** | **45** | **7** |
 
 ---
 
@@ -115,7 +115,7 @@ same seam as T-01.
 
 ### T-03 — No-block response yields coaching warning (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 A response with no fences must return `([], warning)` where the warning
 contains both example fence templates *with the live session UUID* — this

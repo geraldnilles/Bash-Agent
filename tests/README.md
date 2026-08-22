@@ -1,8 +1,9 @@
 # Bash Agent — Test Suite (Planning Documents)
 
-> **STATUS: PROPOSED / DOCUMENTATION ONLY.** No test code has been written yet.
-> This folder currently contains the research and design documents for a future
-> test suite. See [`TEST_PLAN.md`](TEST_PLAN.md) for the proposed test inventory.
+> **STATUS: IMPLEMENTATION IN PROGRESS.** Tests are being implemented group by
+> group following [`TEST_PLAN.md`](TEST_PLAN.md) — see its Progress Summary for
+> what is done. Helpers (`helpers/fakes.py`) and the protocol-parsing group
+> (`unit/test_agent_blocks.py`) are live; run them with the command below.
 
 ---
 
@@ -83,7 +84,7 @@ tests/
 
 ---
 
-## Running the Tests (once implemented)
+## Running the Tests
 
 ```bash
 # Everything

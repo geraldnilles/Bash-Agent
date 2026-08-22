@@ -3,6 +3,7 @@ Group 1 — Protocol Parsing tests for agent._extract_blocks.
 
 T-01  Valid bash and python block extraction (P0)
 T-02  Mixed prose and multiple blocks (P1)
+T-03  No-block response yields coaching warning (P1)
 
 The UUID-fenced protocol is the front door of the entire agent: the LLM's
 response must be parsed into (cmd_type, script) pairs exactly. These tests
@@ -18,6 +19,7 @@ import uuid
 from tests.helpers.fakes import (
     bash_block,
     python_block,
+    output_block,
     _make_agent,
 )
 
@@ -217,6 +219,111 @@ class TestExtractBlocksMixedProse(unittest.TestCase):
         blocks, warning = agent._extract_blocks(response)
         self.assertIsNone(warning)
         self.assertEqual(blocks, [("BASH", "echo real")])
+
+
+class TestNoBlockWarning(unittest.TestCase):
+    """T-03: A response with no command fences returns ([], warning) where the
+    warning embeds BOTH example fence templates bound to the LIVE session UUID.
+
+    This warning is the LLM's only self-correction signal, so its exactness
+    matters: a stale or missing UUID here silently breaks recovery — the model
+    would copy a fence the parser can never match."""
+
+    def _agent(self, uid):
+        return _make_agent(uuid_str=uid)
+
+    def _assert_coaching_warning(self, warning, uid):
+        """Pin the coaching-warning contract shared by every no-block path."""
+        self.assertIsInstance(warning, str)
+        self.assertTrue(warning.strip(), "warning must not be blank")
+        # Names the failure so the model understands what went wrong.
+        self.assertIn("You did not provide any code block", warning)
+        # Both example templates present, interpolated with the live UUID...
+        self.assertIn(f"---START_BASH_COMMAND-{uid}---", warning)
+        self.assertIn(f"---END_BASH_COMMAND-{uid}---", warning)
+        self.assertIn(f"---START_PYTHON_COMMAND-{uid}---", warning)
+        self.assertIn(f"---END_PYTHON_COMMAND-{uid}---", warning)
+        # ...at least once each (the four fences above).
+        self.assertGreaterEqual(warning.count(uid), 4)
+        # Placeholder bodies intact so the model knows what goes inside.
+        self.assertIn("[bash commands go here]", warning)
+        self.assertIn("[python code goes here]", warning)
+        # Coaching guidance: how to proceed and how to end the session.
+        self.assertIn("exit", warning)
+
+    def test_plain_prose_returns_empty_blocks_and_warning(self):
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        blocks, warning = agent._extract_blocks(
+            "I think I should start by listing the files, let me do that."
+        )
+        self.assertEqual(blocks, [])
+        self.assertIsNotNone(warning)
+        self._assert_coaching_warning(warning, uid)
+
+    def test_empty_response_returns_warning(self):
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        blocks, warning = agent._extract_blocks("")
+        self.assertEqual(blocks, [])
+        self.assertIsNotNone(warning)
+        self._assert_coaching_warning(warning, uid)
+
+    def test_whitespace_only_response_returns_warning(self):
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        blocks, warning = agent._extract_blocks("\n\n   \t \n")
+        self.assertEqual(blocks, [])
+        self.assertIsNotNone(warning)
+        self._assert_coaching_warning(warning, uid)
+
+    def test_attached_image_only_response_returns_warning(self):
+        """ATTACHED_IMAGE is a foreign fence type, not a command block; a
+        response containing only image attachments still gets coached."""
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        image_fence = (
+            f"---START_ATTACHED_IMAGE-{uid}---\n"
+            "data:image/png;base64,iVBORw0KGgo=\n"
+            f"---END_ATTACHED_IMAGE-{uid}---"
+        )
+        blocks, warning = agent._extract_blocks(image_fence)
+        self.assertEqual(blocks, [])
+        self.assertIsNotNone(warning)
+        self._assert_coaching_warning(warning, uid)
+
+    def test_output_fence_echo_returns_warning(self):
+        """A model echoing OUTPUT fences back (instead of emitting a command)
+        must be coached, not parsed into executable blocks."""
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        echoed = output_block(uid, 0, "sandbox hello")
+        blocks, warning = agent._extract_blocks(echoed)
+        self.assertEqual(blocks, [])
+        self.assertIsNotNone(warning)
+        self._assert_coaching_warning(warning, uid)
+
+    def test_warning_uuid_tracks_the_live_session_not_a_stale_one(self):
+        """Two agents with different UUIDs receive differently-interpolated
+        warnings — proving dynamic interpolation rather than a stale or
+        hard-coded template (the --resume failure mode)."""
+        uid_a = str(uuid.uuid4())
+        uid_b = str(uuid.uuid4())
+        self.assertNotEqual(uid_a, uid_b)
+        warning_a = self._agent(uid_a)._extract_blocks("no fences here")[1]
+        warning_b = self._agent(uid_b)._extract_blocks("no fences here")[1]
+        self.assertIn(uid_a, warning_a)
+        self.assertNotIn(uid_b, warning_a)
+        self.assertIn(uid_b, warning_b)
+        self.assertNotIn(uid_a, warning_b)
+
+    def test_warning_contains_no_uninterpolated_placeholders(self):
+        """The braces-style template variables must never leak through raw."""
+        uid = str(uuid.uuid4())
+        agent = self._agent(uid)
+        _, warning = agent._extract_blocks("just chatting, no code today")
+        self.assertNotIn("{self.uuid}", warning)
+        self.assertNotIn("{uuid}", warning)
 
 
 if __name__ == "__main__":

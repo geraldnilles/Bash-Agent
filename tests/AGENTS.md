@@ -4,14 +4,16 @@
 
 ## What lives here
 
-Design documents for a **not-yet-implemented** test suite:
+The test suite for the `bash_agent` package, implemented incrementally against
+the authoritative inventory in `TEST_PLAN.md` (T-00 … T-41):
 
 - `README.md` — running instructions, constraints, known-bug register
-- `TEST_PLAN.md` — the authoritative inventory of proposed tests (T-00 … T-41),
-  each with rationale and the mocking/seam strategy
-
-When tests are implemented, they follow the layout in `README.md`
-(`helpers/fakes.py`, `unit/`, `integration/`).
+- `TEST_PLAN.md` — the authoritative test inventory, each entry with rationale
+  and the mocking/seam strategy; its Progress Summary tracks implementation state
+- `helpers/fakes.py` — shared offline fakes (T-00a–d): `chdir_tmp`,
+  fenced-block builders, `FakeLLMClient`, `FakeSandbox`, `_make_agent()`
+- `unit/` — fast pure-logic tests (e.g. `test_agent_blocks.py` for Group 1)
+- `integration/` — real processes, still offline (systemd-run, fake-LLM loop)
 
 ## Non-negotiable rules
 
