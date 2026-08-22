@@ -473,5 +473,200 @@ class TestDegenerateHistoriesTerminate(PruningCase):
         self.assertEqual(self.banners(), banners_after_first)
 
 
+# ---------------------------------------------------------------------------
+# T-20 — Image-bearing messages dropped wholesale (P0)
+# ---------------------------------------------------------------------------
+
+IMAGE_DROP_BANNER = "Dropped an old image-bearing message"
+
+
+def text_part(text):
+    return {"type": "text", "text": text}
+
+
+def image_part():
+    # Payload size is irrelevant to accounting (flat 6400/image — pinned by
+    # T-18); a small blob keeps the fixture readable.
+    return {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64," + "A" * 64},
+    }
+
+
+def image_msg(role, caption="describe this screenshot"):
+    """A realistic multimodal message as built by _commit_execution_feedback."""
+    return {"role": role, "content": [text_part(caption), image_part()]}
+
+
+class MultimodalPruningCase(PruningCase):
+    """Shared pruning harness plus multimodal-specific assertion helpers."""
+
+    def list_messages(self, history=None):
+        history = self.cm.history if history is None else history
+        return [m for m in history if isinstance(m.get("content"), list)]
+
+
+class TestImageMessageDroppedWholesale(MultimodalPruningCase):
+    """
+    Core regression guard (commit 78773ca): under pruning pressure a
+    list-content (multimodal) message must be REMOVED whole. Before the
+    fix, the regex ladder hit the list and raised TypeError ("expected
+    string or bytes-like object"), crashing the entire trim loop.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.sys_content = self.system_prompt()
+        self.img = image_msg("user", "what does this stack trace show?")
+        self.out = self.output_msg("assistant", "o" * 300)
+        self.tail = self.plain_msg("user", "t" * 300)
+        self.cm.history = [
+            self.plain_msg("system", self.sys_content),
+            dict(self.img),
+            self.out,
+            self.tail,
+        ]
+        # ~128 + ~6425 (flat-rate image) + ~445 + 300 >> LIMIT.
+        self.assertGreater(_total_length(self.cm.history), LIMIT,
+                           "fixture must start over the strict limit")
+
+    def test_list_message_removed_entirely(self):
+        self.cm._trim_context_if_needed()
+        self.assertEqual(self.list_messages(), [])
+        self.assertEqual(len(self.cm.history), 3)
+
+    def test_string_neighbors_untouched_by_the_drop(self):
+        # Popping the flat-rate image alone frees plenty of space; the
+        # surrounding string messages must come through without any
+        # ladder treatment (no deletion marker, no truncation).
+        self.cm._trim_context_if_needed()
+        self.assertEqual(self.cm.history[0]["content"], self.sys_content)
+        self.assertEqual(self.cm.history[1]["content"], self.out["content"])
+        self.assertNotIn(DELETED_MARKER, self.cm.history[1]["content"])
+        self.assertNotIn(TRUNCATED_MARKER, self.cm.history[1]["content"])
+        self.assertEqual(self.cm.history[2]["content"], self.tail["content"])
+        self.assertLessEqual(_total_length(self.cm.history), TARGET)
+
+    def test_dedicated_banner_printed_not_failsafe(self):
+        # The multimodal branch has its own banner; assert we took THAT
+        # path and not the generic oldest-message failsafe drop.
+        self.cm._trim_context_if_needed()
+        out = self.stdout_buf.getvalue()
+        self.assertEqual(out.count(IMAGE_DROP_BANNER), 1)
+        self.assertEqual(out.count(HYSTERESIS_BANNER), 1)
+        self.assertNotIn("Dropping oldest conversational message", out)
+
+
+class TestMultipleImagesDroppedOldestFirst(MultimodalPruningCase):
+    """Two image-bearing messages: both popped, oldest first."""
+
+    def setUp(self):
+        super().setUp()
+        self.tail = self.plain_msg("user", "t" * 300)
+        self.cm.history = [
+            self.plain_msg("system", self.system_prompt()),
+            image_msg("user", "first screenshot"),
+            image_msg("assistant", "second screenshot"),
+            self.tail,
+        ]
+        self.assertGreater(_total_length(self.cm.history), LIMIT)
+
+    def test_both_images_popped_and_tail_survives(self):
+        self.cm._trim_context_if_needed()
+        self.assertEqual(len(self.cm.history), 2)
+        self.assertEqual(self.list_messages(), [])
+        self.assertEqual(self.cm.history[1]["content"], self.tail["content"])
+        self.assertLessEqual(_total_length(self.cm.history), TARGET)
+
+    def test_one_banner_per_dropped_image(self):
+        self.cm._trim_context_if_needed()
+        self.assertEqual(
+            self.stdout_buf.getvalue().count(IMAGE_DROP_BANNER), 2)
+
+
+class TestMixedLadderStringsAndImages(MultimodalPruningCase):
+    """
+    Both treatments in one trim session: the image message is popped
+    wholesale while string OUTPUT blocks around it receive the normal
+    deletion ladder until the hysteresis target is met.
+
+    Fixture arithmetic (uuid is always 36 chars): sys=128, output block
+    with an n-char body = n+145, hollowed block = 182, image msg = 6425.
+      initial: 128 + 845 + 6425 + 845 + 845            = 9088 > 2000
+      pass 1 (oldest output hollowed):                 = 8425
+      pass 2 (image popped):                           = 2000 > 1600
+      pass 3 (second output hollowed):                 = 1337 <= 1600 STOP
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.old_out = self.output_msg("user", "o" * 700)
+        self.mid_out = self.output_msg("user", "m" * 700)
+        self.new_out = self.output_msg("assistant", "n" * 700)
+        self.cm.history = [
+            self.plain_msg("system", self.system_prompt()),
+            self.old_out,
+            image_msg("assistant", "mid-conversation screenshot"),
+            self.mid_out,
+            self.new_out,
+        ]
+        self.assertGreater(_total_length(self.cm.history), LIMIT)
+
+    def test_image_popped_while_old_outputs_deleted(self):
+        self.cm._trim_context_if_needed()
+        contents = [m["content"] for m in self.cm.history]
+        self.assertFalse(any(isinstance(c, list) for c in contents))
+        self.assertIn(DELETED_MARKER, self.cm.history[1]["content"])
+        self.assertIn(DELETED_MARKER, self.cm.history[2]["content"])
+        self.assertNotIn(DELETED_MARKER, self.cm.history[3]["content"])
+
+    def test_banners_report_both_treatments(self):
+        self.cm._trim_context_if_needed()
+        out = self.stdout_buf.getvalue()
+        self.assertEqual(out.count(IMAGE_DROP_BANNER), 1)
+        self.assertGreaterEqual(out.count("Context trimmed an old block"), 1)
+
+    def test_terminates_under_target_with_system_intact(self):
+        original_system = self.cm.history[0]["content"]
+        self.cm._trim_context_if_needed()
+        self.assertLessEqual(_total_length(self.cm.history), TARGET)
+        self.assertEqual(self.cm.history[0]["content"], original_system)
+
+
+class TestMultimodalEdgeCases(MultimodalPruningCase):
+    """Degenerate inputs must terminate and respect the index-0 invariant."""
+
+    def test_list_content_at_index_zero_is_never_popped(self):
+        # The trim loop starts at index 1 for EVERY branch, including the
+        # multimodal wholesale drop. A degenerate history whose only entry
+        # is an oversized list-content system prompt must be left alone
+        # rather than popping index 0 or looping forever.
+        big_sys = image_msg("system", "pathological oversized system prompt")
+        self.cm.history = [big_sys]
+        self.assertGreater(_total_length(self.cm.history), LIMIT)
+        self.cm._trim_context_if_needed()
+        self.assertEqual(len(self.cm.history), 1)
+        self.assertIs(self.cm.history[0], big_sys)
+
+    def test_any_non_string_content_dropped_wholesale(self):
+        # The guard is `not isinstance(content, str)` — not an image_url
+        # check — so ANY non-string content (e.g. legacy bare-string lists,
+        # which _content_length still measures) takes the wholesale path.
+        bare_list_msg = {"role": "user", "content": ["x" * 5000]}
+        tail = self.plain_msg("assistant", "t" * 300)
+        self.cm.history = [
+            self.plain_msg("system", self.system_prompt()),
+            bare_list_msg,
+            tail,
+        ]
+        self.assertGreater(_total_length(self.cm.history), LIMIT)
+        self.cm._trim_context_if_needed()
+        self.assertEqual(len(self.cm.history), 2)
+        self.assertEqual(self.list_messages(), [])
+        self.assertEqual(self.cm.history[1]["content"], tail["content"])
+        self.assertEqual(
+            self.stdout_buf.getvalue().count(IMAGE_DROP_BANNER), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

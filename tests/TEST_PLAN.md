@@ -23,12 +23,12 @@
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 6 |
-| 4. Context Management — `context.ContextManager` | 5 | 2 |
+| 4. Context Management — `context.ContextManager` | 5 | 3 |
 | 5. LLM Adapter — `llm.py` | 4 | 0 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **23** |
+| **Total** | **45** | **24** |
 
 ---
 
@@ -306,7 +306,7 @@ has zero coverage.
 
 ### T-20 — Image-bearing messages dropped wholesale (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented** (`tests/unit/test_context_pruning.py`)
 
 Under pruning pressure, a message whose content is a list (multimodal) must be
 removed entirely rather than regex-trimmed (which would raise TypeError).
