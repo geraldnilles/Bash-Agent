@@ -530,14 +530,19 @@ class Agent:
     def _handle_turn_budget_and_stats(self) -> bool:
         """Report context/cost stats after a turn and enforce the session budget.
         Returns True if the session should continue, False if the budget was exceeded."""
-        if self.last_step_cost <= 0.0:
-            return True
-
         # Calculate current context size
         current_context_chars = sum(ContextManager._content_length(m.get("content", "")) for m in self.context.history)
         context_percent = (current_context_chars / CONTEXT_LIMIT) * 100
 
-        print(f"{COLOR_COST}[Session Stats] Context: {context_percent:.1f}% | This request: ${self.last_step_cost:.3f} ({self.last_step_input_tokens} tokens) | Total: ${self.session_cost:.2f} | Provider: {self.last_step_provider or 'N/A'}{COLOR_RESET}")
+        if self.last_step_cost > 0.0:
+            step_info = f"This request: ${self.last_step_cost:.3f} ({self.last_step_input_tokens} tokens)"
+            total_info = f"Total: ${self.session_cost:.2f}"
+        else:
+            # Free models report no pricing data; still show token/context stats
+            step_info = f"This request: {self.last_step_input_tokens} tokens"
+            total_info = "Total: free"
+
+        print(f"{COLOR_COST}[Session Stats] Context: {context_percent:.1f}% | {step_info} | {total_info} | Provider: {self.last_step_provider or 'N/A'}{COLOR_RESET}")
 
         if self.budget > 0 and self.session_cost >= self.budget:
             print(f"\n[Budget] Session cost ${self.session_cost:.2f} has reached the budget of ${self.budget:.2f}. Ending session.")
