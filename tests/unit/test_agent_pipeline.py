@@ -3,6 +3,7 @@ Group 3 — Execution Pipeline tests for parse_and_execute / _execute_script.
 
 T-12  Full happy-path turn (P0)
 T-13  MAX_CODE_BLOCKS enforcement (P0)
+T-14  Attached-image fence extraction (P0)
 
 These tests pin the smallest end-to-end proof that
 parse -> dispatch -> format -> commit works as a unit:
@@ -33,6 +34,7 @@ from tests.helpers.fakes import (
     bash_block,
     python_block,
     output_block,
+    attached_image_block,
     chdir_tmp,
     _make_agent,
     FakeSandbox,
@@ -276,6 +278,193 @@ class TestMaxCodeBlocksEnforcement(PipelineCase):
         self.assertEqual(feedback, "")
         self.assertEqual(len(fake_sb.executed_scripts), 2)
         self.assertNotIn("SYSTEM WARNING", self.user_messages()[0]["content"])
+
+
+# ---------------------------------------------------------------------------
+# T-14 — Attached-image fence extraction
+# ---------------------------------------------------------------------------
+
+class TestAttachedImageFenceExtraction(PipelineCase):
+    """T-14: exercises the exact injection path the ``vision`` tool relies on.
+
+    When a sandboxed tool prints ``---START_ATTACHED_IMAGE-{uuid}---`` fences
+    (vision.py multimodal mode), the pipeline must:
+
+      * strip fences + payload from the DISPLAYED output,
+      * append the ``[Image attached to conversation context.]`` note,
+      * collect ``{"url": ...}`` dicts into ``agent._pending_multimodal_images``,
+      * and, at commit time, convert them into OpenAI-style structured content
+        (a leading text part followed by ``image_url`` parts) and clear pending.
+
+    Fences bearing a DIFFERENT session UUID must be left completely untouched.
+    """
+
+    DATA_URL = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+
+    def _tool_output(self):
+        """Simulate a tool mixing prose with a vision-style image fence."""
+        return "\n".join(
+            [
+                "Captured screenshot.",
+                attached_image_block(self.uid, self.DATA_URL),
+                "Analysis queued.",
+            ]
+        )
+
+    def test_payload_stripped_note_added_pending_populated(self):
+        """_execute_script level: displayed output loses the base64 payload and
+        gains the attachment note; pending queue receives the data URL."""
+        fake_sb = FakeSandbox(execute_result=(0, self._tool_output()))
+        self.agent.sandbox = fake_sb
+
+        formatted = self.agent._execute_script("BASH", "vision shot.png")
+
+        # Surrounding prose survives the strip
+        self.assertIn("Captured screenshot.", formatted)
+        self.assertIn("Analysis queued.", formatted)
+
+        # Payload + fences are gone from the DISPLAYED output entirely
+        self.assertNotIn(self.DATA_URL, formatted)
+        self.assertNotIn("base64", formatted)
+        self.assertNotIn("ATTACHED_IMAGE", formatted)
+
+        # Attachment note added AFTER the trailing prose (inside OUTPUT fence)
+        self.assertIn("[Image attached to conversation context.]", formatted)
+        self.assertGreater(
+            formatted.index("[Image attached"),
+            formatted.index("Analysis queued."),
+        )
+
+        # Exit-code / VISIBLE headers intact
+        self.assertIn(f"EXIT_CODE_0-VISIBLE_100%-{self.uid}", formatted)
+
+        # Pending queue holds exactly the extracted URL object
+        self.assertEqual(
+            self.agent._pending_multimodal_images, [{"url": self.DATA_URL}]
+        )
+
+    def test_full_turn_commits_structured_multimodal_message(self):
+        """End-to-end: parse_and_execute commits ONE user message whose content
+        is a LIST: [{type: text, ...}, {type: image_url, ...}]; the pending
+        queue is drained at commit time."""
+        fake_sb = FakeSandbox(execute_result=(0, self._tool_output()))
+        self.agent.sandbox = fake_sb
+
+        executed, feedback = self.agent.parse_and_execute(
+            bash_block(self.uid, "vision shot.png")
+        )
+
+        # Return contract unchanged by multimodal handling
+        self.assertTrue(executed)
+        self.assertEqual(feedback, "")
+
+        users = self.user_messages()
+        self.assertEqual(len(users), 1)
+        content = users[0]["content"]
+
+        # Multimodal wire format: a LIST of typed parts
+        self.assertIsInstance(content, list)
+        self.assertEqual(len(content), 2)
+
+        # Part 0 - text carrying the OUTPUT fence + note, sans any payload
+        self.assertEqual(content[0]["type"], "text")
+        text_part = content[0]["text"]
+        self.assertIn(
+            f"---START_BASH_OUTPUT-EXIT_CODE_0-VISIBLE_100%-{self.uid}---",
+            text_part,
+        )
+        self.assertIn(f"---END_BASH_OUTPUT-{self.uid}---", text_part)
+        self.assertIn("[Image attached to conversation context.]", text_part)
+        self.assertNotIn(self.DATA_URL, text_part)
+        self.assertNotIn("ATTACHED_IMAGE", text_part)
+
+        # Part 1 - image_url part wrapping the data URL verbatim
+        self.assertEqual(content[1]["type"], "image_url")
+        self.assertEqual(content[1]["image_url"], {"url": self.DATA_URL})
+
+        # Queue drained exactly once, at commit time
+        self.assertEqual(self.agent._pending_multimodal_images, [])
+
+    def test_python_flavor_attaches_identically(self):
+        """A PYTHON block whose sandbox output embeds the fence takes the same
+        strip -> note -> pending -> image_url-part path."""
+        url = "data:image/png;base64,PYTHONPAYLOAD="
+        fake_sb = FakeSandbox(
+            execute_python_result=(0, attached_image_block(self.uid, url))
+        )
+        self.agent.sandbox = fake_sb
+
+        executed, feedback = self.agent.parse_and_execute(
+            python_block(self.uid, "print(open('shot.png', 'rb').read())")
+        )
+
+        self.assertTrue(executed)
+        self.assertEqual(feedback, "")
+        content = self.user_messages()[0]["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual(content[1], {"type": "image_url", "image_url": {"url": url}})
+        self.assertNotIn(url, content[0]["text"])
+        self.assertNotIn("ATTACHED_IMAGE", content[0]["text"])
+        self.assertEqual(self.agent._pending_multimodal_images, [])
+
+    def test_multiple_images_commit_in_document_order(self):
+        """Two fences in one output -> two image_url parts, order preserved."""
+        url_a = "data:image/png;base64,AAAA"
+        url_b = "data:image/jpeg;base64,BBBB"
+        out = "\n".join(
+            [
+                attached_image_block(self.uid, url_a),
+                attached_image_block(self.uid, url_b),
+            ]
+        )
+        fake_sb = FakeSandbox(execute_result=(0, out))
+        self.agent.sandbox = fake_sb
+
+        executed, _ = self.agent.parse_and_execute(bash_block(self.uid, "vision a b"))
+
+        self.assertTrue(executed)
+        content = self.user_messages()[0]["content"]
+        image_parts = [p for p in content if p["type"] == "image_url"]
+        self.assertEqual(
+            image_parts,
+            [
+                {"type": "image_url", "image_url": {"url": url_a}},
+                {"type": "image_url", "image_url": {"url": url_b}},
+            ],
+        )
+        # Text part still present as part 0; payload never leaks anywhere
+        self.assertEqual(content[0]["type"], "text")
+        for p in content:
+            blob = p["text"] if p["type"] == "text" else str(p)
+            self.assertNotIn("ATTACHED_IMAGE", blob)
+
+    def test_foreign_uuid_fence_is_never_consumed(self):
+        """An ATTACHED_IMAGE fence bearing a DIFFERENT session UUID must not be
+        stripped, must not populate pending, and leaves the commit a plain
+        string message (no multimodal wrapping)."""
+        foreign_uuid = str(uuid.uuid4())
+        foreign_fence = attached_image_block(foreign_uuid, self.DATA_URL)
+        fake_sb = FakeSandbox(execute_result=(0, f"before\n{foreign_fence}\nafter"))
+        self.agent.sandbox = fake_sb
+
+        executed, feedback = self.agent.parse_and_execute(
+            bash_block(self.uid, "cat other_session.png")
+        )
+
+        self.assertTrue(executed)
+        self.assertEqual(feedback, "")
+
+        # No images pending -> classic string commit path
+        self.assertEqual(self.agent._pending_multimodal_images, [])
+        content = self.user_messages()[0]["content"]
+        self.assertIsInstance(content, str)
+
+        # Foreign fence passes through untouched, payload visible
+        self.assertIn(foreign_fence, content)
+        self.assertIn(self.DATA_URL, content)
 
 
 if __name__ == "__main__":

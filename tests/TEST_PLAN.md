@@ -22,13 +22,13 @@
 | 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 4 |
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
-| 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 2 |
+| 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 3 |
 | 4. Context Management — `context.ContextManager` | 5 | 0 |
 | 5. LLM Adapter — `llm.py` | 4 | 0 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **17** |
+| **Total** | **45** | **18** |
 
 ---
 
@@ -237,7 +237,7 @@ read dynamically, not baked in. Prevents runaway multi-execution regressions.
 
 ### T-14 — Attached-image fence extraction (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 FakeSandbox returns output embedding
 `---START_ATTACHED_IMAGE-{uuid}---data:image/png;base64,…---END_…---`. Asserts:

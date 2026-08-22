@@ -116,6 +116,27 @@ def output_block(
     )
 
 
+def attached_image_block(uuid_str: str, data_url: str) -> str:
+    """
+    Return a protocol-valid ATTACHED_IMAGE payload fence, byte-for-byte the
+    emission shape of bash_agent/vision.py in multimodal sandbox mode:
+
+        ---START_ATTACHED_IMAGE-{uuid}---
+        {data_url}
+        ---END_ATTACHED_IMAGE-{uuid}---
+
+    Agent._execute_script scans sandbox stdout for these fences, strips the
+    payloads, and queues {"url": ...} dicts onto _pending_multimodal_images;
+    _commit_execution_feedback then converts them into image_url content
+    parts. Used by T-14 (and later T-38).
+    """
+    return (
+        f"---START_ATTACHED_IMAGE-{uuid_str}---\n"
+        f"{data_url}\n"
+        f"---END_ATTACHED_IMAGE-{uuid_str}---"
+    )
+
+
 # ---------------------------------------------------------------------------
 # T-00c — FakeLLMClient + cache seeding
 # ---------------------------------------------------------------------------
@@ -501,6 +522,7 @@ __all__ = [
     "bash_block",
     "python_block",
     "output_block",
+    "attached_image_block",
     "FakeLLMClient",
     "FakeResponse",
     "FakeUsage",

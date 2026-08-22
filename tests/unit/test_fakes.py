@@ -22,6 +22,7 @@ from tests.helpers.fakes import (
     bash_block,
     python_block,
     output_block,
+    attached_image_block,
     FakeLLMClient,
     FakeSandbox,
     FakeResponse,
@@ -213,6 +214,25 @@ class TestFencedBlockBuilders(unittest.TestCase):
         blocks, _ = agent._extract_blocks(combined)
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0][0], "BASH")
+
+    def test_attached_image_block_builder_mirrors_vision_emission(self):
+        """ATTACHED_IMAGE builder must match vision.py's 3-print layout and be
+        consumable by the production extraction regex used in _execute_script."""
+        uid = str(uuid.uuid4())
+        url = "data:image/png;base64,iVBORw0KGgo="
+        fence = attached_image_block(uid, url)
+
+        self.assertEqual(
+            fence,
+            "---START_ATTACHED_IMAGE-%s---\n%s\n---END_ATTACHED_IMAGE-%s---"
+            % (uid, url, uid),
+        )
+
+        # The same regex agent._execute_script uses must recover exactly [url]
+        pattern = (
+            r"---START_ATTACHED_IMAGE-%s---\s*(.*?)\s*---END_ATTACHED_IMAGE-%s---" % (uid, uid)
+        )
+        self.assertEqual(re.findall(pattern, fence, re.DOTALL), [url])
 
 
 # ---------------------------------------------------------------------------
