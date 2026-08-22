@@ -410,6 +410,11 @@ class Agent:
 
     def _extract_message_content(self, choice) -> str:
         """Extract and validate textual content or fallback reasoning from a response choice."""
+        if choice.finish_reason == "tool_calls":
+            raise ValueError(
+                "Invalid finish_reason: tool_calls. The model attempted to use native tool_calls, "
+                "which is not supported. Please use BASH and PYTHON code blocks instead."
+            )
         if choice.finish_reason == "length":
             raise ValueError("Output truncated due to token limit (finish_reason: length).")
 
@@ -485,6 +490,47 @@ class Agent:
                     raise ValueError("Empty choices in response.")
 
                 choice = response.choices[0]
+
+                if choice.finish_reason == "tool_calls":
+                    self._record_response_usage(response)
+                    print(f"\n{COLOR_OUT}[System] Model returned finish_reason=tool_calls. Native tool_calls are not supported. Prompting for BASH/PYTHON blocks instead.{COLOR_RESET}")
+                    tool_info = ""
+                    try:
+                        tc = getattr(choice.message, "tool_calls", None)
+                        if tc:
+                            tool_info = f"\nAttempted tool_calls: {tc}"
+                    except Exception:
+                        pass
+                    self.context.add_message("assistant", f"[Invalid tool_calls attempt]{tool_info}")
+                    self.context.add_message(
+                        "user",
+                        "⚠️ [SYSTEM WARNING] Invalid finish_reason: tool_calls. The model attempted to use native tool_calls, "
+                        "which is not supported in this environment. Please use BASH and PYTHON code blocks instead.\n"
+                        f"---START_BASH_COMMAND-{self.uuid}---\n"
+                        f"[bash commands go here]\n"
+                        f"---END_BASH_COMMAND-{self.uuid}---\n"
+                        f"or\n"
+                        f"---START_PYTHON_COMMAND-{self.uuid}---\n"
+                        f"[python code goes here]\n"
+                        f"---END_PYTHON_COMMAND-{self.uuid}---"
+                    )
+                    try:
+                        recovery_response = llm.create_chat_completion(
+                            model=self.model,
+                            messages=self.context.history,
+                            max_tokens=self.max_tokens,
+                            reasoning_effort=self.reasoning_effort
+                        )
+                        if not recovery_response or not recovery_response.choices:
+                            raise ValueError("Empty choices in recovery response.")
+                        recovery_choice = recovery_response.choices[0]
+                        agent_msg = self._extract_message_content(recovery_choice)
+                        self._record_response_usage(recovery_response)
+                        return agent_msg
+                    finally:
+                        if len(self.context.history) >= 2:
+                            self.context.history.pop()
+                            self.context.history.pop()
 
                 # Handle thinking token cutoff recovery
                 if choice.finish_reason == "length":
