@@ -23,12 +23,12 @@
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 6 |
-| 4. Context Management — `context.ContextManager` | 5 | 1 |
+| 4. Context Management — `context.ContextManager` | 5 | 2 |
 | 5. LLM Adapter — `llm.py` | 4 | 0 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **22** |
+| **Total** | **45** | **23** |
 
 ---
 
@@ -293,7 +293,7 @@ kicks in. Static-method test, zero setup.
 
 ### T-19 — Hysteresis pruning ladder (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented** (`tests/unit/test_context_pruning.py`)
 
 Builds a history over `CONTEXT_LIMIT` (patch `bash_agent.config.CONTEXT_LIMIT`
 to something tiny like 2,000 for speed) containing: system prompt, old

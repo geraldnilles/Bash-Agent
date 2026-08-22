@@ -161,5 +161,317 @@ class TestPruningRelevance(unittest.TestCase):
         self.assertEqual(6400 // 8, 800)
 
 
+# ---------------------------------------------------------------------------
+# T-19 — Hysteresis pruning ladder (_trim_context_if_needed)
+# ---------------------------------------------------------------------------
+
+import contextlib
+import io
+import re
+import uuid as uuid_module
+from unittest import mock
+
+from tests.helpers.fakes import bash_block, output_block, chdir_tmp
+
+# Tiny limit so ladders complete in a handful of passes yet stay human-checkable.
+LIMIT = 2000
+TARGET = int(LIMIT * 0.8)  # documented hysteresis target: prune down to 80%
+
+DELETED_MARKER = "[BASH_OUTPUT DELETED TO SAVE CONTEXT]"
+TRUNCATED_MARKER = "...[TRUNCATED]"
+HYSTERESIS_BANNER = "Initiating hysteresis cleanup"
+
+
+def _total_length(history):
+    """Mirror of the production accounting: sum of _content_length over history."""
+    return sum(ContextManager._content_length(m.get("content", "")) for m in history)
+
+
+class PruningCase(unittest.TestCase):
+    """
+    Shared harness for ladder tests:
+      * throwaway CWD (ContextManager.__init__ writes .bash_agent_tmp/SCRATCHPAD.md),
+      * captured stdout (production prints [System] banners),
+      * CONTEXT_LIMIT patched to LIMIT in the *context* module namespace
+        (context.py binds it via `from bash_agent.config import CONTEXT_LIMIT`,
+        so patching bash_agent.config.CONTEXT_LIMIT would NOT be seen).
+    """
+
+    def setUp(self):
+        self._chdir_cm = chdir_tmp()
+        self._chdir_cm.__enter__()
+        self.stdout_buf = io.StringIO()
+        self._stdout_cm = contextlib.redirect_stdout(self.stdout_buf)
+        self._stdout_cm.__enter__()
+        self.uid = str(uuid_module.uuid4())
+        self._limit_patch = mock.patch("bash_agent.context.CONTEXT_LIMIT", LIMIT)
+        self._limit_patch.start()
+        self.cm = ContextManager(self.uid)
+
+    def tearDown(self):
+        self._limit_patch.stop()
+        self._stdout_cm.__exit__(None, None, None)
+        self._chdir_cm.__exit__(None, None, None)
+
+    # -- message builders ---------------------------------------------------
+
+    def system_prompt(self, pad=100):
+        return "You are the system prompt. " + "S" * pad
+
+    def output_msg(self, role, body):
+        return {"role": role, "content": output_block(self.uid, 0, body)}
+
+    def command_msg(self, role, script):
+        return {"role": role, "content": bash_block(self.uid, script)}
+
+    def plain_msg(self, role, text):
+        return {"role": role, "content": text}
+
+    # -- assertion helpers --------------------------------------------------
+
+    def banners(self):
+        return self.stdout_buf.getvalue().count(HYSTERESIS_BANNER)
+
+    def command_bodies(self, msg):
+        """Extract script bodies from BASH/PYTHON command fences in a message."""
+        pat = (
+            rf"(---START_(?:BASH|PYTHON)_COMMAND-{self.uid}---\n?)"
+            rf"(.*?)"
+            rf"(\n?---END_(?:BASH|PYTHON)_COMMAND-{self.uid}---)"
+        )
+        return re.findall(pat, msg["content"], flags=re.DOTALL)
+
+
+class TestHysteresisGuard(PruningCase):
+    """No trimming may occur until the STRICT limit is reached/exceeded."""
+
+    def test_no_trim_below_limit(self):
+        sys_msg = self.plain_msg("system", self.system_prompt())
+        filler = self.plain_msg("user", "f" * (LIMIT - 200))
+        self.cm.history = [sys_msg, filler]
+        before = _total_length(self.cm.history)
+        self.assertLess(before, LIMIT)
+
+        self.cm._trim_context_if_needed()
+
+        self.assertEqual(_total_length(self.cm.history), before)
+        self.assertEqual(len(self.cm.history), 2)
+        self.assertEqual(self.banners(), 0)
+
+    def test_no_trim_exactly_at_limit(self):
+        # Boundary: the guard is `total <= CONTEXT_LIMIT -> return`, so a
+        # history sitting EXACTLY on the limit must be left untouched.
+        sys_msg = self.plain_msg("system", self.system_prompt())
+        filler_len = LIMIT - _total_length([sys_msg])
+        self.cm.history = [sys_msg, self.plain_msg("user", "f" * filler_len)]
+        self.assertEqual(_total_length(self.cm.history), LIMIT)
+
+        self.cm._trim_context_if_needed()
+
+        self.assertEqual(_total_length(self.cm.history), LIMIT)
+        self.assertEqual(len(self.cm.history), 2)
+        self.assertEqual(self.banners(), 0)
+
+    def test_trim_triggers_immediately_past_limit(self):
+        sys_msg = self.plain_msg("system", self.system_prompt())
+        filler_len = LIMIT - _total_length([sys_msg])
+        self.cm.history = [
+            sys_msg,
+            self.plain_msg("user", "f" * filler_len),
+            self.plain_msg("assistant", "y"),
+        ]
+        self.assertEqual(_total_length(self.cm.history), LIMIT + 1)
+
+        self.cm._trim_context_if_needed()
+
+        # Banner emitted exactly once for the whole trimming episode...
+        self.assertEqual(self.banners(), 1)
+        # ...and the episode ended under the hysteresis target.
+        self.assertLessEqual(_total_length(self.cm.history), TARGET)
+
+
+class TestOutputDeletionLadder(PruningCase):
+    """
+    Ladder rung 1: oldest OUTPUT blocks are hollowed out first.
+
+    History layout (oldest -> newest): system, out, out, out, cmd, plain.
+    Sized so deleting the TWO OLDEST outputs lands under TARGET, proving:
+      * deletions proceed oldest-first (the NEWEST output survives intact),
+      * command blocks are NOT truncated while outputs suffice,
+      * termination happens with total <= 80% of the limit.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.out_body = "o" * 480
+        self.cm.history = [
+            self.plain_msg("system", self.system_prompt()),
+            self.output_msg("user", self.out_body),
+            self.output_msg("user", self.out_body),
+            self.output_msg("user", self.out_body),
+            self.command_msg("assistant", "c" * 300),
+            self.plain_msg("user", "p" * 50),
+        ]
+        # Size-window preconditions. A "deletion" does not reclaim the whole
+        # body: the OUTPUT fences and the 37-char marker survive, so the
+        # hollowed message is exactly output_block(uid, 0, DELETED_MARKER).
+        # Compute the real per-deletion saving and require that two
+        # deletions reach the target while one does not.
+        hollow = output_block(self.uid, 0, DELETED_MARKER)
+        full = output_block(self.uid, 0, self.out_body)
+        savings = len(full) - len(hollow)
+        total0 = _total_length(self.cm.history)
+        self.assertGreater(total0, LIMIT, "fixture must start over the strict limit")
+        self.assertGreater(total0 - savings, TARGET,
+                           "one deletion must NOT reach the target")
+        self.assertLessEqual(total0 - 2 * savings, TARGET,
+                             "two deletions must reach the target")
+
+    def test_oldest_outputs_deleted_first_and_newest_survives(self):
+        before = [dict(m) for m in self.cm.history]
+
+        self.cm._trim_context_if_needed()
+
+        # Rung 1 hit the two oldest outputs...
+        for i in (1, 2):
+            content = self.cm.history[i]["content"]
+            self.assertIn(DELETED_MARKER, content)
+            self.assertNotIn(self.out_body, content)
+            # Fences survive the hollowing-out (protocol shape preserved).
+            self.assertIn(f"---START_BASH_OUTPUT-EXIT_CODE_0-VISIBLE_100%-{self.uid}---", content)
+            self.assertIn(f"---END_BASH_OUTPUT-{self.uid}---", content)
+        # ...while the NEWEST output kept its full body: proof of oldest-first.
+        self.assertIn(self.out_body, self.cm.history[3]["content"])
+        self.assertNotIn(DELETED_MARKER, self.cm.history[3]["content"])
+        # Each hollowed message is byte-for-byte the expected shape:
+        # fences + newline-wrapped marker, nothing else reclaimed.
+        self.assertEqual(
+            self.cm.history[1]["content"], output_block(self.uid, 0, DELETED_MARKER)
+        )
+
+    def test_commands_not_truncated_while_outputs_suffice(self):
+        self.cm._trim_context_if_needed()
+        for msg in self.cm.history:
+            self.assertNotIn(TRUNCATED_MARKER, msg["content"])
+        # The command message is byte-identical to how it was built.
+        self.assertEqual(self.cm.history[4]["content"], bash_block(self.uid, "c" * 300))
+
+    def test_terminates_under_target_with_system_intact(self):
+        original_system = self.cm.history[0]["content"]
+        self.cm._trim_context_if_needed()
+        self.assertLessEqual(_total_length(self.cm.history), TARGET)
+        self.assertEqual(self.cm.history[0]["content"], original_system)
+        self.assertEqual(self.banners(), 1)
+
+
+class TestCommandTruncationLadder(PruningCase):
+    """
+    Ladder rung 2: with NO outputs present, command scripts are truncated
+    to their first 80 characters plus the ...[TRUNCATED] marker, oldest
+    first, without dropping any message.
+    """
+
+    SCRIPT = "c" * 1000
+
+    def setUp(self):
+        super().setUp()
+        self.cm.history = [
+            self.plain_msg("system", self.system_prompt()),
+            self.command_msg("user", self.SCRIPT),
+            self.command_msg("assistant", self.SCRIPT),
+            self.plain_msg("user", "p" * 300),
+        ]
+        total0 = _total_length(self.cm.history)
+        self.assertGreater(total0, LIMIT, "fixture must start over the strict limit")
+
+    def test_both_commands_truncated_to_80_chars_plus_marker(self):
+        self.cm._trim_context_if_needed()
+
+        expected_body = self.SCRIPT[:80] + TRUNCATED_MARKER
+        for i in (1, 2):
+            bodies = self.command_bodies(self.cm.history[i])
+            self.assertEqual(len(bodies), 1, "exactly one command fence expected")
+            self.assertEqual(bodies[0][1], expected_body)
+            self.assertIn(TRUNCATED_MARKER, self.cm.history[i]["content"])
+
+    def test_truncation_happens_without_dropping_messages(self):
+        n_before = len(self.cm.history)
+        self.cm._trim_context_if_needed()
+        self.assertEqual(len(self.cm.history), n_before)
+        self.assertLessEqual(_total_length(self.cm.history), TARGET)
+
+    def test_plain_tail_and_system_untouched(self):
+        original_plain = self.cm.history[3]["content"]
+        original_system = self.cm.history[0]["content"]
+        self.cm._trim_context_if_needed()
+        self.assertEqual(self.cm.history[3]["content"], original_plain)
+        self.assertEqual(self.cm.history[0]["content"], original_system)
+
+
+class TestWholesaleDropFailsafe(PruningCase):
+    """
+    Ladder rung 3: when nothing is block-trimmable (plain prose only), the
+    oldest non-system message is dropped WHOLE, repeatedly, until the
+    hysteresis target is met.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.a, self.b, self.c = "a" * 900, "b" * 900, "c" * 900
+        self.cm.history = [
+            self.plain_msg("system", self.system_prompt()),
+            self.plain_msg("user", self.a),
+            self.plain_msg("assistant", self.b),
+            self.plain_msg("user", self.c),
+        ]
+        self.assertGreater(_total_length(self.cm.history), LIMIT)
+
+    def test_oldest_messages_dropped_until_under_target(self):
+        self.cm._trim_context_if_needed()
+
+        # 2827 chars total (incl. 127-char system prompt) -> drop "a" -> 1927
+        # (still > 1600) -> drop "b" -> 1027 (<= 1600) -> stop.
+        self.assertEqual(len(self.cm.history), 2)
+        self.assertEqual(self.cm.history[1]["content"], self.c)
+        self.assertLessEqual(_total_length(self.cm.history), TARGET)
+
+    def test_system_prompt_never_dropped(self):
+        original_system = self.cm.history[0]["content"]
+        self.cm._trim_context_if_needed()
+        self.assertEqual(self.cm.history[0]["content"], original_system)
+
+
+class TestDegenerateHistoriesTerminate(PruningCase):
+    """The trim loop must always terminate and never touch index 0."""
+
+    def test_single_oversized_system_message_is_left_alone(self):
+        # Pathological: ONLY the system prompt exists and it alone exceeds
+        # the limit. The failsafe must bail out (len(history) == 1) instead
+        # of popping index 0 or looping forever.
+        big = "S" * (LIMIT * 2)
+        self.cm.history = [self.plain_msg("system", big)]
+        self.cm._trim_context_if_needed()
+        self.assertEqual(len(self.cm.history), 1)
+        self.assertEqual(self.cm.history[0]["content"], big)
+
+    def test_repeated_trims_are_stable_once_under_target(self):
+        # Hysteresis contract: once pruned under the target, subsequent
+        # calls are no-ops (no further mutation, no extra banners).
+        self.cm.history = [
+            self.plain_msg("system", self.system_prompt()),
+            self.plain_msg("user", "x" * 900),
+            self.plain_msg("assistant", "y" * 900),
+            self.plain_msg("user", "z" * 900),
+        ]
+        self.cm._trim_context_if_needed()
+        snapshot = [dict(m) for m in self.cm.history]
+        banners_after_first = self.banners()
+
+        self.cm._trim_context_if_needed()
+
+        self.assertEqual(self.cm.history, snapshot)
+        self.assertEqual(self.banners(), banners_after_first)
+
+
 if __name__ == "__main__":
     unittest.main()
