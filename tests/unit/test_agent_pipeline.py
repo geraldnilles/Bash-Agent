@@ -5,6 +5,7 @@ T-12  Full happy-path turn (P0)
 T-13  MAX_CODE_BLOCKS enforcement (P0)
 T-14  Attached-image fence extraction (P0)
 T-15  /tmp/ failure warning heuristic (P1)
+T-17  Scratchpad co-commit ordering (P1)
 
 These tests pin the smallest end-to-end proof that
 parse -> dispatch -> format -> commit works as a unit:
@@ -597,6 +598,121 @@ class TestTmpFileWarningHeuristic(unittest.TestCase):
         self.assertIn("does not persist", warning)
         self.assertIn(".bash_agent_tmp/", warning)
 
+
+# ---------------------------------------------------------------------------
+# T-17 — Scratchpad co-commit ordering
+# ---------------------------------------------------------------------------
+
+class TestScratchpadCoCommitOrdering(PipelineCase):
+    """
+    When the scratchpad file changes during a turn, _commit_execution_feedback
+    must prepend a fresh SCRATCHPAD block to the committed user message and
+    strip older scratchpad fences from prior messages, so the model always
+    sees exactly one, current copy of its notes.
+
+    The "old-format" fence is produced by the real
+    ContextManager.get_scratchpad_block(), so this test fails if the emitter
+    and remove_old_scratchpads() ever drift apart.
+    """
+
+    def _write_scratchpad(self, text):
+        with open(self.agent.context.scratchpad_path, "w") as f:
+            f.write(text)
+
+    def _seed_prior_turn(self, scratch_text, marker):
+        """Seed a commit-shaped prior user message: scratchpad fence + output."""
+        self._write_scratchpad(scratch_text)
+        block = self.agent.context.get_scratchpad_block()
+        self.assertTrue(block.startswith("\n---START_SCRATCHPAD.md-"))
+        prior = block + "\n" + output_block(self.uid, 0, marker)
+        self.agent.context.add_message("user", prior)
+        return prior
+
+    def test_changed_scratchpad_prepends_new_block_and_strips_old(self):
+        """Main scenario: prior message carries an old fence; the file changes;
+        one turn later the old fence is gone and the new fence appears exactly
+        once, prepended to the committed output."""
+        self._seed_prior_turn(
+            "# Project Scratchpad\n\nOLD_STATE v1\n", "earlier result"
+        )
+
+        # The model edits the scratchpad mid-test...
+        self._write_scratchpad("# Project Scratchpad\n\nFRESH_STATE v2\n")
+
+        self.agent.sandbox = FakeSandbox(execute_result=(0, "ok"))
+        executed, feedback = self.agent.parse_and_execute(
+            bash_block(self.uid, "echo ok")
+        )
+
+        # Return contract
+        self.assertTrue(executed)
+        self.assertEqual(feedback, "")
+
+        users = self.user_messages()
+        self.assertEqual(len(users), 2)
+
+        # Old fence (and its payload) stripped from the prior message; the
+        # sibling output block must survive the strip untouched.
+        self.assertNotIn("---START_SCRATCHPAD.md-", users[0]["content"])
+        self.assertNotIn("OLD_STATE", users[0]["content"])
+        self.assertIn(output_block(self.uid, 0, "earlier result"), users[0]["content"])
+
+        # Exactly ONE scratchpad fence across the whole history, carrying the
+        # fresh content and VISIBLE_100%, prepended ahead of this turn's output.
+        total = sum(u["content"].count("---START_SCRATCHPAD.md-") for u in users)
+        self.assertEqual(total, 1)
+        expected_block = (
+            f"\n---START_SCRATCHPAD.md-VISIBLE_100%-{self.uid}---\n"
+            f"# Project Scratchpad\n\nFRESH_STATE v2\n"
+            f"\n---END_SCRATCHPAD.md-{self.uid}---\n"
+        )
+        self.assertTrue(users[1]["content"].startswith(expected_block))
+        self.assertIn("FRESH_STATE", users[1]["content"])
+        self.assertIn(output_block(self.uid, 0, "ok"), users[1]["content"])
+
+    def test_unchanged_scratchpad_is_not_recommitted(self):
+        """Hash caching through the public pipeline: when the file did NOT
+        change between turns, no SCRATCHPAD block is co-committed — and the
+        previous turn's block is left alone (no strip without a replacement)."""
+        self._write_scratchpad("# Project Scratchpad\n\nsession state v1\n")
+        self.agent.sandbox = FakeSandbox(execute_result=(0, "one"))
+
+        executed, _ = self.agent.parse_and_execute(bash_block(self.uid, "echo one"))
+        self.assertTrue(executed)
+        users = self.user_messages()
+        self.assertEqual(len(users), 1)
+        self.assertIn("---START_SCRATCHPAD.md-", users[0]["content"])
+
+        # Turn 2 WITHOUT touching the file: hash cache must suppress co-commit.
+        self.agent.sandbox.queue_execute(0, "two")
+        executed, _ = self.agent.parse_and_execute(bash_block(self.uid, "echo two"))
+        self.assertTrue(executed)
+        users = self.user_messages()
+        self.assertEqual(len(users), 2)
+        self.assertNotIn("---START_SCRATCHPAD.md-", users[1]["content"])
+        self.assertIn(output_block(self.uid, 0, "two"), users[1]["content"])
+        # ...and the earlier block survives (no strip happened).
+        self.assertIn("---START_SCRATCHPAD.md-", users[0]["content"])
+
+    def test_all_prior_scratchpads_stripped_leaving_single_latest(self):
+        """Multiple stale fences (legacy/buggy state) are ALL removed; only the
+        newest copy survives after the turn."""
+        for i, tag in enumerate(("STALE_A", "STALE_B")):
+            self._seed_prior_turn(f"# Project Scratchpad\n\n{tag}\n", f"prior {i}")
+
+        self._write_scratchpad("# Project Scratchpad\n\nLATEST\n")
+        self.agent.sandbox = FakeSandbox(execute_result=(0, "done"))
+        executed, _ = self.agent.parse_and_execute(bash_block(self.uid, "echo done"))
+        self.assertTrue(executed)
+
+        users = self.user_messages()
+        self.assertEqual(len(users), 3)
+        for m in users[:2]:
+            self.assertNotIn("---START_SCRATCHPAD.md-", m["content"])
+            self.assertNotIn("STALE_", m["content"])
+        total = sum(u["content"].count("---START_SCRATCHPAD.md-") for u in users)
+        self.assertEqual(total, 1)
+        self.assertIn("LATEST", users[2]["content"])
 
 
 if __name__ == "__main__":
