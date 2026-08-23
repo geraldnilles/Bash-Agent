@@ -462,7 +462,7 @@ class Agent:
 
     def _handle_retry_backoff(self, retry_count: int) -> None:
         """Wait with exponential backoff while allowing interactive token limit doubling."""
-        retry_delay = 2 ** (retry_count + 1)
+        retry_delay = 30 * (2 ** retry_count)
         print(f"Retrying in {retry_delay} seconds... (Type '2x' and press Enter to double max_tokens to {self.max_tokens * 2})")
 
         start_wait = time.time()
