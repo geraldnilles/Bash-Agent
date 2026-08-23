@@ -349,6 +349,12 @@ Agent.run() loop
 - `ProtectHome=read-only`: /home is read-only
 - `PrivateTmp=yes`: isolated /tmp and /var/tmp
 - `ReadWritePaths`: dynamically expanded via `request-write`
+- Unique `--unit=` per invocation (`bash-agent-<pid>-<n>-<hex>.service`); on
+  client-side timeout the unit is stopped via `systemctl --user stop`
+  (`Sandbox._reap_unit`) so timed-out workloads don't leak onto the host.
+  NOTE: `--working-directory=`/`ReadWritePaths=` under `/tmp` break namespace
+  setup when combined with `PrivateTmp=yes` (exit 226) — production always
+  runs from a real project directory, so this only matters for tooling/tests.
 
 ### 6. Model Selection Priority
 1. CLI `--model` flag

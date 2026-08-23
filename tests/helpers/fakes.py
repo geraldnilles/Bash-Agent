@@ -533,3 +533,65 @@ __all__ = [
     "_make_agent",
     "make_agent",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Integration-test helper — repo-local scratch CWD
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def chdir_repo_tmp(prefix: str = "t30"):
+    """
+    Context manager that chdirs into a fresh scratch directory under the
+    REPO's .bash_agent_tmp/ folder (gitignored, auto-cleanable) instead of
+    /tmp.
+
+    Why this exists (T-30): systemd-run with PrivateTmp=yes mounts a fresh
+    tmpfs over /tmp inside the sandbox, so --working-directory= or
+    ReadWritePaths= pointing under /tmp cannot resolve -> namespace setup
+    fails (exit 226/200). Production always runs from a real project dir, so
+    integration tests must too. The directory is removed on exit.
+    """
+    import shutil as _shutil
+
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..")
+    )
+    base = os.path.join(repo_root, ".bash_agent_tmp", f"test-{prefix}")
+    _shutil.rmtree(base, ignore_errors=True)
+    os.makedirs(base, exist_ok=True)
+
+    original = os.getcwd()
+    try:
+        os.chdir(base)
+        yield base
+    finally:
+        os.chdir(original)
+        _shutil.rmtree(base, ignore_errors=True)
+
+
+__all__.append("chdir_repo_tmp")
+
+
+def systemd_user_bus_available() -> bool:
+    """
+    True when systemd-run exists AND a user-session round-trip succeeds.
+    Used as skipUnless guard by all Group 7 integration tests.
+    """
+    import shutil as _shutil
+    import subprocess as _sp
+
+    if not _shutil.which("systemd-run"):
+        return False
+    try:
+        r = _sp.run(
+            ["systemd-run", "--user", "--quiet", "--wait", "--collect",
+             "--pipe", "/bin/true"],
+            capture_output=True, text=True, timeout=15,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+__all__.append("systemd_user_bus_available")

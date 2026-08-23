@@ -7,9 +7,12 @@
 > (`unit/test_agent_special_commands.py`), the execution-pipeline group
 > (`unit/test_agent_pipeline.py`), the context-management group
 > (`unit/test_context_pruning.py`, `unit/test_context_scratchpad.py`,
-> `unit/test_context_persistence.py`), and the output-formatting group
-> (`unit/test_agent_output_format.py`), and the LLM-adapter group
-> (`unit/test_llm_adapter.py`) are live; run them with the command below.
+> `unit/test_context_persistence.py`), the output-formatting group
+> (`unit/test_agent_output_format.py`), the LLM-adapter group
+> (`unit/test_llm_adapter.py`), the sandbox-construction group
+> (`unit/test_sandbox_construction.py`), and the full integration group
+> (`integration/test_sandbox_systemd.py`, `integration/test_full_agent_loop.py`)
+> are live; run them with the command below.
 
 ---
 
@@ -97,6 +100,7 @@ deliberate commits — never as a side effect of adding tests.
 
 | # | Status | Location | Description | Pinned by |
 |---|--------|----------|-------------|-----------|
+| 2 | **FIXED** | `sandbox.Sandbox.execute/_execute_python` | On `BASH_TIMEOUT`, `subprocess.run` SIGKILLs only the `systemd-run` *client*; the transient service kept running on the host forever (verified empirically: a timed-out `sleep 999` survived). **Fixed** by giving every invocation a unique `--unit=` name and calling `systemctl --user stop <unit>` on the `TimeoutExpired` path (`Sandbox._reap_unit`). Verified: a real timed-out run now returns 124 and leaves no stray process. Integration tests still self-clean defensively (`exec -a <marker>`); see `integration/test_sandbox_systemd.py::test_timeout_maps_to_124`. | `integration/test_sandbox_systemd.py` (T-30) |
 | 1 | **FIXED** | `agent._extract_blocks` | Cross-type fence pairs (e.g. `START_BASH`/`END_PYTHON`) could glue onto a later same-type END fence, producing one spanning garbage "script" containing fences and prose that would be executed as code. Both strict and relaxed patterns now use a tempered body forbidding command-fence markers inside a block body. | `unit/test_agent_blocks.py::TestCrossTypeFenceMismatch` (T-05) |
 
 ---

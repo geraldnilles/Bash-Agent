@@ -1,6 +1,8 @@
 import os
 import subprocess
 import tempfile
+import itertools
+import uuid as uuid_lib
 from bash_agent.config import BASH_TIMEOUT
 
 class Sandbox:
@@ -9,7 +11,30 @@ class Sandbox:
         self.timeout = timeout if timeout is not None else BASH_TIMEOUT
         self.uuid = uuid
         self.multimodal_capabilities = multimodal_capabilities or []
-        
+        self._unit_counter = itertools.count()
+
+    def _unit_name(self) -> str:
+        """Unique transient unit name so timeouts can stop exactly this run."""
+        return f"bash-agent-{os.getpid()}-{next(self._unit_counter)}-{uuid_lib.uuid4().hex[:8]}.service"
+
+    def _reap_unit(self, unit_name: str) -> None:
+        """
+        Stop the transient unit after a client-side timeout.
+
+        Killing the systemd-run client process does NOT stop the service it
+        started: without this, a timed-out workload (e.g. sleep 999) keeps
+        running on the host forever. Best-effort: never raise from here.
+        """
+        try:
+            subprocess.run(
+                ["systemctl", "--user", "stop", unit_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except Exception:
+            pass
+
     def request_write(self, path: str) -> bool:
         abs_path = os.path.abspath(path)
         print(f"\n[AGENT REQUEST] The agent is requesting write access to: {abs_path}")
@@ -35,9 +60,11 @@ class Sandbox:
 
         host_path = os.environ.get("PATH", "")
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+        unit_name = self._unit_name()
 
         cmd = [
             "systemd-run", "--user", "--quiet", "--wait", "--collect", "--pipe",
+            f"--unit={unit_name}",
             "--property=ProtectSystem=strict",
             "--property=ProtectHome=read-only",
             "--property=PrivateTmp=yes",
@@ -75,6 +102,9 @@ class Sandbox:
             # print(f"\n[DEBUG] Exit: {exit_code} | Output: {output.strip()}")
 
         except subprocess.TimeoutExpired as e:
+            # The client was killed, but the transient service is still
+            # running -- stop it so timed-out workloads do not leak.
+            self._reap_unit(unit_name)
             # Because we routed stderr to stdout, all partial output is in e.stdout
             partial_out = e.stdout if e.stdout else ""
             output = f"[SYSTEM ERROR] Command timed out after {self.timeout} seconds.\nPartial Output:\n{partial_out}"
@@ -100,8 +130,10 @@ class Sandbox:
             f.write(script_content)
         os.chmod(script_path, 0o700)
 
+        unit_name = self._unit_name()
         cmd = [
             "systemd-run", "--user", "--quiet", "--wait", "--collect", "--pipe",
+            f"--unit={unit_name}",
             "--property=ProtectSystem=strict",
             "--property=ProtectHome=read-only",
             "--property=PrivateTmp=yes",
@@ -141,6 +173,8 @@ class Sandbox:
             exit_code = result.returncode
             
         except subprocess.TimeoutExpired as e:
+            # Stop the orphaned transient service (see _reap_unit).
+            self._reap_unit(unit_name)
             partial_out = e.stdout if e.stdout else ""
             output = f"[SYSTEM ERROR] Python command timed out after {self.timeout} seconds.\nPartial Output:\n{partial_out}"
             exit_code = 124

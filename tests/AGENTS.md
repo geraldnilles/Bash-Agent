@@ -51,3 +51,24 @@ the authoritative inventory in `TEST_PLAN.md` (T-00 … T-41):
   under the 60s harness timeout.
 - The venv interpreter is `./venv/bin/python` (3.14). Run the suite with it,
   not the system python.
+- **systemd-run + PrivateTmp vs /tmp CWDs**: `--working-directory=` or
+  `ReadWritePaths=` pointing under `/tmp` fails namespace setup (exit 226/200)
+  because `PrivateTmp=yes` mounts a fresh tmpfs over `/tmp` inside the
+  sandbox. Production always runs from a real project dir, so integration
+  tests must too — use `helpers.fakes.chdir_repo_tmp()` (scratch dir under the
+  repo's gitignored `.bash_agent_tmp/`), NOT `chdir_tmp()`.
+- **Timeouts leak services**: killing the `systemd-run` client does NOT kill
+  the transient unit (see bug #2 in README.md). Any test that triggers a
+  sandbox timeout must clean up after itself; mark the workload with
+  `exec -a <unique-marker> sleep 999` (a shell comment is stripped before
+  exec and leaves the process unmatchable by `pkill -f`).
+- **Protocol hygiene in test sources**: never write a contiguous fence marker
+  literal (e.g. a full START/END token) inside code that will itself be
+  transmitted through the UUID-fenced protocol — assemble expected fences
+  piecewise (see `_cmd_start`/`_out_start` helpers in
+  `integration/test_full_agent_loop.py`). A bare literal marker inside a
+  transmitted block body can be mistaken for a real fence and split the block.
+- **Bounding agent loops**: wrap every `Agent.run()` call in the
+  `runaway_guard()` SIGALRM context manager from
+  `integration/test_full_agent_loop.py`; a protocol regression otherwise
+  hangs the harness until the 60s execution timeout.

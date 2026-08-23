@@ -25,10 +25,10 @@
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 6 |
 | 4. Context Management — `context.ContextManager` | 5 | 5 |
 | 5. LLM Adapter — `llm.py` | 4 | 4 |
-| 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
-| 7. Integration — real processes, still offline | 3 | 0 |
+| 6. Sandbox — `sandbox.Sandbox` | 3 | 3 |
+| 7. Integration — real processes, still offline | 3 | 3 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **30** |
+| **Total** | **45** | **36** |
 
 ---
 
@@ -392,7 +392,7 @@ Trivial but prevents accidental per-call client churn (connection storms).
 
 ### T-27 — Construction defaults & write-path bookkeeping (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 New Sandbox: timeout falls back to `BASH_TIMEOUT`, approved_write_paths starts
 as `[abspath(".")]`, uuid/multimodal stored. `request_write` driven by patched
@@ -401,7 +401,7 @@ Pure-python surface; no subprocess involved.
 
 ### T-28 — Command assembly inspection (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Rather than executing, temporarily wrap `subprocess.run` with a recorder and
 invoke `sandbox.execute("true")`; assert the argv contains the security
@@ -415,7 +415,7 @@ drops a property, CI goes red before users do.
 
 ### T-29 — Temp-script hygiene (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 After a (recorded, mocked-run) execute call, assert the mkstemp'd script under
 `.bash_agent_tmp/` was removed, had mode 0700 while it existed (check via
@@ -429,7 +429,7 @@ load-bearing: the LLM reads exit codes to decide retries.
 
 ### T-30 — Real systemd-run smoke tests (P1, skipUnless systemd-run)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Actual `Sandbox.execute` round-trips: `echo hello` → exit 0 with stdout;
 `exit 3` → exit code 3; stderr merged into stdout (`ls /nonexistent` shows the
@@ -441,7 +441,7 @@ promises. Skipped automatically when no user session bus exists.
 
 ### T-31 — Full offline agent loop (P0, the centerpiece)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Constructs an Agent with capability probe patched out, seeds
 `llm._CLIENT_CACHE` with a scripted FakeLLMClient whose responses are:
@@ -456,7 +456,7 @@ caught bugs #1–#4 automatically.
 
 ### T-32 — Resume flow end-to-end (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Continuation of T-31: after the first session persists history, build a second
 Agent with `resume=True` (probe still patched), assert UUID re-bound from disk,
