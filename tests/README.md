@@ -10,7 +10,9 @@
 > `unit/test_context_persistence.py`), the output-formatting group
 > (`unit/test_agent_output_format.py`), the LLM-adapter group
 > (`unit/test_llm_adapter.py`), the sandbox-construction group
-> (`unit/test_sandbox_construction.py`), and the full integration group
+> (`unit/test_sandbox_construction.py`), the supporting-modules group
+(`unit/test_utils.py`, `unit/test_prompts.py`, `unit/test_main_cli.py`,
+`unit/test_vision.py`), and the full integration group
 > (`integration/test_sandbox_systemd.py`, `integration/test_full_agent_loop.py`)
 > are live; run them with the command below.
 

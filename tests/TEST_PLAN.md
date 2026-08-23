@@ -29,8 +29,8 @@
 | 5. LLM Adapter — `llm.py` | 4 | 4 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 3 |
 | 7. Integration — real processes, still offline | 3 | 3 |
-| 8. Supporting Modules | 9 | 3 |
-| **Total** | **45** | **39** |
+| 8. Supporting Modules | 9 | 6 |
+| **Total** | **45** | **42** |
 
 ---
 
@@ -500,7 +500,7 @@ subprocess-based and mocked.
 
 ### T-36 — `get_system_prompt` composition (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Calls `get_system_prompt(uuid, cwd, scratchpad_path, role_text=None,
 multimodal_capabilities=["image"])` and asserts: UUID interpolated into
@@ -511,7 +511,7 @@ prompt can evolve.
 
 ### T-37 — `main.parse_args` flag mapping (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Argparse-level tests: `--commit` implies resume+message (tested at `main()`
 level with Agent/run mocked), `-x` writes clipboard content to SCRATCHPAD.md
@@ -521,7 +521,7 @@ Shims in by importing `bash_agent.main` and patching its collaborators.
 
 ### T-38 — `vision.py` dual-mode (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Generates a small PNG with Pillow in tmpdir. Sandbox mode: env
 BASH_AGENT_UUID+BASH_AGENT_MULTIMODAL=image set → `main()` prints
