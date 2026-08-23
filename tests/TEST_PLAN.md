@@ -23,12 +23,12 @@
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 6 |
-| 4. Context Management — `context.ContextManager` | 5 | 4 |
+| 4. Context Management — `context.ContextManager` | 5 | 5 |
 | 5. LLM Adapter — `llm.py` | 4 | 0 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **25** |
+| **Total** | **45** | **26** |
 
 ---
 
@@ -47,7 +47,9 @@ throwaway directory. It shims in as a plain context manager (or base-class
 mixin) used by every filesystem-touching test; nothing in production code
 changes. One subtlety documented for implementers: `config.HISTORY_FILE` is an
 import-time constant, so persistence tests must patch
-`bash_agent.config.HISTORY_FILE` rather than rely on chdir alone.
+`bash_agent.context.HISTORY_FILE` (context.py binds it via `from ... import`,
+so patching bash_agent.config would NOT be seen — same subtlety as
+CONTEXT_LIMIT / SCRATCHPAD_LIMIT) rather than rely on chdir alone.
 
 ### T-00b — Fenced-block builders (P0)
 
@@ -328,9 +330,9 @@ yield 100%).
 
 ### T-22 — History persistence round-trip (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented** (`tests/unit/test_context_persistence.py`)
 
-Patch `bash_agent.config.HISTORY_FILE` into the tmpdir; save a history
+Patch `bash_agent.context.HISTORY_FILE` into the tmpdir (context.py binds it via `from ... import`, so patching bash_agent.config would NOT be seen); save a history
 containing string and list content; construct a fresh ContextManager with a
 different UUID; `load_history()` must restore both fields and adopt the saved
 UUID (resume re-binding depends on this). Corrupt-file case is a regression

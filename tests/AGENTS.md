@@ -28,7 +28,7 @@ the authoritative inventory in `TEST_PLAN.md` (T-00 … T-41):
    temporary working directory (use the planned `helpers.fakes.chdir_tmp`).
    Modules compute `.bash_agent_tmp/` and `config.HISTORY_FILE` from the CWD
    *at import time* — changing directories mid-test affects new calls, not
-   already-imported constants. Prefer patching `bash_agent.config.HISTORY_FILE`
+   already-imported constants. Prefer patching `bash_agent.context.HISTORY_FILE` (context.py binds it via `from ... import`; patching bash_agent.config is NOT seen)
    directly for persistence tests.
 4. **Never edit `bash_agent/` source to make a test pass.** Pin buggy behavior
    with `@unittest.expectedFailure` and record it in the README bug table.
