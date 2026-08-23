@@ -486,12 +486,14 @@ def _make_agent(uuid_str: Optional[str] = None, **agent_kwargs) -> Any:
 
     # Default: no network probe
     patch_target = "bash_agent.agent.Agent._check_model_capabilities"
+    reasoning_target = "bash_agent.agent.Agent._fetch_model_reasoning_info"
     with mock.patch(patch_target, return_value=None):
-        # Also avoid filesystem pollution from cleanup_tmp_folder during construction
-        # by patching it; caller can opt out by passing keep_tmp=True behavior,
-        # but we patch by default to keep tests hermetic unless inside chdir_tmp.
-        with mock.patch("bash_agent.agent.cleanup_tmp_folder", return_value=None):
-            agent = Agent(**agent_kwargs)
+        with mock.patch(reasoning_target, return_value=None):
+            # Also avoid filesystem pollution from cleanup_tmp_folder during construction
+            # by patching it; caller can opt out by passing keep_tmp=True behavior,
+            # but we patch by default to keep tests hermetic unless inside chdir_tmp.
+            with mock.patch("bash_agent.agent.cleanup_tmp_folder", return_value=None):
+                agent = Agent(**agent_kwargs)
     # Swap sandbox
     fake_sandbox = FakeSandbox()
     agent.sandbox = fake_sandbox

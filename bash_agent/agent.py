@@ -108,6 +108,9 @@ class Agent:
         # sandbox environment can expose BASH_AGENT_MULTIMODAL to vision.py)
         self.multimodal_capabilities = None
         self._check_model_capabilities()
+        
+        # Fetch reasoning capabilities from OpenRouter
+        self._fetch_model_reasoning_info()
 
         # Handle Resume: attempt to restore previous session
         history_loaded = False
@@ -128,6 +131,19 @@ class Agent:
         # Reasoning effort and max tokens from config
         self.reasoning_effort = reasoning_effort if reasoning_effort is not None and reasoning_effort != 'default' else None
         self.max_tokens = max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS
+        
+        # Adjust reasoning_effort based on model capabilities
+        if self.reasoning_effort == "none" and self.reasoning_mandatory:
+            # Model requires reasoning, use the lowest supported level
+            self.reasoning_effort = self._get_lowest_reasoning_effort()
+            if self.debug:
+                print(f"[Debug] Reasoning is mandatory for this model. Adjusted reasoning_effort from 'none' to '{self.reasoning_effort}'")
+        elif self.reasoning_effort is not None and self.reasoning_effort not in self.reasoning_supported_efforts:
+            # Requested effort not supported, fall back to lowest supported
+            old_effort = self.reasoning_effort
+            self.reasoning_effort = self._get_lowest_reasoning_effort()
+            if self.debug:
+                print(f"[Debug] Reasoning effort '{old_effort}' not supported. Using '{self.reasoning_effort}' instead.")
 
         # Track attached images emitted by the sandbox (e.g., via the vision command)
         self._pending_multimodal_images = []
@@ -176,6 +192,47 @@ class Agent:
             if self.debug:
                 print(f"[Debug] Model capability check failed: {e}. Defaulting to text-only.")
             self.multimodal_capabilities = None
+
+    def _fetch_model_reasoning_info(self):
+        """Query OpenRouter API to get the model's reasoning capabilities."""
+        # Only for OpenRouter models
+        if llm.get_backend(self.model) != "openrouter":
+            self.reasoning_supported_efforts = ["high", "medium", "low", "minimal", "none"]
+            self.reasoning_mandatory = False
+            self.reasoning_default_effort = "medium"
+            if self.debug:
+                print(f"[Debug] Non-OpenRouter model: assuming all reasoning efforts supported, not mandatory.")
+            return
+        try:
+            # Extract author/slug from model id (e.g., "openai/gpt-4")
+            model_id = self.model
+            req = urllib.request.Request(f"https://openrouter.ai/api/v1/models/{model_id}")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                model_data = json_module.loads(resp.read().decode("utf-8"))
+            
+            reasoning = model_data.get("reasoning", {}) or {}
+            self.reasoning_supported_efforts = reasoning.get("supported_efforts", ["high", "medium", "low", "minimal", "none"])
+            self.reasoning_mandatory = reasoning.get("mandatory", False)
+            self.reasoning_default_effort = reasoning.get("default_effort", "medium")
+            
+            if self.debug:
+                print(f"[Debug] Model '{self.model}' reasoning: supported={self.reasoning_supported_efforts}, mandatory={self.reasoning_mandatory}, default={self.reasoning_default_effort}")
+        except Exception as e:
+            if self.debug:
+                print(f"[Debug] Failed to fetch reasoning info: {e}. Using defaults.")
+            self.reasoning_supported_efforts = ["high", "medium", "low", "minimal", "none"]
+            self.reasoning_mandatory = False
+            self.reasoning_default_effort = "medium"
+
+    def _get_lowest_reasoning_effort(self):
+        """Get the lowest supported reasoning effort for the current model."""
+        # Order from lowest to highest
+        effort_order = ["none", "minimal", "low", "medium", "high", "xhigh"]
+        for effort in effort_order:
+            if effort in self.reasoning_supported_efforts:
+                return effort
+        return "medium"  # fallback
+
     def _extract_blocks(self, response_text: str) -> tuple[list[tuple[str, str]], str | None]:
         """
         Extracts valid (cmd_type, script) blocks from the LLM response.
@@ -525,7 +582,7 @@ class Agent:
                             model=self.model,
                             messages=self.context.history,
                             max_tokens=self.max_tokens,
-                            reasoning_effort=self.reasoning_effort
+                            reasoning_effort=self._get_lowest_reasoning_effort()
                         )
                         if not recovery_response or not recovery_response.choices:
                             raise ValueError("Empty choices in recovery response.")
@@ -555,13 +612,16 @@ class Agent:
                         )
 
                         try:
-                            # 2. Call LLM for the direct response with reasoning disabled
+                            # 2. Call LLM for the direct response with lowest supported reasoning
+                            # Use lowest effort to minimize token usage during recovery
+                            recovery_reasoning_effort = self._get_lowest_reasoning_effort()
+                            if self.debug:
+                                print(f"[Debug] Max tokens recovery: using reasoning_effort='{recovery_reasoning_effort}'")
                             recovery_response = llm.create_chat_completion(
                                 model=self.model,
                                 messages=self.context.history,
                                 max_tokens=self.max_tokens,
-                                # Keep the same reasoning effort, some models require a minimum level of reasoning.
-                                reasoning_effort=self.reasoning_effort
+                                reasoning_effort=recovery_reasoning_effort
                             )
 
                             if not recovery_response or not recovery_response.choices:
