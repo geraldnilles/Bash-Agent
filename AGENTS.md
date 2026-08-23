@@ -336,7 +336,7 @@ Agent.run() loop
 
 ### 3. Output Truncation
 - `OUTPUT_LIMIT` (10,000 chars) caps any single output block
-- Truncation preserves first and last 5,000 characters, inserting `...[Output Truncated]...` in the middle
+- Truncation preserves first and last 5,000 characters, joining them with a single-line `TRUNCATION_BANNER` fence (`--⚠️⛔⚠️-OUTPUT_TRUNCATED_HERE-{uuid}-⚠️⛔⚠️--`) in the same dash-fence style as the START/END markers, so the break point is unmistakable yet costs almost no tokens
 - The `VISIBLE_{pct}%` header tells the LLM how much was shown
 
 ### 4. Context Pruning

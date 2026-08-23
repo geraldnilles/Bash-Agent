@@ -9,8 +9,9 @@ output half:
 
   * small outputs pass through byte-for-byte under a VISIBLE_100% header,
   * outputs longer than config.OUTPUT_LIMIT are replaced by their first and
-    last OUTPUT_LIMIT//2 characters joined by a literal
-    `...[Output Truncated]...` marker,
+    last OUTPUT_LIMIT//2 characters joined by TRUNCATION_BANNER,
+    a single-line unicode/emoji fence marker in the START/END style that
+    includes the session UUID,
   * the VISIBLE_% header reports floor(OUTPUT_LIMIT / original_len * 100),
     computed from the PRE-truncation length,
   * the exit code survives in the header either way, and
@@ -30,6 +31,7 @@ import uuid
 from unittest import mock
 
 from bash_agent.config import OUTPUT_LIMIT
+from bash_agent.agent import TRUNCATION_BANNER
 
 from tests.helpers.fakes import (
     output_block,
@@ -130,7 +132,11 @@ class TestTruncatedOutputs(OutputFormatCase):
         out = head + mid + tail  # exactly 25,000 chars
         result = self.fmt(0, out)
 
-        expected_body = "A" * 5000 + "\n...[Output Truncated]...\n" + "Z" * 5000
+        expected_body = (
+            "A" * 5000
+            + TRUNCATION_BANNER.format(uuid=self.uid)
+            + "Z" * 5000
+        )
         expected_core = output_block(self.uid, 0, expected_body, visible=40)
         # The truncated block is the helper-built fence plus a warning suffix.
         self.assertTrue(result.startswith(expected_core))
@@ -146,7 +152,7 @@ class TestTruncatedOutputs(OutputFormatCase):
         self.assertNotIn("MMMMMMM", result)
         self.assertIn("A" * 5000, result)
         self.assertIn("Z" * 5000, result)
-        self.assertEqual(result.count("...[Output Truncated]..."), 1)
+        self.assertEqual(result.count("OUTPUT_TRUNCATED_HERE"), 1)
 
     def test_truncation_point_arithmetic_pins_boundary_chars(self):
         """The split is exactly [:5000] + [-5000:] of the original.
@@ -157,7 +163,10 @@ class TestTruncatedOutputs(OutputFormatCase):
         out = "P" * 4999 + "X" + "Q" * 15000  # exactly 20,000 chars
         result = self.fmt(0, out)
         expected_body = (
-            "P" * 4999 + "X" + "\n...[Output Truncated]...\n" + "Q" * 5000
+            "P" * 4999
+            + "X"
+            + TRUNCATION_BANNER.format(uuid=self.uid)
+            + "Q" * 5000
         )
         self.assertTrue(
             result.startswith(output_block(self.uid, 0, expected_body, visible=50))
@@ -195,7 +204,7 @@ class TestTruncatedOutputs(OutputFormatCase):
         with mock.patch("bash_agent.agent.OUTPUT_LIMIT", 1000):
             out = "y" * 1001
             result = self.fmt(0, out)
-        expected_body = "y" * 500 + "\n...[Output Truncated]...\n" + "y" * 500
+        expected_body = "y" * 500 + TRUNCATION_BANNER.format(uuid=self.uid) + "y" * 500
         self.assertTrue(
             result.startswith(output_block(self.uid, 0, expected_body, visible=99))
         )

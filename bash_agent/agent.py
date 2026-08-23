@@ -85,6 +85,9 @@ def _build_tmp_file_warning(exit_code: int, output: str) -> str | None:
     )
 
 
+TRUNCATION_BANNER = "\n---⚠️⛔⚠️-OUTPUT_TRUNCATED_HERE-{uuid}-⚠️⛔⚠️---\n"
+
+
 class Agent:
     def __init__(self, keep_tmp=False, debug=False, model=None, reasoning_effort=None, max_tokens=None, timeout=None, resume=False, budget=None):
         self.uuid = str(uuid.uuid4())
@@ -414,8 +417,9 @@ class Agent:
         if len(output) > OUTPUT_LIMIT:
             original_len = len(output)
             half_limit = OUTPUT_LIMIT // 2
-            output = output[:half_limit] + "\n...[Output Truncated]...\n" + output[-half_limit:]
             visible = int((OUTPUT_LIMIT / original_len) * 100)
+            banner = TRUNCATION_BANNER.format(uuid=self.uuid)
+            output = output[:half_limit] + banner + output[-half_limit:]
 
         result = f"---START_{cmd_type}_OUTPUT-EXIT_CODE_{exit_code}-VISIBLE_{visible}%-{self.uuid}---\n{output.rstrip("\n")}\n---END_{cmd_type}_OUTPUT-{self.uuid}---"
         if visible < 100:

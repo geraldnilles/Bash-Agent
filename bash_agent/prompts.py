@@ -79,7 +79,7 @@ Every execution returns a block (BASH_OUTPUT or PYTHON_OUTPUT) with critical hea
 - `VISIBLE_X%`: Shows how much output was displayed.
   - WARNING: Output is truncated if it exceeds 10,000 characters (or ~120 lines). Use targeted commands to filter or isolate the output (e.g., `grep`, `head`, `tail`, `sed`, `awk`, etc.) to avoid this.
   - VISIBLE_100% = Full output shown.
-  - Lower % = Output was truncated (first and last halves preserved).
+  - Lower % = Output was truncated (first and last halves preserved). The exact break point is marked by an unmissable single-line fence — `---⚠️⛔⚠️-OUTPUT_TRUNCATED_HERE-<uuid>-⚠️⛔⚠️---` — so never confuse the two preserved halves as contiguous.
 
 ================================================================
 ## SPECIAL COMMANDS

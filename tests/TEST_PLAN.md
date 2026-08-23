@@ -266,7 +266,7 @@ Protects a heuristic that keeps the LLM from repeatedly writing to host /tmp.
 - [x] **Implemented**
 
 `_format_output` with >10,000-char output must produce head+tail halves joined
-by `...[Output Truncated]...`, a `VISIBLE_%` header below 100, and the trailing
+by the single-line unicode/emoji `TRUNCATION_BANNER` fence (`--⚠️⛔⚠️-OUTPUT_TRUNCATED_HERE-{uuid}-⚠️⛔⚠️--`), a `VISIBLE_%` header below 100, and the trailing
 advice line; small outputs pass through untouched with `VISIBLE_100%`. Verifies
 the truncation point arithmetic (5,000/5,000 split) and that exit codes survive
 in the header. Direct-call test on a pure method.
