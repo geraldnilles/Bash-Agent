@@ -23,12 +23,12 @@
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 6 |
-| 4. Context Management — `context.ContextManager` | 5 | 3 |
+| 4. Context Management — `context.ContextManager` | 5 | 4 |
 | 5. LLM Adapter — `llm.py` | 4 | 0 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **24** |
+| **Total** | **45** | **25** |
 
 ---
 
@@ -316,7 +316,7 @@ ladder treatment. Regression guard for the fix in commit 78773ca.
 
 ### T-21 — Scratchpad hashing and VISIBLE math (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented** (`tests/unit/test_context_scratchpad.py`)
 
 Three cases: unchanged file between calls → second call returns `""` (hash
 cache); changed file → new block emitted; oversized file (>SCRATCHPAD_LIMIT,
