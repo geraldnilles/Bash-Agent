@@ -8,7 +8,8 @@
 > (`unit/test_agent_pipeline.py`), the context-management group
 > (`unit/test_context_pruning.py`, `unit/test_context_scratchpad.py`,
 > `unit/test_context_persistence.py`), and the output-formatting group
-> (`unit/test_agent_output_format.py`) are live; run them with the command below.
+> (`unit/test_agent_output_format.py`), and the LLM-adapter group
+> (`unit/test_llm_adapter.py`) are live; run them with the command below.
 
 ---
 

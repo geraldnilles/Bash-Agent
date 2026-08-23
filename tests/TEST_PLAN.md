@@ -24,11 +24,11 @@
 | 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 6 |
 | 4. Context Management — `context.ContextManager` | 5 | 5 |
-| 5. LLM Adapter — `llm.py` | 4 | 0 |
+| 5. LLM Adapter — `llm.py` | 4 | 4 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 0 |
 | 7. Integration — real processes, still offline | 3 | 0 |
 | 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **26** |
+| **Total** | **45** | **30** |
 
 ---
 
@@ -86,7 +86,7 @@ assigned directly (`self.sandbox = Sandbox(...)`), so tests construct an
 `execute(script) -> (exit_code, output)` and `execute_python(code) ->
 (exit_code, output)` returning canned results, recording scripts for
 assertions. This decouples unit tests of the pipeline from systemd entirely;
-real-sandbox behavior is covered separately by T-24/T-25.
+real-sandbox behavior is covered separately by T-30.
 
 ---
 
@@ -347,7 +347,7 @@ to None on load so the scratchpad re-injects after resume.
 
 ### T-23 — Backend routing matrix (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Table-driven: `google/gemini-x` + GEMINI_API_KEY set → `"gemini"`; same model,
 key unset → `"openrouter"`; `openai/gpt-x` regardless of keys →
@@ -357,7 +357,7 @@ so mistakes here mean wrong endpoints.
 
 ### T-24 — OpenRouter payload normalization (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Seed `llm._CLIENT_CACHE["openrouter"]` with FakeLLMClient; call
 `create_chat_completion(model="deepseek/deepseek-v4-pro", reasoning_effort="low")`
@@ -368,7 +368,7 @@ in the whitelist produces no `provider` key; `reasoning_effort=None` adds no
 
 ### T-25 — Gemini payload stripping + cost monkey-patch (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 With GEMINI_API_KEY set and a gemini-routed fake client: assert the model name
 arrived stripped of `google/`, that OpenRouter-only extras were dropped, and
@@ -380,7 +380,7 @@ Guards the fragile monkey-patch called out in AGENTS.md pitfalls.
 
 ### T-26 — Client cache identity (P2)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Two `get_llm_client("openrouter")` calls return the same object; different
 backends return different objects; seeding the cache bypasses construction.
