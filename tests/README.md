@@ -12,7 +12,8 @@
 > (`unit/test_llm_adapter.py`), the sandbox-construction group
 > (`unit/test_sandbox_construction.py`), the supporting-modules group
 (`unit/test_utils.py`, `unit/test_prompts.py`, `unit/test_main_cli.py`,
-`unit/test_vision.py`), and the full integration group
+`unit/test_vision.py`, `unit/test_transcribe.py`, `unit/test_memo.py`,
+`unit/test_search_helpers.py`), and the full integration group
 > (`integration/test_sandbox_systemd.py`, `integration/test_full_agent_loop.py`)
 > are live; run them with the command below.
 
@@ -103,6 +104,7 @@ deliberate commits — never as a side effect of adding tests.
 | # | Status | Location | Description | Pinned by |
 |---|--------|----------|-------------|-----------|
 | 2 | **FIXED** | `sandbox.Sandbox.execute/_execute_python` | On `BASH_TIMEOUT`, `subprocess.run` SIGKILLs only the `systemd-run` *client*; the transient service kept running on the host forever (verified empirically: a timed-out `sleep 999` survived). **Fixed** by giving every invocation a unique `--unit=` name and calling `systemctl --user stop <unit>` on the `TimeoutExpired` path (`Sandbox._reap_unit`). Verified: a real timed-out run now returns 124 and leaves no stray process. Integration tests still self-clean defensively (`exec -a <marker>`); see `integration/test_sandbox_systemd.py::test_timeout_maps_to_124`. | `integration/test_sandbox_systemd.py` (T-30) |
+| 3 | **FIXED** | `search.get_all_files` | gitignore-style directory patterns (`build/`) were matched with bare `fnmatch`, which has no trailing-slash or ancestor semantics, so files under ignored trees were still indexed and embedded (wasted API cost). **Fixed** by normalizing trailing slashes in `get_ignore_patterns()` and pruning by basename, relpath, AND ancestor components during the walk. | `unit/test_search_helpers.py` (T-41) |
 | 1 | **FIXED** | `agent._extract_blocks` | Cross-type fence pairs (e.g. `START_BASH`/`END_PYTHON`) could glue onto a later same-type END fence, producing one spanning garbage "script" containing fences and prose that would be executed as code. Both strict and relaxed patterns now use a tempered body forbidding command-fence markers inside a block body. | `unit/test_agent_blocks.py::TestCrossTypeFenceMismatch` (T-05) |
 
 ---

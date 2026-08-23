@@ -9,6 +9,8 @@ T-00b  fenced-block builders (bash_block, python_block, output_block)
 T-00c  FakeLLMClient + cache seeding
 T-00d  FakeSandbox (plus _make_agent helper)
 """
+import contextlib
+import io
 import os
 import re
 import uuid
@@ -438,7 +440,9 @@ class TestFakeSandbox(unittest.TestCase):
         # parse_and_execute should route to FakeSandbox and format output
         block = bash_block(uid, "echo hi")
         with mock.patch("bash_agent.agent.MAX_CODE_BLOCKS", 5):
-            executed, feedback = agent.parse_and_execute(block)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                executed, feedback = agent.parse_and_execute(block)
         self.assertTrue(executed)
         self.assertEqual(feedback, "")
         self.assertEqual(fake_sb.executed_scripts, ["echo hi"])
@@ -486,7 +490,9 @@ class TestFakeSandbox(unittest.TestCase):
         self.assertFalse(handled)
         # Now via parse_and_execute
         block = bash_block(uid, "echo hi")
-        agent.parse_and_execute(block)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            agent.parse_and_execute(block)
         self.assertEqual(fake_sb.executed_scripts[-1], "echo hi")
 
 

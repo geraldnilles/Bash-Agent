@@ -29,8 +29,8 @@
 | 5. LLM Adapter — `llm.py` | 4 | 4 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 3 |
 | 7. Integration — real processes, still offline | 3 | 3 |
-| 8. Supporting Modules | 9 | 6 |
-| **Total** | **45** | **42** |
+| 8. Supporting Modules | 9 | 9 |
+| **Total** | **45** | **45** |
 
 ---
 
@@ -533,7 +533,7 @@ image_url parts. Uses `runpy`/subprocess-free invocation via patched sys.argv.
 
 ### T-39 — `transcribe.py` helpers (P2)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 `get_audio_format` extension mapping incl. extensionless → "unknown";
 `encode_audio` base64 fidelity; `check_file_size` boundary with patched
@@ -544,7 +544,7 @@ generated silence.
 
 ### T-40 — `memo.py` pure helpers (P2)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 `get_sources` parsing against canned `pactl list sources short` output
 (subprocess patched); `find_source` substring and node-ID matching incl.
@@ -554,7 +554,7 @@ untested by design.
 
 ### T-41 — `search.py` offline core (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 `get_ignore_patterns` merges .gitignore lines with hardcoded set;
 `get_all_files` honors dir/file patterns; `get_file_hash` stability;

@@ -28,7 +28,13 @@ SEARCH_DISABLED_FLAG = os.path.abspath(".bash_agent_tmp/search_disabled")
 
 
 def get_ignore_patterns():
-    """Get ignore patterns from .gitignore and hardcoded exclusions."""
+    """Get ignore patterns from .gitignore and hardcoded exclusions.
+
+    Git-style directory entries ("build/") are normalized to bare names
+    ("build") so fnmatch can prune them during the directory walk; fnmatch
+    has no trailing-slash semantics, so the raw entry would match nothing
+    and every file under the ignored tree would be indexed/embedded.
+    """
     ignore_patterns = {".git", ".bash_agent_tmp", "__pycache__"}
     gitignore_path = ".gitignore"
     if os.path.exists(gitignore_path):
@@ -36,7 +42,7 @@ def get_ignore_patterns():
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#"):
-                    ignore_patterns.add(line)
+                    ignore_patterns.add(line.rstrip("/"))
     return ignore_patterns
 
 
@@ -52,14 +58,33 @@ def get_file_hash(file_path):
 def get_all_files(root_dir):
     """Walk directory and return list of files respecting ignore patterns."""
     ignore_patterns = get_ignore_patterns()
+
+    def _ignored(rel_path, filename):
+        # Match the basename, the relative path, or ANY ancestor directory
+        # component against the patterns. Ancestor matching gives git-style
+        # pruning for nested paths under ignored trees (e.g. "build/x/y.o"
+        # when "build/" is ignored) even if the walk somehow descends there.
+        parts = []
+        head = rel_path
+        while head:
+            head, tail = os.path.split(head)
+            if tail:
+                parts.append(tail)
+        candidates = [filename, rel_path] + parts
+        return any(
+            fnmatch.fnmatch(cand, pat)
+            for cand in candidates
+            for pat in ignore_patterns
+        )
+
     files = []
     for root, dirs, filenames in os.walk(root_dir):
-        # Filter out ignored directories
+        # Filter out ignored directories BEFORE descending into them.
         dirs[:] = [d for d in dirs if not any(fnmatch.fnmatch(d, p) for p in ignore_patterns)]
         for filename in filenames:
             full_path = os.path.join(root, filename)
             rel_path = os.path.relpath(full_path, root_dir)
-            if not any(fnmatch.fnmatch(rel_path, p) or fnmatch.fnmatch(filename, p) for p in ignore_patterns):
+            if not _ignored(rel_path, filename):
                 files.append(rel_path)
     return files
 
