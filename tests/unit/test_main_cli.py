@@ -96,6 +96,7 @@ class TestParseArgDefaults(unittest.TestCase):
         self.assertFalse(args.resume)
         self.assertFalse(args.copy_project)
         self.assertIsNone(args.files)
+        self.assertIsNone(args.ignore)
 
     def test_flag_mapping(self):
         args = self.parse("-m", "do things",
@@ -263,7 +264,7 @@ class TestCopyProjectFlag(unittest.TestCase):
         res = run_cli(["bagent", "--copy-project"])
         self.assertIsInstance(res["exit"], SystemExit)
         self.assertEqual(res["exit"].code, 0)
-        res["copy_project"].assert_called_once_with(None)
+        res["copy_project"].assert_called_once_with(None, ignore=None)
         # Guard: constructing an Agent here would be a real bug (it wipes
         # .bash_agent_tmp/ before the copy completes).
         res["agent_cls"].assert_not_called()
@@ -273,7 +274,21 @@ class TestCopyProjectFlag(unittest.TestCase):
         res = run_cli(["bagent", "--copy-project", "--files",
                        "README.md,src/app.py"])
         self.assertEqual(res["exit"].code, 0)
-        res["copy_project"].assert_called_once_with("README.md,src/app.py")
+        res["copy_project"].assert_called_once_with("README.md,src/app.py", ignore=None)
+
+    def test_ignore_patterns_forwarded(self):
+        res = run_cli(["bagent", "--copy-project", "-i",
+                       "*.log,node_modules"])
+        self.assertEqual(res["exit"].code, 0)
+        res["copy_project"].assert_called_once_with(None,
+                                                    ignore="*.log,node_modules")
+
+    def test_ignore_with_files_forwarded(self):
+        res = run_cli(["bagent", "--copy-project", "--files", "main.py",
+                       "--ignore", "tests,*.md"])
+        self.assertEqual(res["exit"].code, 0)
+        res["copy_project"].assert_called_once_with("main.py",
+                                                    ignore="tests,*.md")
 
 
 if __name__ == "__main__":

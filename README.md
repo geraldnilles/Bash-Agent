@@ -228,6 +228,7 @@ When the budget is exhausted, the agent stops gracefully.
 | `--commit` | Resume and auto-generate a git commit message |
 | `-c, --copy-project` | Copy project files to clipboard (for sharing with other AIs) |
 | `--files "a.py,b.py"` | Specific files for `--copy-project` |
+| `-i, --ignore "*.log,node_modules"` | Comma-separated glob patterns to exclude when using `--copy-project` |
 
 ---
 

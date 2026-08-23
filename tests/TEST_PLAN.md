@@ -495,8 +495,10 @@ Patches the clipboard writers (`wl-copy`/`xclip` via subprocess.run recorder)
 and builds a tmpdir tree with: normal files, a .gitignore'd file, a blacklisted
 file (via clipboard_blacklist.txt), a binary file, a nested dir. Asserts
 `<file path="…">` wrapping, correct exclusions, prefix/suffix presence, and
-the `--files` subset mode. Fully offline because the clipboard boundary is
-subprocess-based and mocked.
+the `--files` subset mode. Also covers the `--ignore "*.log,node_modules"` flag:
+user-supplied glob patterns exclude matching files and directories from both
+full-project and subset copies (with warnings on stdout). Fully offline because
+the clipboard boundary is subprocess-based and mocked.
 
 ### T-36 — `get_system_prompt` composition (P1)
 
@@ -517,7 +519,9 @@ Argparse-level tests: `--commit` implies resume+message (tested at `main()`
 level with Agent/run mocked), `-x` writes clipboard content to SCRATCHPAD.md
 (clipboard getter patched), `-s` clears scratchpad, `--copy-project` exits
 before Agent construction (Agent class patched to raise if instantiated).
-Shims in by importing `bash_agent.main` and patching its collaborators.
+Also verifies `-i/--ignore` is parsed and forwarded verbatim into
+`copy_project_to_clipboard()` alongside `--files`. Shims in by importing
+`bash_agent.main` and patching its collaborators.
 
 ### T-38 — `vision.py` dual-mode (P1)
 

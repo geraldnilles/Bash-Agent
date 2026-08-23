@@ -256,9 +256,9 @@ class CopyProjectCase(UtilsCase):
         make_file(".bash_agent_tmp/clipboard_blacklist.txt",
                   "# comment line\nblacklisted.txt\n")
 
-    def run_copy(self, recorder, file_paths=None):
+    def run_copy(self, recorder, file_paths=None, ignore=None):
         with mock.patch("subprocess.run", recorder):
-            copy_project_to_clipboard(file_paths=file_paths)
+            copy_project_to_clipboard(file_paths=file_paths, ignore=ignore)
 
     def expected_block(self, rel_path):
         """The exact <file> element production must emit for rel_path."""
@@ -353,6 +353,60 @@ class TestSubsetCopy(CopyProjectCase):
         self.assertIn("Warning: Ignored by .gitignore pattern: secret.txt",
                       out)
         self.assertIn("Warning: Binary file skipped: blob.bin", out)
+
+
+class TestIgnorePatterns(CopyProjectCase):
+    """--ignore patterns exclude files & directories from full-project and
+    subset copies."""
+
+    def test_ignore_excludes_files_and_dirs_in_full_copy(self):
+        rec = ClipboardRecorder()
+        self.run_copy(rec, ignore="secret.txt,*.log")
+
+        text = rec.clipboard[0]
+        self.assert_common_wrapping(text)
+        # .gitignore'd + --ignore list both exclude secret.txt & debug.log
+        self.assertNotIn('<file path="secret.txt">', text)
+        self.assertNotIn('<file path="debug.log">', text)
+        # Other files still copied
+        self.assertIn('<file path="a.txt">', text)
+        self.assertIn('<file path="nested/deep.txt">', text)
+
+    def test_ignore_directory_in_full_copy(self):
+        rec = ClipboardRecorder()
+        self.run_copy(rec, ignore="nested")
+
+        text = rec.clipboard[0]
+        self.assertNotIn('<file path="nested/deep.txt">', text)
+        self.assertIn('<file path="a.txt">', text)
+        # Tree is invoked with -I for each user pattern + --prune so the
+        # directory listing matches the file filter.
+        tree_calls = [cmd for cmd, _ in rec.calls if cmd[0] == "tree"]
+        self.assertEqual(tree_calls,
+                         [["tree", "--gitignore", "-I", "nested", "--prune"]])
+
+    def test_ignore_in_subset_copy(self):
+        rec = ClipboardRecorder()
+        self.run_copy(rec, file_paths="a.txt,debug.log,secret.txt",
+                      ignore="*.log")
+
+        text = rec.clipboard[0]
+        self.assertIn('<file path="a.txt">', text)
+        self.assertNotIn('<file path="debug.log">', text)
+        self.assertNotIn('<file path="secret.txt">', text)
+
+        out = self.stdout_text()
+        self.assertIn("Warning: Ignored by --ignore pattern: debug.log", out)
+        self.assertIn("Warning: Ignored by .gitignore pattern: secret.txt",
+                      out)
+
+    def test_ignore_with_spaces_and_multiple_commas(self):
+        rec = ClipboardRecorder()
+        self.run_copy(rec, ignore="*.log, ,debug.log ")
+
+        text = rec.clipboard[0]
+        self.assertNotIn('<file path="debug.log">', text)
+        self.assertIn('<file path="a.txt">', text)
 
 
 if __name__ == "__main__":

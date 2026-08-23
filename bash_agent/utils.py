@@ -64,14 +64,24 @@ def is_binary_file(file_path):
         # If we can't read it, treat it cautiously
         return True
 
-def copy_project_to_clipboard(file_paths=None):
+
+def _matches_any_ignore(path, patterns):
+    """Return True if path (or its basename) matches any glob pattern."""
+    return any(fnmatch.fnmatch(path, p) or fnmatch.fnmatch(os.path.basename(path), p) for p in patterns)
+
+def copy_project_to_clipboard(file_paths=None, ignore=None):
     """
     Copies files in the working directory to the clipboard, 
-    respecting .gitignore and excluding .git and .bash_agent_tmp.
-    
+    respecting .gitignore and excluding .git, .bash_agent_tmp, and
+    any additional user-supplied ignore patterns.
+
     Args:
         file_paths: Optional comma-separated string of specific file paths to copy.
                    If None, copies the entire directory.
+        ignore: Optional comma-separated string of glob patterns (files or
+                directories) to exclude from the copy, e.g. "*.log,node_modules".
+                Patterns are matched against the path relative to the working
+                directory and against the basename.
     """
     import subprocess
     import fnmatch
@@ -87,17 +97,33 @@ def copy_project_to_clipboard(file_paths=None):
                 line = line.strip()
                 if line and not line.startswith("#"):
                     blacklist_patterns.add(line)
+
+    # Parse extra ignore patterns (e.g. "--ignore '*.log,node_modules'")
+    extra_ignore_patterns = set()
+    if ignore:
+        for p in ignore.split(','):
+            p = p.strip()
+            if p:
+                extra_ignore_patterns.add(p)
     
     # Parse file_paths if provided
     specific_files = None
     if file_paths:
         specific_files = [p.strip() for p in file_paths.split(',') if p.strip()]
         print(f"Copying specific files: {specific_files}")
-    
+
+    ignore_patterns = {".git", ".bash_agent_tmp"} | extra_ignore_patterns
+
     # 0. Get directory tree structure using tree --gitignore (only if copying entire project)
     if specific_files is None:
+        # Build tree args, adding explicit --prune for each extra ignore pattern
+        tree_filter_args = ["tree", "--gitignore"]
+        for p in sorted(extra_ignore_patterns):
+            tree_filter_args += ["-I", p]
+        if extra_ignore_patterns:
+            tree_filter_args += ["--prune"]
         try:
-            tree_result = subprocess.run(["tree", "--gitignore"], capture_output=True, text=True)
+            tree_result = subprocess.run(tree_filter_args, capture_output=True, text=True)
             if tree_result.returncode == 0:
                 output.append("=== DIRECTORY TREE ===")
                 output.append(tree_result.stdout)
@@ -108,8 +134,7 @@ def copy_project_to_clipboard(file_paths=None):
             output.append("=== DIRECTORY TREE ===")
             output.append("(tree command not installed)")
 
-    # 1. Determine ignore patterns
-    ignore_patterns = {".git", ".bash_agent_tmp"}
+    # 1. Determine ignore patterns from .gitignore
     gitignore_path = ".gitignore"
     if os.path.exists(gitignore_path):
         with open(gitignore_path, "r") as f:
@@ -135,13 +160,18 @@ def copy_project_to_clipboard(file_paths=None):
                 print(f"Warning: Not a file: {rel_path}")
                 continue
             
-            # Check if file matches any ignore pattern
-            if any(fnmatch.fnmatch(rel_path, p) or fnmatch.fnmatch(os.path.basename(rel_path), p) for p in ignore_patterns):
+            # Check if file matches any ignore pattern (user --ignore first)
+            if _matches_any_ignore(rel_path, extra_ignore_patterns):
+                print(f"Warning: Ignored by --ignore pattern: {rel_path}")
+                continue
+
+            # Check if file matches any .gitignore/blacklist pattern
+            if _matches_any_ignore(rel_path, ignore_patterns):
                 print(f"Warning: Ignored by .gitignore pattern: {rel_path}")
                 continue
 
             # Check if file matches any clipboard blacklist pattern
-            if any(fnmatch.fnmatch(rel_path, p) or fnmatch.fnmatch(os.path.basename(rel_path), p) for p in blacklist_patterns):
+            if _matches_any_ignore(rel_path, blacklist_patterns):
                 print(f"Info: Ignored by clipboard blacklist: {rel_path}")
                 continue
             
@@ -162,19 +192,24 @@ def copy_project_to_clipboard(file_paths=None):
     else:
         # Walk the directory (original behavior)
         for root, dirs, files in os.walk(root_dir):
-            # Modify dirs in-place to prevent os.walk from descending into ignored directories
-            dirs[:] = [d for d in dirs if not any(fnmatch.fnmatch(d, p) for p in ignore_patterns)]
+            # Modify dirs in-place to prevent os.walk from descending into
+            # ignored directories (.gitignore + user --ignore patterns)
+            dirs[:] = [d for d in dirs if not any(fnmatch.fnmatch(d, p) for p in ignore_patterns) and not _matches_any_ignore(os.path.relpath(os.path.join(root, d), root_dir), extra_ignore_patterns)]
             
             for file in files:
                 full_path = os.path.join(root, file)
                 rel_path = os.path.relpath(full_path, root_dir)
                 
-                # Check if file matches any ignore pattern
-                if any(fnmatch.fnmatch(rel_path, p) or fnmatch.fnmatch(file, p) for p in ignore_patterns):
+                # Check if file matches any user --ignore pattern
+                if _matches_any_ignore(rel_path, extra_ignore_patterns):
+                    continue
+
+                # Check if file matches any .gitignore pattern
+                if _matches_any_ignore(rel_path, ignore_patterns):
                     continue
 
                 # Check if file matches any clipboard blacklist pattern
-                if any(fnmatch.fnmatch(rel_path, p) or fnmatch.fnmatch(file, p) for p in blacklist_patterns):
+                if _matches_any_ignore(rel_path, blacklist_patterns):
                     print(f"Info: Ignored by clipboard blacklist: {rel_path}")
                     continue
                 

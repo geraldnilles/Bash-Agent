@@ -213,7 +213,7 @@ Generates the massive system prompt that defines the agent's behavior. Key funct
 | Function | Purpose |
 |----------|---------|
 | `cleanup_tmp_folder()` | Removes contents of `.bash_agent_tmp/` except protected files (SCRATCHPAD.md, ROLE.md, vim_prompt.tmp, embeddings.json, search_disabled, history.json, clipboard_blacklist.txt) |
-| `copy_project_to_clipboard(files)` | Copies project files to system clipboard as XML-like tagged format |
+| `copy_project_to_clipboard(files, ignore=None)` | Copies project files to system clipboard as XML-like tagged format; `ignore` is a comma-separated list of glob patterns (files/dirs) to exclude |
 | `get_clipboard_content()` | Reads from system clipboard (supports xclip, wl-paste, pbpaste) |
 | `get_vim_prompt()` | Reads user input from a temporary vim file |
 | `is_binary_file(file_path)` | Checks if a file is binary (by extension or null byte detection) |
