@@ -1,10 +1,12 @@
 # Bash Agent — Proposed Test Plan
 
-> **STATUS: PROPOSED.** This document inventories the tests recommended for the
-> `bash_agent` package. No test code exists yet. Each entry explains **what** is
-> being tested, **why it matters**, and **how it shims into the existing code**
-> (which seams are used, what gets mocked). All tests run locally with no
-> network access.
+> **STATUS: PARTIALLY IMPLEMENTED.** This document inventories the tests
+> recommended for the `bash_agent` package. Groups 0–7 are implemented and
+> passing (`tests/helpers/`, `tests/unit/`, `tests/integration/`); Group 8 is
+> in progress — see each entry's checkbox below for its status. Each entry
+> explains **what** is being tested, **why it matters**, and **how it shims
+> into the existing code** (which seams are used, what gets mocked). All tests
+> run locally with no network access.
 >
 > Conventions: IDs `T-nn`. Priority: P0 = protocol-critical / regression guard,
 > P1 = important behavior, P2 = nice-to-have hardening. "Seam" describes the
@@ -27,8 +29,8 @@
 | 5. LLM Adapter — `llm.py` | 4 | 4 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 3 |
 | 7. Integration — real processes, still offline | 3 | 3 |
-| 8. Supporting Modules | 9 | 0 |
-| **Total** | **45** | **36** |
+| 8. Supporting Modules | 9 | 3 |
+| **Total** | **45** | **39** |
 
 ---
 
@@ -470,7 +472,7 @@ on daily.
 
 ### T-33 — `utils.is_binary_file` (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Extension table (.png/.pdf/.zip…) → True; text file with null bytes in first
 1024 bytes → True; plain text → False; empty file → False. Direct calls on
@@ -478,7 +480,7 @@ tmpdir fixtures. Clipboard quality depends on this filter.
 
 ### T-34 — `utils.cleanup_tmp_folder` whitelist (P0)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Populates `.bash_agent_tmp/` with whitelisted files (SCRATCHPAD.md,
 history.json, ROLE.md, embeddings.json, search_disabled, vim_prompt.tmp,
@@ -487,7 +489,7 @@ names remain. A bug here destroys user sessions — highest-value utils test.
 
 ### T-35 — `copy_project_to_clipboard` filtering (P1)
 
-- [ ] **Implemented**
+- [x] **Implemented**
 
 Patches the clipboard writers (`wl-copy`/`xclip` via subprocess.run recorder)
 and builds a tmpdir tree with: normal files, a .gitignore'd file, a blacklisted
