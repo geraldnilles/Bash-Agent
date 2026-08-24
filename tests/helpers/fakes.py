@@ -470,6 +470,18 @@ class FakeSandbox:
 # Shared _make_agent helper (used by T-01 and other downstream tests)
 # ---------------------------------------------------------------------------
 
+def _stub_model_reasoning_info(self):
+    """Offline stand-in for Agent._fetch_model_reasoning_info.
+
+    Sets the same instance attributes the production method establishes on
+    OpenRouter API failure (its except-branch fallback), so constructor-time
+    reasoning-effort validation behaves realistically without network access.
+    """
+    self.reasoning_supported_efforts = ["high", "medium", "low", "minimal", "none"]
+    self.reasoning_mandatory = False
+    self.reasoning_default_effort = "medium"
+
+
 def _make_agent(uuid_str: Optional[str] = None, **agent_kwargs) -> Any:
     """
     Construct a bash_agent.agent.Agent without network or systemd effects.
@@ -487,7 +499,10 @@ def _make_agent(uuid_str: Optional[str] = None, **agent_kwargs) -> Any:
     patch_target = "bash_agent.agent.Agent._check_model_capabilities"
     reasoning_target = "bash_agent.agent.Agent._fetch_model_reasoning_info"
     with mock.patch(patch_target, return_value=None):
-        with mock.patch(reasoning_target, return_value=None):
+        # NOTE: must be a plain function (not a MagicMock side_effect) so the
+        # descriptor protocol binds `self` and we can set instance attrs,
+        # mirroring Agent._fetch_model_reasoning_info()'s API-failure fallback.
+        with mock.patch(reasoning_target, _stub_model_reasoning_info):
             # Also avoid filesystem pollution from cleanup_tmp_folder during construction
             # by patching it; caller can opt out by passing keep_tmp=True behavior,
             # but we patch by default to keep tests hermetic unless inside chdir_tmp.

@@ -13,6 +13,7 @@ from typing import List, Dict
 from bash_agent.prompts import get_system_prompt
 from bash_agent.config import DEFAULT_MODEL, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, CONTEXT_LIMIT, DEFAULT_BUDGET
 from bash_agent.utils import cleanup_tmp_folder, copy_project_to_clipboard, get_clipboard_content, get_vim_prompt
+from bash_agent.config_file import load_config
 from bash_agent import llm
 from bash_agent.context import ContextManager
 from bash_agent.sandbox import Sandbox
@@ -93,9 +94,19 @@ class Agent:
         self.uuid = str(uuid.uuid4())
         self.debug = debug
         
-        # Model priority: CLI arg > env var > default
+        # Optional persistent settings file (.bash_agent_tmp/config.json).
+        # Precedence: CLI args > config.json > env var > hard-coded defaults.
+        try:
+            self.file_config = load_config()
+        except Exception as e:
+            print(f"[Config] Failed to load .bash_agent_tmp/config.json ({e}); ignoring.", file=sys.stderr)
+            self.file_config = {}
+
+        # Model priority: CLI arg > config.json > OPENROUTER_MODEL env var > default
         if model:
             self.model = model
+        elif "model" in self.file_config:
+            self.model = self.file_config["model"]
         elif os.environ.get("OPENROUTER_MODEL"):
             self.model = os.environ.get("OPENROUTER_MODEL")
         else:
@@ -131,9 +142,25 @@ class Agent:
         # run() uses it to skip the protocol warmup exchanges on --resume.
         self.resumed_session = history_loaded
         
-        # Reasoning effort and max tokens from config
-        self.reasoning_effort = reasoning_effort if reasoning_effort is not None and reasoning_effort != 'default' else None
-        self.max_tokens = max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS
+        # Reasoning effort and max tokens: CLI arg > config.json > hard-coded defaults.
+        # Per-key fallback, so e.g. --max-tokens alone overrides only max_tokens.
+        if reasoning_effort is not None:
+            # Explicit CLI choice always wins over config.json; 'default'
+            # maps to None (= defer to the model's built-in reasoning default).
+            self.reasoning_effort = None if reasoning_effort == 'default' else reasoning_effort
+        elif "reasoning_effort" in self.file_config:
+            file_effort = self.file_config["reasoning_effort"]
+            # 'default' in the file means: use the model's built-in default
+            self.reasoning_effort = None if file_effort == 'default' else file_effort
+        else:
+            self.reasoning_effort = None
+
+        if max_tokens is not None:
+            self.max_tokens = max_tokens
+        elif "max_tokens" in self.file_config:
+            self.max_tokens = self.file_config["max_tokens"]
+        else:
+            self.max_tokens = DEFAULT_MAX_TOKENS
         
         # Adjust reasoning_effort based on model capabilities
         if self.reasoning_effort == "none" and self.reasoning_mandatory:

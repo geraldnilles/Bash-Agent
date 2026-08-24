@@ -230,6 +230,8 @@ When the budget is exhausted, the agent stops gracefully.
 | `--files "a.py,b.py"` | Specific files for `--copy-project` |
 | `-i, --ignore "*.log,node_modules"` | Comma-separated glob patterns to exclude when using `--copy-project` |
 
+See **[Persistent Project Configuration](#persistent-project-configuration)** below for per-project settings that outrank env vars but lose to these flags.
+
 ---
 
 ## Configuration (Environment Variables)
@@ -238,6 +240,28 @@ When the budget is exhausted, the agent stops gracefully.
 |----------|---------|-------------|
 | `OPENROUTER_API_KEY` | (required) | Your OpenRouter API key |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v4-pro` | Default model for OpenRouter |
+
+---
+
+## Persistent Project Configuration
+
+For settings you want on every session in a given project, create `.bash_agent_tmp/config.json`. It persists between runs (cleanup never deletes it), needs no shell exports, and beats `OPENROUTER_MODEL` — while still losing to command-line flags for any key you pass explicitly.
+
+```json
+{
+  "model": "deepseek/deepseek-v4-pro",
+  "max_tokens": 16384,
+  "reasoning_effort": "medium"
+}
+```
+
+| Key | Values | Notes |
+|-----|--------|-------|
+| `model` | OpenRouter slug | Overrides `OPENROUTER_MODEL`; loses to `--model` |
+| `max_tokens` | Positive integer | Overrides the 8192 default; loses to `--max-tokens` |
+| `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `default` | `default` defers to the model's built-in behavior; loses to `--reasoning-effort` |
+
+**Precedence per setting:** CLI flag > `config.json` > environment variable > built-in default. Fallbacks are per-key: passing only `--max-tokens` leaves `model`/`reasoning_effort` from the file intact. Malformed files are skipped with a `[Config]` warning on stderr; invalid values are dropped individually.
 
 ---
 

@@ -19,6 +19,7 @@ bash_agent/
 ├── main.py          # CLI argument parsing, entry point, glue
 ├── agent.py         # Core Agent class — the main run loop
 ├── config.py        # All constants, defaults, env var names
+├── config_file.py   # Optional .bash_agent_tmp/config.json loader (model/max_tokens/reasoning_effort)
 ├── context.py       # ContextManager — conversation history, pruning, scratchpad
 ├── sandbox.py       # Sandbox — systemd-run execution wrapper
 ├── llm.py           # LLM provider adapter layer (OpenRouter)
@@ -212,7 +213,7 @@ Generates the massive system prompt that defines the agent's behavior. Key funct
 
 | Function | Purpose |
 |----------|---------|
-| `cleanup_tmp_folder()` | Removes contents of `.bash_agent_tmp/` except protected files (SCRATCHPAD.md, ROLE.md, vim_prompt.tmp, embeddings.json, search_disabled, history.json, clipboard_blacklist.txt) |
+| `cleanup_tmp_folder()` | Removes contents of `.bash_agent_tmp/` except protected files (SCRATCHPAD.md, ROLE.md, vim_prompt.tmp, embeddings.json, search_disabled, history.json, clipboard_blacklist.txt, config.json) |
 | `copy_project_to_clipboard(files, ignore=None)` | Copies project files to system clipboard as XML-like tagged format; `ignore` is a comma-separated list of glob patterns (files/dirs) to exclude |
 | `get_clipboard_content()` | Reads from system clipboard (supports xclip, wl-paste, pbpaste) |
 | `get_vim_prompt()` | Reads user input from a temporary vim file |
@@ -356,10 +357,16 @@ Agent.run() loop
   setup when combined with `PrivateTmp=yes` (exit 226) — production always
   runs from a real project directory, so this only matters for tooling/tests.
 
-### 6. Model Selection Priority
-1. CLI `--model` flag
-2. `OPENROUTER_MODEL` environment variable
-3. `DEFAULT_MODEL` in `config.py`
+### 6. Model / Token / Reasoning Priority (per key)
+
+Settings resolve independently per key: CLI flag > `.bash_agent_tmp/config.json` > environment variable > hard-coded default.
+
+1. CLI flags (`--model`, `--max-tokens`, `--reasoning-effort`) — always win
+2. Optional persistent file `.bash_agent_tmp/config.json` (loaded by `config_file.py`; survives tmp-folder cleanup)
+3. `OPENROUTER_MODEL` environment variable (model key only)
+4. Hard-coded defaults in `config.py` (`DEFAULT_MODEL`, `DEFAULT_MAX_TOKENS`; reasoning defaults to off)
+
+Note: an explicit CLI `--reasoning-effort default` is a real choice that overrides the file; inside the file it means "defer to the model's built-in default".
 
 ---
 

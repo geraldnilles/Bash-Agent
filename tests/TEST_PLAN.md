@@ -550,6 +550,26 @@ calls — proven by poisoned fake client).
 
 ---
 
+### T-42 — `config_file.py` + precedence wiring (P1)
+
+- [x] **Implemented**
+
+`load_config()` resolution against CWD at call time (chdir_tmp-isolated); missing/malformed/
+non-object files → `{}` with stderr `[Config]` warning; top-level array/scalar rejected;
+per-key validation (non-empty string model w/ whitespace strip; positive-int max_tokens with
+bool exclusion; effort choices exactly matching argparse incl. case sensitivity); unknown keys
+warn+ignored; partial validity (one bad key doesn't poison others). `cleanup_tmp_folder()`
+preserves `config.json` alongside legacy protected files. Agent precedence via `_make_agent`:
+defaults; file-over-default; file-beats-env-var; env-var still applies without file model;
+CLI beats file for every key; per-key fallback (`--max-tokens` alone keeps file model/effort);
+file `'default'`→None; explicit CLI `--reasoning-effort default` overrides file value;
+broken file → defaults, not crash. Fresh-session construction preserves the file end-to-end.
+Infrastructure note: `_make_agent` now stubs `_fetch_model_reasoning_info` with the production
+API-failure fallback attributes (previously a bare no-op left `reasoning_supported_efforts`
+unset — first exposed by T-42d).
+
+---
+
 ## Suggested Implementation Order
 
 1. **T-00a–d** (helpers) — everything depends on these.

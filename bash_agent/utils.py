@@ -9,7 +9,7 @@ def cleanup_tmp_folder():
     if os.path.exists(tmp_path):
         for item in os.listdir(tmp_path):
             item_path = os.path.join(tmp_path, item)
-            if item in [ "SCRATCHPAD.md", "vim_prompt.tmp", "ROLE.md", "embeddings.json", "search_disabled", "history.json", "clipboard_blacklist.txt" ]:
+            if item in [ "SCRATCHPAD.md", "vim_prompt.tmp", "ROLE.md", "embeddings.json", "search_disabled", "history.json", "clipboard_blacklist.txt", "config.json" ]:
                 continue  # Keep the scratchpad
             if os.path.isfile(item_path):
                 os.remove(item_path)
