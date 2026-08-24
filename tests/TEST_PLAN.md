@@ -347,16 +347,6 @@ to None on load so the scratchpad re-injects after resume.
 
 ## 5. LLM Adapter — `llm.py`
 
-### T-23 — Backend routing matrix (P0)
-
-- [x] **Implemented**
-
-Table-driven: `google/gemini-x` + GEMINI_API_KEY set → `"gemini"`; same model,
-key unset → `"openrouter"`; `openai/gpt-x` regardless of keys →
-`"openrouter"`; None-safe. Implemented by setting/clearing env vars and
-calling `get_backend` directly. Routing decides which API every request hits,
-so mistakes here mean wrong endpoints.
-
 ### T-24 — OpenRouter payload normalization (P0)
 
 - [x] **Implemented**
@@ -368,25 +358,13 @@ and assert recorded kwargs contain `extra_body.reasoning.effort == "low"` and
 in the whitelist produces no `provider` key; `reasoning_effort=None` adds no
 `reasoning` key. Offline via the cache seam; no HTTP anywhere.
 
-### T-25 — Gemini payload stripping + cost monkey-patch (P0)
-
-- [x] **Implemented**
-
-With GEMINI_API_KEY set and a gemini-routed fake client: assert the model name
-arrived stripped of `google/`, that OpenRouter-only extras were dropped, and
-that the returned response's patched `model_dump()` injects
-`usage.cost` computed by `calculate_gemini_cost` from the usage token counts.
-Also unit-tests `calculate_gemini_cost` tier selection by substring
-("gemini-3-flash" tier vs default) including the unknown-model default path.
-Guards the fragile monkey-patch called out in AGENTS.md pitfalls.
-
 ### T-26 — Client cache identity (P2)
 
 - [x] **Implemented**
 
-Two `get_llm_client("openrouter")` calls return the same object; different
-backends return different objects; seeding the cache bypasses construction.
-Trivial but prevents accidental per-call client churn (connection storms).
+Repeated `get_llm_client()` calls return the same shared OpenRouter client;
+seeding the cache bypasses construction. Trivial but prevents accidental
+per-call client churn (connection storms).
 
 ---
 
@@ -575,7 +553,7 @@ calls — proven by poisoned fake client).
 ## Suggested Implementation Order
 
 1. **T-00a–d** (helpers) — everything depends on these.
-2. **P0 protocol/pipeline**: T-01, T-04, T-06, T-12, T-13, T-16, T-19, T-22, T-25, T-31.
+2. **P0 protocol/pipeline**: T-01, T-04, T-06, T-12, T-13, T-16, T-19, T-22, T-24, T-31.
 3. **P0 guards**: T-20, T-34, T-28.
 4. Remaining P1s, then P2s.
 5. After each group lands, flip statuses here and move resolved rows in the

@@ -6,7 +6,7 @@
 
 ## Project Overview
 
-Bash Agent is a Python CLI that orchestrates an autonomous LLM-in-the-loop agent. The LLM communicates via a custom text-based protocol (UUID-fenced blocks) and executes commands in an ephemeral `systemd-run` sandbox. The project is a single Python package (`bash_agent/`) with no external service dependencies beyond an LLM API (OpenRouter or Gemini).
+Bash Agent is a Python CLI that orchestrates an autonomous LLM-in-the-loop agent. The LLM communicates via a custom text-based protocol (UUID-fenced blocks) and executes commands in an ephemeral `systemd-run` sandbox. The project is a single Python package (`bash_agent/`) with no external service dependencies beyond an LLM API (OpenRouter).
 
 **Entry point:** `python3 -m bash_agent.main` or the `bagent` console script (defined in `pyproject.toml`).
 
@@ -21,7 +21,7 @@ bash_agent/
 ├── config.py        # All constants, defaults, env var names
 ├── context.py       # ContextManager — conversation history, pruning, scratchpad
 ├── sandbox.py       # Sandbox — systemd-run execution wrapper
-├── llm.py           # LLM provider adapter layer (OpenRouter / Gemini)
+├── llm.py           # LLM provider adapter layer (OpenRouter)
 ├── prompts.py       # System prompt template generation
 ├── utils.py         # Misc helpers (clipboard, cleanup, vim prompt)
 ├── search.py        # Semantic code search (embeddings + reranking)
@@ -67,7 +67,7 @@ This is the heart of the project. The `Agent` class:
 | `_handle_special_command(cmd_type, script)` | Intercepts built-in agent commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Returns `(handled: bool, formatted_output: str)`. Commands that terminate the session (`exit`, `copy-to-clipboard`) call `sys.exit()` in-process. |
 | `_execute_script(cmd_type, script)` | Executes a bash or python script via `Sandbox.execute()` / `Sandbox.execute_python()`. Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` fences, strips base64 payloads, collects them in `self._pending_multimodal_images`, and returns formatted output. On non-zero exit whose output references a `/tmp/` file with a file-not-found style error, appends a reminder that `/tmp/` is wiped each turn and `.bash_agent_tmp/` should be used instead (see `_build_tmp_file_warning()`). |
 | `_commit_execution_feedback(outputs)` | Bundles output blocks and scratchpad updates into a user message and appends to context. Builds structured multimodal content when `self._pending_multimodal_images` is non-empty. |
-| `_check_model_capabilities()` | Queries OpenRouter API or checks for Gemini prefix to determine the model's supported input modalities. Sets `self.multimodal_capabilities` to a list like `["image"]`, or `None` for text-only models. |
+| `_check_model_capabilities()` | Queries the OpenRouter models API to determine the model's supported input modalities. Sets `self.multimodal_capabilities` to a list like `["image"]`, or `None` for text-only models (or if the probe fails). |
 
 **The fenced-block regex pattern** (used in `_extract_blocks`):
 - Bash: `---START_BASH_COMMAND-{uuid}---\n(.*?)\n---END_BASH_COMMAND-{uuid}---`
@@ -91,7 +91,7 @@ When `finish_reason == "length"` occurs and `choice.message.reasoning` contains 
 2. Issues a follow-up completion request with `reasoning_effort="none"`.
 3. Uses a `try...finally` block to pop both temporary recovery messages from `self.context.history` before returning the final response to the main loop.
 
-**Budget tracking:** After each LLM call, cost is extracted from the API response (OpenRouter provides it natively; Gemini cost is calculated manually in `llm.py`). When `session_cost >= budget`, the loop exits.
+**Budget tracking:** After each LLM call, cost is extracted from the API response (OpenRouter provides it natively). When `session_cost >= budget`, the loop exits.
 
 ---
 
@@ -178,24 +178,18 @@ systemd-run --user --quiet --wait --collect --pipe \
 
 ### LLM Adapter: `llm.py`
 
-Abstraction layer over OpenRouter and Gemini backends. Normalizes payloads and cost tracking.
+Abstraction layer over the OpenRouter backend. Normalizes payloads and request shaping.
 
-**`get_backend(model_name)`**: Returns `"gemini"` if model starts with `"google"` AND `GEMINI_API_KEY` is set; otherwise `"openrouter"`.
+**`get_llm_client()`**: Returns a cached `openai.OpenAI` client instance configured with `OPENROUTER_API_KEY` and `OPENROUTER_BASE_URL`.
 
-**`get_llm_client(backend)`**: Returns a cached `openai.OpenAI` client instance with appropriate `base_url` and `api_key`.
-
-**`get_attribution_headers()`**: Returns the OpenRouter App Attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`, `X-OpenRouter-Categories`) built from the `APP_URL`, `APP_TITLE`, and `APP_CATEGORIES` config constants. These identify this application on OpenRouter's analytics dashboards and public model rankings. Used by every OpenRouter-backed request (chat, embedding, model-metadata probes in `agent.py`, and the rerank call in `search.py`); never attached to Gemini requests.
+**`get_attribution_headers()`**: Returns the OpenRouter App Attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`, `X-OpenRouter-Categories`) built from the `APP_URL`, `APP_TITLE`, and `APP_CATEGORIES` config constants. These identify this application on OpenRouter's analytics dashboards and public model rankings. Used by every OpenRouter-backed request (chat, embedding, model-metadata probes in `agent.py`, and the rerank call in `search.py`).
 
 **`create_chat_completion(model, messages, max_tokens, extra_body, reasoning_effort)`**: The main LLM call:
-- Strips `google/` prefix for Gemini direct API
-- Injects `extra_headers = get_attribution_headers()` on every OpenRouter request
-- Injects `reasoning.effort` into `extra_body` for OpenRouter
+- Injects `extra_headers = get_attribution_headers()` on every request
+- Injects `reasoning.effort` into `extra_body`
 - Injects `provider.only` whitelist from `MODEL_PROVIDERS` config
-- For Gemini: monkey-patches `response.model_dump()` to inject a calculated `cost` field; no attribution headers are sent
 
-**`create_embedding(model, input_texts)`**: Thin wrapper for embedding generation (used by `search.py`). Attaches `extra_headers = get_attribution_headers()` on OpenRouter requests only.
-
-**`calculate_gemini_cost(model_name, prompt_tokens, completion_tokens)`**: Manual pricing tier lookup since Gemini doesn't return cost natively.
+**`create_embedding(model, input_texts)`**: Thin wrapper for embedding generation (used by `search.py`). Attaches `extra_headers = get_attribution_headers()` on every request.
 
 ---
 
@@ -303,7 +297,7 @@ Agent.run() loop
     │
     ├─► ContextManager.get_scratchpad_block()  ──► Reads SCRATCHPAD.md
     ├─► ContextManager.add_message("user", task)
-    ├─► llm.create_chat_completion(history)     ──► OpenRouter / Gemini API
+    ├─► llm.create_chat_completion(history)     ──► OpenRouter API
     │       │
     │       ▼ (LLM response with fenced blocks)
     │
@@ -389,7 +383,6 @@ To add a new tool (like `vision` or `search`):
 - **Regex escaping in `_extract_blocks()`**: The fenced block patterns use raw strings (`r"..."`). Be careful with the UUID interpolation — it's a literal string, not a regex group.
 - **`systemd-run` permissions**: Adding `--property=` flags can break isolation. Always test with a command that tries to write to `/etc` to confirm sandboxing.
 - **Context pruning off-by-one**: The system prompt is at index 0. Pruning iterates from index 1. Don't change this without understanding the trimming loop.
-- **Gemini cost patching**: `llm.py` monkey-patches `response.model_dump`. If the OpenAI library changes its response object structure, this will break silently (cost will be None).
 - **Scratchpad hash caching**: `ContextManager.last_scratchpad_hash` prevents re-injecting unchanged scratchpad. If you modify scratchpad injection logic, reset this hash or you'll get stale behavior.
 - **Multimodal content format**: When `multimodal_capabilities` includes `"image"`, images attached via `vision.py` cause the agent to construct content as a list of content blocks `[{"type": "text", ...}, {"type": "image_url", ...}]` instead of a plain string. The `_content_length()` method and pruning logic must handle both formats.
 
@@ -398,7 +391,7 @@ To add a new tool (like `vision` or `search`):
 ## Dependencies
 
 ```
-openai           # LLM client (OpenRouter and Gemini)
+openai           # LLM client (OpenRouter)
 numpy            # Embedding similarity calculations
 Pillow           # Image resizing for vision
 requests         # HTTP calls (search reranking via OpenRouter API)
@@ -431,7 +424,7 @@ When making changes:
 
 ## Environment
 
-- **Required**: `OPENROUTER_API_KEY` (or `GEMINI_API_KEY` for direct Gemini)
+- **Required**: `OPENROUTER_API_KEY`
 - **Required**: Linux with `systemd` and `systemd-run` (user mode)
-- **Optional**: `OPENROUTER_MODEL`, `GEMINI_BASE_URL`
+- **Optional**: `OPENROUTER_MODEL`
 - **Build tools**: `pipewire-utils` (for `memo`), `ffmpeg` (for `memo`), `poppler-utils` (for PDF processing in sandbox), `xclip` or `wl-paste` (for clipboard features)

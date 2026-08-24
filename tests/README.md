@@ -34,7 +34,6 @@ codebase is mocked or faked:
 | OpenRouter `/api/v1/models` (capability probe) | `Agent._check_model_capabilities()` | Patch `urllib.request.urlopen` |
 | OpenRouter embeddings | `llm.create_embedding()` | Fake client returning fixed vectors |
 | OpenRouter rerank endpoint | `search.rerank_documents()` | Patch `requests.post` |
-| Gemini direct API | `llm.get_backend()` routing | Route through the same fake client |
 
 The only *real* external process the suite may invoke is `systemd-run`
 (integration tests), which is local and requires no network.
@@ -129,8 +128,8 @@ Environment requirements:
 - Python ≥ 3.12 (declared in `pyproject.toml`; the source uses PEP 701 nested f-strings)
 - `systemd-run` available for integration tests (auto-skipped otherwise via
   `@unittest.skipUnless`)
-- No API keys required; tests must pass with `OPENROUTER_API_KEY` and
-  `GEMINI_API_KEY` **unset**
+- No API keys required; tests must pass with `OPENROUTER_API_KEY`
+  **unset**
 
 ---
 

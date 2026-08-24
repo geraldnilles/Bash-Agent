@@ -172,12 +172,6 @@ class Agent:
 
     def _check_model_capabilities(self):
         """Query OpenRouter API to detect the active model's input modalities."""
-        # All Gemini models are multimodal, no API call needed
-        if llm.get_backend(self.model) == "gemini":
-            self.multimodal_capabilities = ["image"]
-            if self.debug:
-                print(f"[Debug] Gemini backend: multimodal assumed for model '{self.model}'.")
-            return
         try:
             req = urllib.request.Request(
                 "https://openrouter.ai/api/v1/models",
@@ -201,14 +195,6 @@ class Agent:
 
     def _fetch_model_reasoning_info(self):
         """Query OpenRouter API to get the model's reasoning capabilities."""
-        # Only for OpenRouter models
-        if llm.get_backend(self.model) != "openrouter":
-            self.reasoning_supported_efforts = ["high", "medium", "low", "minimal", "none"]
-            self.reasoning_mandatory = False
-            self.reasoning_default_effort = "medium"
-            if self.debug:
-                print(f"[Debug] Non-OpenRouter model: assuming all reasoning efforts supported, not mandatory.")
-            return
         try:
             # Extract author/slug from model id (e.g., "openai/gpt-4")
             model_id = self.model

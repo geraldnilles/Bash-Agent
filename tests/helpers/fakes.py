@@ -308,7 +308,6 @@ class FakeLLMClient:
       from bash_agent import llm
       fake = FakeLLMClient(responses=[FakeResponse(...), ...])
       llm._CLIENT_CACHE["openrouter"] = fake
-      llm._CLIENT_CACHE["gemini"] = fake  # if needed
 
     The fake records every call in `calls` / `create_calls` so tests can
     assert on extra_body (reasoning effort, provider whitelist, etc.)

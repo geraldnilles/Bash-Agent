@@ -1,17 +1,17 @@
 """
 Group 5 — LLM Adapter tests for bash_agent.llm.
 
-T-23  Backend routing matrix (P0)
 T-24  OpenRouter payload normalization (P0)
-T-25  Gemini payload stripping + cost monkey-patch (P0)
+T-24a OpenRouter App Attribution headers (P0)
 T-26  Client cache identity (P2)
 
-The adapter decides which API every request hits and how payloads are
-shaped per backend. All tests are strictly offline:
+All requests are routed through the single OpenRouter backend; the
+adapter shapes payloads (reasoning effort, provider whitelists,
+attribution headers) per request. All tests are strictly offline:
 
   * ``bash_agent.config`` binds env vars at import time, so mutating
     os.environ after import has NO effect. Tests patch the config
-    attributes directly (e.g. ``config.GEMINI_API_KEY``).
+    attributes directly (e.g. ``config.OPENROUTER_API_KEY``).
   * Payload tests seed ``llm._CLIENT_CACHE`` with FakeLLMClient (T-00c);
     the fake records call kwargs for extra_body assertions.
   * The base class replaces ``bash_agent.llm.OpenAI`` with a recording
@@ -67,41 +67,6 @@ class _OfflineLLMTestCase(unittest.TestCase):
         fake = FakeLLMClient(responses=[response] if response is not None else [])
         llm._CLIENT_CACHE[backend] = fake
         return fake
-
-
-# ---------------------------------------------------------------------------
-# T-23 — Backend routing matrix
-# ---------------------------------------------------------------------------
-
-class TestBackendRouting(_OfflineLLMTestCase):
-    """T-23: get_backend() routes google/* models to gemini only when
-    GEMINI_API_KEY is available; everything else goes to openrouter."""
-
-    def _route(self, model, gemini_key):
-        with mock.patch.object(config, "GEMINI_API_KEY", gemini_key):
-            return llm.get_backend(model)
-
-    def test_routing_matrix(self):
-        cases = [
-            # (model, GEMINI_API_KEY, expected backend)
-            ("google/gemini-3-flash-preview", "fake-g-key", "gemini"),
-            ("google/gemini-3-flash-preview", None, "openrouter"),
-            ("openai/gpt-5-mini", "fake-g-key", "openrouter"),
-            ("openai/gpt-5-mini", None, "openrouter"),
-            ("deepseek/deepseek-v4-pro", "fake-g-key", "openrouter"),
-            ("anthropic/claude-x", None, "openrouter"),
-            (None, "fake-g-key", "openrouter"),   # None-safe
-            ("", "fake-g-key", "openrouter"),     # empty-string safe
-        ]
-        for model, key, expected in cases:
-            with self.subTest(model=model, gemini_key=key):
-                self.assertEqual(self._route(model, key), expected)
-
-    def test_gemini_routing_requires_key_not_just_prefix(self):
-        """A google/ prefix alone must NOT select gemini when key is unset."""
-        self.assertEqual(
-            self._route("google/gemini-3-flash-preview", None), "openrouter"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -182,10 +147,9 @@ class TestOpenRouterPayloadNormalization(_OfflineLLMTestCase):
 # ---------------------------------------------------------------------------
 
 class TestOpenRouterAttributionHeaders(_OfflineLLMTestCase):
-    """T-24a: create_chat_completion()/create_embedding() on the openrouter
-    backend must attach the App Attribution headers (HTTP-Referer,
-    X-OpenRouter-Title, X-OpenRouter-Categories) via extra_headers, while
-    the gemini backend stays header-free."""
+    """T-24a: create_chat_completion()/create_embedding() must attach the
+    App Attribution headers (HTTP-Referer, X-OpenRouter-Title,
+    X-OpenRouter-Categories) via extra_headers on every request."""
 
     MESSAGES = [{"role": "user", "content": "hello"}]
 
@@ -225,25 +189,6 @@ class TestOpenRouterAttributionHeaders(_OfflineLLMTestCase):
         self.assertEqual(headers.get("X-OpenRouter-Title"), config.APP_TITLE)
         self.assertEqual(headers.get("X-OpenRouter-Categories"), config.APP_CATEGORIES)
 
-    def test_no_attribution_headers_on_gemini_chat(self):
-        scripted = make_fake_response(content="ok")
-        fake = self._seed("gemini", scripted)
-        with mock.patch.object(config, "GEMINI_API_KEY", "fake-g-key"):
-            llm.create_chat_completion(
-                model="google/gemini-3-flash-preview", messages=self.MESSAGES
-            )
-        kwargs = fake.calls[-1]
-        self.assertNotIn("extra_headers", kwargs)
-
-    def test_no_attribution_headers_on_gemini_embedding(self):
-        fake = self._seed("gemini")
-        with mock.patch.object(config, "GEMINI_API_KEY", "fake-g-key"):
-            llm.create_embedding(
-                model="google/gemini-3-flash-preview", input_texts=["hi"]
-            )
-        kwargs = fake.embedding_calls[-1]
-        self.assertNotIn("extra_headers", kwargs)
-
     def test_header_values_match_config_constants(self):
         self.assertEqual(config.APP_URL, "https://github.com/geraldnilles/Bash-Agent")
         self.assertEqual(config.APP_TITLE, "Bash Agent")
@@ -251,136 +196,32 @@ class TestOpenRouterAttributionHeaders(_OfflineLLMTestCase):
 
 
 # ---------------------------------------------------------------------------
-# T-25 — Gemini payload stripping + cost monkey-patch
-# ---------------------------------------------------------------------------
-
-class TestGeminiPayloadStrippingAndCostPatch(_OfflineLLMTestCase):
-    """T-25: create_chat_completion() on the gemini backend strips the
-    google/ prefix, drops OpenRouter-only extras, and monkey-patches
-    model_dump() to inject usage.cost from calculate_gemini_cost()."""
-
-    MESSAGES = [{"role": "user", "content": "hello"}]
-
-    def setUp(self):
-        super().setUp()
-        # Force gemini routing regardless of ambient environment
-        key_patcher = mock.patch.object(config, "GEMINI_API_KEY", "test-key")
-        key_patcher.start()
-        self.addCleanup(key_patcher.stop)
-
-    def _gemini_call(self, model="google/gemini-3-flash-preview", **resp_kwargs):
-        scripted = make_fake_response(**resp_kwargs)
-        fake = self._seed("gemini", scripted)
-        result = llm.create_chat_completion(
-            model=model,
-            messages=self.MESSAGES,
-            extra_body={"provider": {"only": ["x"]}},   # OpenRouter-only junk
-            reasoning_effort="high",                    # OpenRouter-only junk
-        )
-        return result, fake.calls[-1]
-
-    def test_model_stripped_and_extras_dropped(self):
-        _, kwargs = self._gemini_call()
-        self.assertEqual(kwargs["model"], "gemini-3-flash-preview")
-        self.assertNotIn("extra_body", kwargs)
-
-    def test_model_dump_cost_injected_from_token_counts(self):
-        resp, _ = self._gemini_call(
-            prompt_tokens=2_000_000, completion_tokens=1_000_000, cost=123.45
-        )
-        dumped = resp.model_dump()
-        # flash tier: (2e6/1e6)*0.075 + (1e6/1e6)*0.30 == 0.45
-        self.assertAlmostEqual(dumped["usage"]["cost"], 0.45, places=9)
-        # Original usage fields preserved; bogus fake cost overwritten
-        self.assertEqual(dumped["usage"]["prompt_tokens"], 2_000_000)
-        self.assertEqual(dumped["usage"]["completion_tokens"], 1_000_000)
-        self.assertIn("choices", dumped)
-
-    def test_model_dump_json_reflects_patched_cost(self):
-        resp, _ = self._gemini_call(prompt_tokens=1_000_000, completion_tokens=0)
-        dumped = json.loads(resp.model_dump_json(indent=2))
-        self.assertAlmostEqual(dumped["usage"]["cost"], 0.075, places=9)
-
-    def test_openrouter_responses_are_not_cost_patched(self):
-        scripted = make_fake_response(cost=0.42)
-        self._seed("openrouter", scripted)
-        result = llm.create_chat_completion(
-            model="openai/gpt-5-mini", messages=self.MESSAGES
-        )
-        self.assertAlmostEqual(result.model_dump()["usage"]["cost"], 0.42)
-
-    def test_missing_usage_left_unpatched(self):
-        class _NoUsageResp:
-            def model_dump(self):
-                return {"choices": []}
-
-        self._seed("gemini", _NoUsageResp())
-        result = llm.create_chat_completion(
-            model="google/gemini-3-flash-preview", messages=self.MESSAGES
-        )
-        self.assertIsInstance(result, _NoUsageResp)
-        self.assertNotIn("usage", result.model_dump())
-
-    def test_calculate_gemini_cost_tier_selection(self):
-        # Per-1M-in + per-1M-out totals by tier substring
-        cases = [
-            ("gemini-3-flash-preview", 0.375),      # flash tier
-            ("gemini-3.1-flash-lite-0827", 0.15),   # flash-lite tier
-            ("totally-unknown-model", 0.75),        # default tier
-        ]
-        for model, expected in cases:
-            with self.subTest(model=model):
-                cost = llm.calculate_gemini_cost(model, 1_000_000, 1_000_000)
-                self.assertAlmostEqual(cost, expected, places=9)
-
-    def test_calculate_gemini_cost_zero_and_proportional(self):
-        self.assertEqual(llm.calculate_gemini_cost("any-model", 0, 0), 0.0)
-        cost = llm.calculate_gemini_cost("gemini-3-flash", 500_000, 250_000)
-        self.assertAlmostEqual(cost, 0.0375 + 0.075, places=9)
-
-
-# ---------------------------------------------------------------------------
 # T-26 — Client cache identity
 # ---------------------------------------------------------------------------
 
 class TestClientCacheIdentity(_OfflineLLMTestCase):
-    """T-26: get_llm_client() caches per backend; seeding bypasses
-    construction entirely. llm.OpenAI is already replaced by
-    _OpenAIRecorder via the base class."""
+    """T-26: get_llm_client() caches one shared OpenRouter client; seeding
+    _CLIENT_CACHE bypasses construction entirely. llm.OpenAI is already
+    replaced by _OpenAIRecorder via the base class."""
 
-    def test_same_backend_returns_same_client(self):
-        c1 = llm.get_llm_client("openrouter")
-        c2 = llm.get_llm_client("openrouter")
+    def test_same_client_returned_across_calls(self):
+        c1 = llm.get_llm_client()
+        c2 = llm.get_llm_client()
         self.assertIs(c1, c2)
         self.assertEqual(len(_OpenAIRecorder.instances), 1)  # built once
 
-    def test_different_backends_return_different_clients(self):
-        c = llm.get_llm_client("openrouter")
-        g = llm.get_llm_client("gemini")
-        self.assertIsNot(c, g)
-        self.assertEqual(len(_OpenAIRecorder.instances), 2)
-
-    def test_construction_uses_config_credentials_and_urls(self):
-        with mock.patch.object(config, "OPENROUTER_API_KEY", "or-key"), \
-             mock.patch.object(config, "GEMINI_API_KEY", "g-key"):
-            llm.get_llm_client("openrouter")
-            llm.get_llm_client("gemini")
-        or_kwargs, g_kwargs = _OpenAIRecorder.init_kwargs_log
+    def test_construction_uses_config_credentials_and_url(self):
+        with mock.patch.object(config, "OPENROUTER_API_KEY", "or-key"):
+            llm.get_llm_client()
+        (or_kwargs,) = _OpenAIRecorder.init_kwargs_log
         self.assertEqual(or_kwargs["api_key"], "or-key")
         self.assertEqual(or_kwargs["base_url"], config.OPENROUTER_BASE_URL)
-        self.assertEqual(g_kwargs["api_key"], "g-key")
-        self.assertEqual(g_kwargs["base_url"], config.GEMINI_BASE_URL)
 
     def test_seeded_cache_bypasses_construction(self):
         sentinel = object()
         llm._CLIENT_CACHE["openrouter"] = sentinel
-        self.assertIs(llm.get_llm_client("openrouter"), sentinel)
-        self.assertEqual(_OpenAIRecorder.instances, [])
-
-    def test_default_backend_is_openrouter(self):
-        sentinel = object()
-        llm._CLIENT_CACHE["openrouter"] = sentinel
         self.assertIs(llm.get_llm_client(), sentinel)
+        self.assertEqual(_OpenAIRecorder.instances, [])
 
 
 if __name__ == "__main__":

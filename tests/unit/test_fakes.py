@@ -287,14 +287,12 @@ class TestFakeLLMClient(unittest.TestCase):
         self.llm_mod._CLIENT_CACHE["openrouter"] = fake
         # Call via the adapter layer to test extra_body injection
         from bash_agent import llm as llm_mod
-        # Patch get_backend to force openrouter
-        with mock.patch.object(llm_mod, "get_backend", return_value="openrouter"):
-            llm_mod.create_chat_completion(
-                model="deepseek/deepseek-v4-flash-0731",
-                messages=[{"role": "user", "content": "hi"}],
-                max_tokens=100,
-                reasoning_effort="low",
-            )
+        llm_mod.create_chat_completion(
+            model="deepseek/deepseek-v4-flash-0731",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=100,
+            reasoning_effort="low",
+        )
         self.assertEqual(len(fake.calls), 1)
         kwargs = fake.calls[0]
         self.assertIn("model", kwargs)
@@ -314,12 +312,11 @@ class TestFakeLLMClient(unittest.TestCase):
         """Seeding _CLIENT_CACHE must make create_chat_completion return fake without network."""
         fake = FakeLLMClient(responses=[make_fake_response(content="offline ok", cost=0.001)])
         self.llm_mod._CLIENT_CACHE["openrouter"] = fake
-        with mock.patch.object(self.llm_mod, "get_backend", return_value="openrouter"):
-            resp = self.llm_mod.create_chat_completion(
-                model="any-model",
-                messages=[{"role": "user", "content": "hi"}],
-                max_tokens=10,
-            )
+        resp = self.llm_mod.create_chat_completion(
+            model="any-model",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=10,
+        )
         self.assertEqual(resp.choices[0].message.content, "offline ok")
         # Ensure no network was hit — fake call count is 1
         self.assertEqual(len(fake.calls), 1)
@@ -348,32 +345,6 @@ class TestFakeLLMClient(unittest.TestCase):
     def test_reasoning_field_on_choice(self):
         resp = make_fake_response(content="ans", reasoning="thoughts")
         self.assertEqual(resp.choices[0].message.reasoning, "thoughts")
-
-    def test_gemini_cost_patching_path(self):
-        """When backend is gemini, create_chat_completion patches model_dump to inject cost."""
-        # Prepare a fake that returns usage without cost; gemini path should patch it
-        class UsageNoCost:
-            prompt_tokens = 100
-            completion_tokens = 200
-            cost = None
-        resp = FakeResponse(content="hi", cost=None, prompt_tokens=100, completion_tokens=200)
-        # Force usage object without cost to trigger patch path? Instead test the patched path:
-        # Use a response with None cost and gemini backend
-        fake_resp = FakeResponse(content="hi", cost=0.0, prompt_tokens=10, completion_tokens=10)
-        fake = FakeLLMClient(responses=[fake_resp])
-        self.llm_mod._CLIENT_CACHE["gemini"] = fake
-        with mock.patch.object(self.llm_mod, "get_backend", return_value="gemini"):
-            # gemini backend will monkey-patch model_dump; we assert patched cost is computed
-            result = self.llm_mod.create_chat_completion(
-                model="google/gemini-3-flash-preview",
-                messages=[{"role": "user", "content": "hi"}],
-                max_tokens=10,
-            )
-            dumped = result.model_dump()
-            # For gemini, cost should be >0 (pricing tiers) and not None
-            self.assertIsNotNone(dumped["usage"]["cost"])
-            self.assertIsInstance(dumped["usage"]["cost"], float)
-
 
 # ---------------------------------------------------------------------------
 # T-00d — FakeSandbox

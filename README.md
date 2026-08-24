@@ -42,7 +42,7 @@ The agent operates entirely through the command line. Since it has access to a r
 
 - **Linux** with `systemd` (the sandbox depends on `systemd-run`)
 - **Python 3.8+**
-- **An OpenRouter API key** ([get one here](https://openrouter.ai/keys)) — or a Gemini API key for direct Gemini access
+- **An OpenRouter API key** ([get one here](https://openrouter.ai/keys))
 
 ### Installation
 
@@ -147,7 +147,7 @@ You approve or deny interactively.
 
 ### Vision (Image Analysis)
 
-If your chosen model supports native image input (Gemini models, GPT-4V, etc.), the agent can analyze images directly:
+If your chosen model supports native image input (GPT-4V, Claude, Gemini models via OpenRouter, etc.), the agent can analyze images directly:
 
 ```bash
 vision architecture_diagram.png
@@ -238,8 +238,6 @@ When the budget is exhausted, the agent stops gracefully.
 |----------|---------|-------------|
 | `OPENROUTER_API_KEY` | (required) | Your OpenRouter API key |
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v4-pro` | Default model for OpenRouter |
-| `GEMINI_API_KEY` | (optional) | Direct Gemini API key (bypasses OpenRouter) |
-| `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com/v1beta/openai/` | Gemini API endpoint |
 
 ---
 

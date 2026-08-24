@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Transcribe audio using OpenRouter's Gemini 3 Flash Preview model.
+Transcribe audio via OpenRouter using an audio-capable model
+(google/gemini-3-flash-preview by default).
 Converts audio to text via an LLM with audio input capabilities.
 """
 import os

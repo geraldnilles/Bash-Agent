@@ -10,7 +10,7 @@ While mostly declarative, regressions here cascade silently:
   * HISTORY_FILE path resolution -> resume loses session or writes to /tmp
   * CONTEXT_LIMIT / SCRATCHPAD_LIMIT -> pruning fires at wrong boundaries
   * MAX_PIXELS -> vision tool accepts oversized images
-  * OPENROUTER_API_KEY / GEMINI_API_KEY -> auth failures with cryptic errors
+  * OPENROUTER_API_KEY -> auth failures with cryptic errors
 
 These tests pin the import-time bindings and env-var fallbacks so a future
 refactor cannot silently shift behavior.
@@ -40,12 +40,13 @@ class TestConfigConstants(unittest.TestCase):
     def test_api_keys_default_to_none(self):
         config = self._import_config_with_empty_env()
         # Module reads os.environ.get -> None when unset
-        self.assertIsNone(config.GEMINI_API_KEY)
         self.assertIsNone(config.OPENROUTER_API_KEY)
 
-    def test_gemini_base_url_has_fallback(self):
+    def test_gemini_settings_removed(self):
+        """Gemini direct-API support was removed; config must not define it."""
         config = self._import_config_with_empty_env()
-        self.assertEqual(config.GEMINI_BASE_URL, "https://generativelanguage.googleapis.com/v1beta/openai/")
+        self.assertFalse(hasattr(config, "GEMINI_API_KEY"))
+        self.assertFalse(hasattr(config, "GEMINI_BASE_URL"))
 
     def test_openrouter_base_url_is_fixed(self):
         config = self._import_config_with_empty_env()
@@ -109,25 +110,9 @@ class TestConfigEnvOverrides(unittest.TestCase):
             importlib.reload(config_module)
             return config_module
 
-    def test_gemini_api_key_from_env(self):
-        cfg = self._fresh_import({"GEMINI_API_KEY": "gemini-key-123"})
-        self.assertEqual(cfg.GEMINI_API_KEY, "gemini-key-123")
-
     def test_openrouter_api_key_from_env(self):
         cfg = self._fresh_import({"OPENROUTER_API_KEY": "openrouter-key-456"})
         self.assertEqual(cfg.OPENROUTER_API_KEY, "openrouter-key-456")
-
-    def test_gemini_base_url_from_env(self):
-        cfg = self._fresh_import({"GEMINI_BASE_URL": "https://custom.example.com/v1/"})
-        self.assertEqual(cfg.GEMINI_BASE_URL, "https://custom.example.com/v1/")
-
-    def test_env_vars_are_independent(self):
-        cfg = self._fresh_import({
-            "GEMINI_API_KEY": "gem",
-            "OPENROUTER_API_KEY": "or",
-        })
-        self.assertEqual(cfg.GEMINI_API_KEY, "gem")
-        self.assertEqual(cfg.OPENROUTER_API_KEY, "or")
 
 
 class TestHistoryFilePathResolution(unittest.TestCase):
@@ -172,7 +157,6 @@ class TestConfigExportedSymbols(unittest.TestCase):
     def test_all_expected_symbols_exist(self):
         cfg = self._import_config_with_empty_env()
         expected = [
-            "GEMINI_API_KEY", "GEMINI_BASE_URL",
             "OPENROUTER_API_KEY", "OPENROUTER_BASE_URL",
             "DEFAULT_MODEL",
             "HISTORY_FILE", "CONTEXT_LIMIT", "SCRATCHPAD_LIMIT",

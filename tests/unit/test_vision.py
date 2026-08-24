@@ -91,15 +91,13 @@ class VisionCase(unittest.TestCase):
         poison = mock.MagicMock(name="poisoned_llm_client")
         poison.chat.completions.create.side_effect = AssertionError(
             "vision must NOT call the LLM in multimodal attach mode")
-        # Seed both backends so a MODEL_ID flip cannot silently bypass.
+        # Seed the OpenRouter backend so a MODEL_ID flip cannot silently bypass.
         llm._CLIENT_CACHE["openrouter"] = poison
-        llm._CLIENT_CACHE["gemini"] = poison
         return poison
 
     def seed_cache(self, response):
         fake = FakeLLMClient(responses=[response])
         llm._CLIENT_CACHE["openrouter"] = fake
-        llm._CLIENT_CACHE["gemini"] = fake
         return fake
 
     def run_main(self, argv, extra_env=None):
@@ -285,7 +283,6 @@ class TestFallbackMode(VisionCase):
         broken.chat.completions.create.side_effect = RuntimeError(
             "provider exploded")
         llm._CLIENT_CACHE["openrouter"] = broken
-        llm._CLIENT_CACHE["gemini"] = broken
 
         res = self.run_main(self.attach_argv())
 

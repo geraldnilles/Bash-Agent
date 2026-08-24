@@ -2,9 +2,6 @@ import os
 
 # Model & API Configuration
 
-# Gemini Native Standalone Settings
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_BASE_URL = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -22,13 +19,10 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 #DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b"
 #DEFAULT_MODEL = "openrouter/elephant-alpha"
 #DEFAULT_MODEL = "xiaomi/mimo-v2-flash"
-#DEFAULT_MODEL = "google/gemini-3.1-flash-lite-preview"
 #DEFAULT_MODEL = "openai/gpt-oss-120b"
-#DEFAULT_MODEL = "google/gemini-3-flash-preview"
 #DEFAULT_MODEL = "qwen/qwen3-coder-next"
 #DEFAULT_MODEL = "qwen/qwen3.6-35b-a3b"
 #DEFAULT_MODEL = "xiaomi/mimo-v2.5"
-#DEFAULT_MODEL = "google/gemini-3.5-flash"
 
 #DEFAULT_MODEL = "xiaomi/mimo-v2.5-pro"
 #DEFAULT_MODEL = "deepseek/deepseek-v4-pro"

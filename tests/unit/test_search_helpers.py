@@ -362,7 +362,6 @@ class TestMainDisabledEarlyExit(SearchTmpCase):
         poison.embeddings.create = mock.Mock(
             side_effect=AssertionError("disabled mode must not embed"))
         llm._CLIENT_CACHE["openrouter"] = poison
-        llm._CLIENT_CACHE["gemini"] = poison
 
         stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
         argv = ["search", "-n", "3", "anything"]
