@@ -85,7 +85,7 @@ def _build_tmp_file_warning(exit_code: int, output: str) -> str | None:
     )
 
 
-TRUNCATION_BANNER = "\n---⚠️⛔⚠️-OUTPUT_TRUNCATED_HERE-{uuid}-⚠️⛔⚠️---\n"
+TRUNCATION_BANNER = "\n\n---⚠️⛔⚠️-OUTPUT_TRUNCATED_HERE-{uuid}-⚠️⛔⚠️---\n\n"
 
 
 class Agent:
