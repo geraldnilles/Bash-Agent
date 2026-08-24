@@ -32,10 +32,35 @@ from bash_agent.sandbox import Sandbox
 WARMUP_TURNS = [
     (
         "I'll start by getting oriented. First, let me check which Python "
-        "version is available in the sandbox.\n\n"
+        "version is available in the sandbox and print all 3rd-party PyPI "
+        "packages currently installed here.\n\n"
         "---START_PYTHON_COMMAND-{uuid}---\n"
         "import sys\n"
-        "print(sys.version)\n"
+        "from importlib import metadata\n"
+        "\n"
+        "print('Python', sys.version)\n"
+        "stdlib = getattr(sys, 'stdlib_module_names', frozenset())\n"
+        "seen = set()\n"
+        "rows = []\n"
+        "for dist in metadata.distributions():\n"
+        "    name = dist.metadata.get('Name')\n"
+        "    if not name or name.lower() in seen:\n"
+        "        continue\n"
+        "    seen.add(name.lower())\n"
+        "    # Skip stdlib-only distributions (not real PyPI installs)\n"
+        "    tops = set()\n"
+        "    txt = dist.read_text('top_level.txt')\n"
+        "    if txt:\n"
+        "        tops.update(line.strip() for line in txt.splitlines() if line.strip())\n"
+        "    if tops and tops <= stdlib:\n"
+        "        continue\n"
+        "    rows.append(name + '==' + dist.version)\n"
+        "\n"
+        "print()\n"
+        "print('3rd-party PyPI packages installed in this sandbox:')\n"
+        "for row in sorted(rows):\n"
+        "    print(' ', row)\n"
+        "print('total:', len(rows))\n"
         "---END_PYTHON_COMMAND-{uuid}---"
     ),
     (
@@ -725,8 +750,9 @@ class Agent:
     def _run_warmup_exchanges(self):
         """
         Pre-fill a FRESH session with two scripted assistant turns -- a PYTHON
-        command printing the interpreter version, then a BASH command listing
-        the working directory -- executing each in the sandbox and recording
+        command printing the interpreter version plus every installed
+        3rd-party PyPI package, then a BASH command listing the working
+        directory -- executing each in the sandbox and recording
         the real formatted output as the following user message.
 
         Each template is parsed with the production _extract_blocks() and
