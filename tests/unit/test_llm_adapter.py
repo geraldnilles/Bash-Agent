@@ -178,6 +178,79 @@ class TestOpenRouterPayloadNormalization(_OfflineLLMTestCase):
 
 
 # ---------------------------------------------------------------------------
+# T-24a — OpenRouter App Attribution headers
+# ---------------------------------------------------------------------------
+
+class TestOpenRouterAttributionHeaders(_OfflineLLMTestCase):
+    """T-24a: create_chat_completion()/create_embedding() on the openrouter
+    backend must attach the App Attribution headers (HTTP-Referer,
+    X-OpenRouter-Title, X-OpenRouter-Categories) via extra_headers, while
+    the gemini backend stays header-free."""
+
+    MESSAGES = [{"role": "user", "content": "hello"}]
+
+    def _call_chat(self, model="openai/gpt-5-mini", **kw):
+        scripted = make_fake_response(content="ok")
+        fake = self._seed("openrouter", scripted)
+        llm.create_chat_completion(
+            model=model, messages=self.MESSAGES, **kw
+        )
+        return fake.calls[-1]
+
+    def _call_embedding(self, model="perplexity/pplx-embed-v1-4b"):
+        fake = self._seed("openrouter")
+        llm.create_embedding(model=model, input_texts=["hello"])
+        return fake.embedding_calls[-1]
+
+    def test_attribution_headers_present_on_openrouter_chat(self):
+        kwargs = self._call_chat()
+        headers = kwargs.get("extra_headers", {})
+        self.assertEqual(headers.get("HTTP-Referer"), config.APP_URL)
+        self.assertEqual(headers.get("X-OpenRouter-Title"), config.APP_TITLE)
+        self.assertEqual(headers.get("X-OpenRouter-Categories"), config.APP_CATEGORIES)
+
+    def test_attribution_headers_present_with_extra_body(self):
+        kwargs = self._call_chat(reasoning_effort="low")
+        headers = kwargs.get("extra_headers", {})
+        self.assertIn("HTTP-Referer", headers)
+        self.assertIn("X-OpenRouter-Title", headers)
+        self.assertIn("X-OpenRouter-Categories", headers)
+        # extra_body still works alongside extra_headers
+        self.assertEqual(kwargs["extra_body"]["reasoning"]["effort"], "low")
+
+    def test_attribution_headers_present_on_openrouter_embedding(self):
+        kwargs = self._call_embedding()
+        headers = kwargs.get("extra_headers", {})
+        self.assertEqual(headers.get("HTTP-Referer"), config.APP_URL)
+        self.assertEqual(headers.get("X-OpenRouter-Title"), config.APP_TITLE)
+        self.assertEqual(headers.get("X-OpenRouter-Categories"), config.APP_CATEGORIES)
+
+    def test_no_attribution_headers_on_gemini_chat(self):
+        scripted = make_fake_response(content="ok")
+        fake = self._seed("gemini", scripted)
+        with mock.patch.object(config, "GEMINI_API_KEY", "fake-g-key"):
+            llm.create_chat_completion(
+                model="google/gemini-3-flash-preview", messages=self.MESSAGES
+            )
+        kwargs = fake.calls[-1]
+        self.assertNotIn("extra_headers", kwargs)
+
+    def test_no_attribution_headers_on_gemini_embedding(self):
+        fake = self._seed("gemini")
+        with mock.patch.object(config, "GEMINI_API_KEY", "fake-g-key"):
+            llm.create_embedding(
+                model="google/gemini-3-flash-preview", input_texts=["hi"]
+            )
+        kwargs = fake.embedding_calls[-1]
+        self.assertNotIn("extra_headers", kwargs)
+
+    def test_header_values_match_config_constants(self):
+        self.assertEqual(config.APP_URL, "https://github.com/geraldnilles/Bash-Agent")
+        self.assertEqual(config.APP_TITLE, "Bash Agent")
+        self.assertEqual(config.APP_CATEGORIES, "cli-agent")
+
+
+# ---------------------------------------------------------------------------
 # T-25 — Gemini payload stripping + cost monkey-patch
 # ---------------------------------------------------------------------------
 

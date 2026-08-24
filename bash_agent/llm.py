@@ -35,6 +35,17 @@ def get_llm_client(backend: str = "openrouter"):
     return _CLIENT_CACHE[backend]
 
 
+def get_attribution_headers() -> dict:
+    """Returns OpenRouter App Attribution headers for identifying this app
+    on OpenRouter's analytics dashboards and public model rankings.
+    These headers are only meaningful for OpenRouter-backed requests."""
+    return {
+        "HTTP-Referer": config.APP_URL,
+        "X-OpenRouter-Title": config.APP_TITLE,
+        "X-OpenRouter-Categories": config.APP_CATEGORIES,
+    }
+
+
 def normalize_model_string(model_name: str) -> str:
     """Strips provider prefixes when using the Gemini direct endpoint."""
     backend = get_backend(model_name)
@@ -80,6 +91,9 @@ def create_chat_completion(model, messages, max_tokens=None, extra_body=None, re
     if backend == "openrouter":
         ebody = extra_body or {}
 
+        # OpenRouter App Attribution headers (identify this app on OpenRouter)
+        kwargs["extra_headers"] = get_attribution_headers()
+
         # Inject reasoning preferences if provided
         if reasoning_effort:
             if "reasoning" not in ebody:
@@ -122,4 +136,8 @@ def create_embedding(model, input_texts):
     backend = get_backend(model)
     client = get_llm_client(backend)
     target_model = normalize_model_string(model)
-    return client.embeddings.create(model=target_model, input=input_texts)
+    kwargs = {"model": target_model, "input": input_texts}
+    # OpenRouter App Attribution headers (only meaningful for OpenRouter)
+    if backend == "openrouter":
+        kwargs["extra_headers"] = get_attribution_headers()
+    return client.embeddings.create(**kwargs)

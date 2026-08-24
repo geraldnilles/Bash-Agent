@@ -158,7 +158,9 @@ def rerank_documents(client, query, documents, top_n):
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        # OpenRouter App Attribution headers (identify this app on OpenRouter)
+        **llm.get_attribution_headers(),
     }
     
     try:

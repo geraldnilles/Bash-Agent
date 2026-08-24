@@ -274,6 +274,21 @@ class TestRerankDocuments(unittest.TestCase):
         headers = kwargs.get("headers") or {}
         self.assertEqual(headers["Authorization"], "Bearer sk-test-key")
 
+    def test_attribution_headers_present_on_rerank(self):
+        payload = {"results": [{"index": 0, "relevance_score": 0.9}]}
+        with mock.patch("bash_agent.search.requests.post",
+                        return_value=self._post_mock(payload)) as p:
+            search.rerank_documents(mock.MagicMock(), "query",
+                                    self.DOCS, top_n=1)
+        headers = p.call_args.kwargs["headers"]
+        self.assertEqual(headers["HTTP-Referer"],
+                         "https://github.com/geraldnilles/Bash-Agent")
+        self.assertEqual(headers["X-OpenRouter-Title"], "Bash Agent")
+        self.assertEqual(headers["X-OpenRouter-Categories"], "cli-agent")
+        # Original auth/content-type headers are preserved
+        self.assertEqual(headers["Authorization"], "Bearer sk-test-key")
+        self.assertEqual(headers["Content-Type"], "application/json")
+
     def test_top_n_clamped_to_document_count(self):
         payload = {"results": [{"index": i, "relevance_score": 0.5}
                                for i in range(3)]}

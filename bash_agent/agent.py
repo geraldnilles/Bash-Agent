@@ -179,7 +179,10 @@ class Agent:
                 print(f"[Debug] Gemini backend: multimodal assumed for model '{self.model}'.")
             return
         try:
-            req = urllib.request.Request("https://openrouter.ai/api/v1/models")
+            req = urllib.request.Request(
+                "https://openrouter.ai/api/v1/models",
+                headers=llm.get_attribution_headers(),
+            )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 models_data = json_module.loads(resp.read().decode("utf-8"))
             for m in models_data if isinstance(models_data, list) else models_data.get("data", []):
@@ -209,7 +212,10 @@ class Agent:
         try:
             # Extract author/slug from model id (e.g., "openai/gpt-4")
             model_id = self.model
-            req = urllib.request.Request(f"https://openrouter.ai/api/v1/models/{model_id}")
+            req = urllib.request.Request(
+                f"https://openrouter.ai/api/v1/models/{model_id}",
+                headers=llm.get_attribution_headers(),
+            )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 model_data = json_module.loads(resp.read().decode("utf-8"))
             

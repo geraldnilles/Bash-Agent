@@ -112,6 +112,9 @@ All tunable constants. **Modify this file to change defaults.**
 | `DEFAULT_MAX_TOKENS` | 8192 | `agent.py` — max output tokens |
 | `MAX_PIXELS` | 2,000,000 | `vision.py` — max image resolution |
 | `MODEL_PROVIDERS` | `{}` | `llm.py` — provider whitelist per model |
+| `APP_URL` | `"https://github.com/geraldnilles/Bash-Agent"` | `llm.py`, `agent.py`, `search.py` — OpenRouter App Attribution (`HTTP-Referer`) |
+| `APP_TITLE` | `"Bash Agent"` | `llm.py`, `agent.py`, `search.py` — OpenRouter App Attribution (`X-OpenRouter-Title`) |
+| `APP_CATEGORIES` | `"cli-agent"` | `llm.py`, `agent.py`, `search.py` — OpenRouter App Attribution (`X-OpenRouter-Categories`) |
 
 **Color constants** (`COLOR_CMD`, `COLOR_OUT`, etc.) are ANSI escape codes for terminal output. Only used in `agent.py`'s console display.
 
@@ -181,13 +184,16 @@ Abstraction layer over OpenRouter and Gemini backends. Normalizes payloads and c
 
 **`get_llm_client(backend)`**: Returns a cached `openai.OpenAI` client instance with appropriate `base_url` and `api_key`.
 
+**`get_attribution_headers()`**: Returns the OpenRouter App Attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`, `X-OpenRouter-Categories`) built from the `APP_URL`, `APP_TITLE`, and `APP_CATEGORIES` config constants. These identify this application on OpenRouter's analytics dashboards and public model rankings. Used by every OpenRouter-backed request (chat, embedding, model-metadata probes in `agent.py`, and the rerank call in `search.py`); never attached to Gemini requests.
+
 **`create_chat_completion(model, messages, max_tokens, extra_body, reasoning_effort)`**: The main LLM call:
 - Strips `google/` prefix for Gemini direct API
+- Injects `extra_headers = get_attribution_headers()` on every OpenRouter request
 - Injects `reasoning.effort` into `extra_body` for OpenRouter
 - Injects `provider.only` whitelist from `MODEL_PROVIDERS` config
-- For Gemini: monkey-patches `response.model_dump()` to inject a calculated `cost` field
+- For Gemini: monkey-patches `response.model_dump()` to inject a calculated `cost` field; no attribution headers are sent
 
-**`create_embedding(model, input_texts)`**: Thin wrapper for embedding generation (used by `search.py`).
+**`create_embedding(model, input_texts)`**: Thin wrapper for embedding generation (used by `search.py`). Attaches `extra_headers = get_attribution_headers()` on OpenRouter requests only.
 
 **`calculate_gemini_cost(model_name, prompt_tokens, completion_tokens)`**: Manual pricing tier lookup since Gemini doesn't return cost natively.
 

@@ -70,3 +70,9 @@ MODEL_PROVIDERS = {
     "xiaomi/mimo-v2.5": ["xiaomi"],
     #"moonshotai/kimi-k3": ["modal","baseten"]
 }
+
+# OpenRouter App Attribution
+# Identifies this application on OpenRouter's analytics dashboards and public model rankings.
+APP_URL = "https://github.com/geraldnilles/Bash-Agent"
+APP_TITLE = "Bash Agent"
+APP_CATEGORIES = "cli-agent"

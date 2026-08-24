@@ -181,6 +181,7 @@ class TestConfigExportedSymbols(unittest.TestCase):
             "COLOR_CMD", "COLOR_OUT", "COLOR_PY_CMD", "COLOR_COST", "COLOR_RESET",
             "DEFAULT_REASONING_EFFORT", "DEFAULT_MAX_TOKENS",
             "MODEL_PROVIDERS",
+            "APP_URL", "APP_TITLE", "APP_CATEGORIES",
         ]
         for name in expected:
             self.assertTrue(hasattr(cfg, name), f"Missing symbol: {name}")
