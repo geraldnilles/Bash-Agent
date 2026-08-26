@@ -92,6 +92,11 @@ When `finish_reason == "length"` occurs and `choice.message.reasoning` contains 
 2. Issues a follow-up completion request with `reasoning_effort="none"`.
 3. Uses a `try...finally` block to pop both temporary recovery messages from `self.context.history` before returning the final response to the main loop.
 
+When `finish_reason == "tool_calls"` occurs, the behavior is intentionally different:
+1. Records the failed attempt as an assistant message (`[Invalid tool_calls attempt]`, including the tool call payload when available) and appends a user `[SYSTEM WARNING]` with the exact desired BASH/PYTHON fence syntax (live UUID interpolated).
+2. `continue`s the `_get_llm_response()` loop with NO follow-up request and NO history cleanup — the correction is **permanently kept** in the conversation so the next LLM call sees what went wrong and replies with proper BASH/PYTHON blocks.
+Unlike the `length` recovery, nothing here is temporary: the failed attempt and the warning remain in `history.json`.
+
 **Budget tracking:** After each LLM call, cost is extracted from the API response (OpenRouter provides it natively). When `session_cost >= budget`, the loop exits.
 
 ---

@@ -30,7 +30,8 @@
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 3 |
 | 7. Integration — real processes, still offline | 3 | 3 |
 | 8. Supporting Modules | 9 | 9 |
-| **Total** | **45** | **45** |
+| 9. LLM Finish-Reason Handling — `agent._get_llm_response` | 2 | 2 |
+| **Total** | **47** | **47** |
 
 ---
 
@@ -567,6 +568,39 @@ broken file → defaults, not crash. Fresh-session construction preserves the fi
 Infrastructure note: `_make_agent` now stubs `_fetch_model_reasoning_info` with the production
 API-failure fallback attributes (previously a bare no-op left `reasoning_supported_efforts`
 unset — first exposed by T-42d).
+
+---
+
+## 9. LLM Finish-Reason Handling — `agent._get_llm_response`
+
+### T-43 — `tool_calls` correction stays in history (P0)
+
+- [x] **Implemented**
+
+Pins the recovery behavior for `finish_reason == "tool_calls"`: the agent
+records the failed attempt as an `[Invalid tool_calls attempt]` assistant
+message plus a `[SYSTEM WARNING]` user message containing the exact desired
+BASH/PYTHON fence syntax (interpolated with the live session UUID), then
+simply `continue`s the `_get_llm_response()` loop so the next LLM call sees
+the correction in history. Unlike the `length` recovery, the correction is
+permanently KEPT — no `finally` pop, no hidden follow-up request. Tests drive
+`_get_llm_response()` with a seeded FakeLLMClient (T-00c): assert exactly two
+LLM calls (failed attempt + follow-up), both correction messages present and
+ordered in `self.context.history` after the return, the tool call payload
+recorded when `message.tool_calls` is non-empty, and zero `<thinking>` artifacts
+leaked into history. Seam: `llm._CLIENT_CACHE` seeding + `_make_agent`;
+no network, no sandbox.
+
+### T-43a — `length` recovery still pops temporary messages (P0, regression)
+
+- [x] **Implemented**
+
+Regression guard for the untouched thinking-token recovery. With
+`finish_reason == "length"` and reasoning content present, the agent injects
+temporary `<thinking>` assistant + warning user messages, fetches the follow-up,
+and pops both in a `finally`. Asserts the returned history equals the pre-call
+history (no `<thinking>`, no warning), and the follow-up text is returned to
+the caller. Seam: same as T-43.
 
 ---
 

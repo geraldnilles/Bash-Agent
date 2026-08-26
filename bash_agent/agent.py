@@ -612,6 +612,12 @@ class Agent:
                             tool_info = f"\nAttempted tool_calls: {tc}"
                     except Exception:
                         pass
+                    # Record the failed attempt and warn with the desired syntax, then
+                    # continue the conversation. Unlike the finish_reason == "length"
+                    # recovery (which temporarily preserves thinking), the correction
+                    # here is intentionally KEPT in the history so the model can see
+                    # what went wrong and follow up with proper BASH/PYTHON blocks on
+                    # the very next LLM call.
                     self.context.add_message("assistant", f"[Invalid tool_calls attempt]{tool_info}")
                     self.context.add_message(
                         "user",
@@ -625,24 +631,10 @@ class Agent:
                         f"[python code goes here]\n"
                         f"---END_PYTHON_COMMAND-{self.uuid}---"
                     )
-                    try:
-                        recovery_response = llm.create_chat_completion(
-                            model=self.model,
-                            messages=self.context.history,
-                            max_tokens=self.max_tokens,
-                            reasoning_effort=self._get_lowest_reasoning_effort()
-                        )
-                        if not recovery_response or not recovery_response.choices:
-                            raise ValueError("Empty choices in recovery response.")
-                        recovery_choice = recovery_response.choices[0]
-                        agent_msg = self._extract_message_content(recovery_choice)
-                        self._record_response_usage(recovery_response)
-                        return agent_msg
-                    finally:
-                        if len(self.context.history) >= 2:
-                            self.context.history.pop()
-                            self.context.history.pop()
-
+                    # Continue the loop: the next iteration calls the LLM with the
+                    # corrected history and returns the model's new response. The
+                    # correction stays in the chat history permanently.
+                    continue
                 # Handle thinking token cutoff recovery
                 if choice.finish_reason == "length":
                     reasoning_text = self._extract_reasoning_content(choice)
