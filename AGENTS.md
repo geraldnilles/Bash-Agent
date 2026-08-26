@@ -148,7 +148,7 @@ Manages the message list (`self.history: List[Dict[str, str]]`), context pruning
 4. **Scratchpad cleanup** (`remove_old_scratchpads()`): Strips old scratchpad blocks from history when a new one is injected.
 5. **Persistence** (`save_history()` / `load_history()`): Serializes `{uuid, history}` to `.bash_agent_tmp/history.json`. Called after every message. Loaded on `--resume`.
 
-**Content length calculation** (`_content_length()`): Handles both string content (legacy) and list-of-dicts content (multimodal format). Image blocks are estimated at ~800 tokens (~6400 chars); attached audio (`input_audio` parts) is estimated at a flat ~6000 tokens (~50000 chars, ≈ a 30-minute call) and never scales with the base64 payload size.
+**Content length calculation** (`_content_length()`): Handles both string content (legacy) and list-of-dicts content (multimodal format). Image blocks are charged by resolution at 1000 tokens/megapixel (×8 chars/token), derived by decoding the data URL; audio (`input_audio` parts) is charged by clip length at 400 tokens/minute, derived by parsing the MP3 frame headers (cached per payload). Undecodable/unparseable payloads fall back to the legacy flat rates (~800 tokens/6400 chars for images, ~6000 tokens/50000 chars for audio). Never scales with the raw base64 payload size.
 
 ---
 

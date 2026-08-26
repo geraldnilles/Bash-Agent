@@ -191,14 +191,25 @@ class Agent:
         if self.reasoning_effort == "none" and self.reasoning_mandatory:
             # Model requires reasoning, use the lowest supported level
             self.reasoning_effort = self._get_lowest_reasoning_effort()
-            if self.debug:
-                print(f"[Debug] Reasoning is mandatory for this model. Adjusted reasoning_effort from 'none' to '{self.reasoning_effort}'")
         elif self.reasoning_effort is not None and self.reasoning_effort not in self.reasoning_supported_efforts:
             # Requested effort not supported, fall back to lowest supported
-            old_effort = self.reasoning_effort
             self.reasoning_effort = self._get_lowest_reasoning_effort()
-            if self.debug:
-                print(f"[Debug] Reasoning effort '{old_effort}' not supported. Using '{self.reasoning_effort}' instead.")
+
+        if self.debug:
+            # Consolidated model capabilities blob — shows the final
+            # reasoning effort (after mandatory/supported adjustments) and
+            # the full set of supported efforts.
+            if self.reasoning_effort is None:
+                _selected = f"default ({self.reasoning_default_effort})"
+            else:
+                _selected = self.reasoning_effort
+            _blob = (
+                f"[Debug] Model '{self.model}' capabilities:\n"
+                f"[Debug]   reasoning supported={self.reasoning_supported_efforts}, "
+                f"mandatory={self.reasoning_mandatory}, default={self.reasoning_default_effort}, selected={_selected}\n"
+                f"[Debug]   multimodal={self.multimodal_capabilities}"
+            )
+            print(_blob)
 
         # Track attached images emitted by the sandbox (e.g., via the vision command)
         self._pending_multimodal_images = []
@@ -239,12 +250,8 @@ class Agent:
                     input_modalities = arch.get("input_modalities", [])
                     if input_modalities:
                         self.multimodal_capabilities = list(input_modalities)
-                        if self.debug:
-                            print(f"[Debug] Model '{self.model}' supports input modalities: {self.multimodal_capabilities}. Vision interception enabled.")
                     return
-        except Exception as e:
-            if self.debug:
-                print(f"[Debug] Model capability check failed: {e}. Defaulting to text-only.")
+        except Exception:
             self.multimodal_capabilities = None
 
     def _fetch_model_reasoning_info(self):
@@ -263,12 +270,7 @@ class Agent:
             self.reasoning_supported_efforts = reasoning.get("supported_efforts", ["high", "medium", "low", "minimal", "none"])
             self.reasoning_mandatory = reasoning.get("mandatory", False)
             self.reasoning_default_effort = reasoning.get("default_effort", "medium")
-            
-            if self.debug:
-                print(f"[Debug] Model '{self.model}' reasoning: supported={self.reasoning_supported_efforts}, mandatory={self.reasoning_mandatory}, default={self.reasoning_default_effort}")
-        except Exception as e:
-            if self.debug:
-                print(f"[Debug] Failed to fetch reasoning info: {e}. Using defaults.")
+        except Exception:
             self.reasoning_supported_efforts = ["high", "medium", "low", "minimal", "none"]
             self.reasoning_mandatory = False
             self.reasoning_default_effort = "medium"

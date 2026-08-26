@@ -294,12 +294,16 @@ runs a turn, asserts old fence gone + new fence present exactly once. Exercises
 - [x] **Implemented** (`tests/unit/test_context_pruning.py`)
 
 `_content_length` on: plain string; list with text parts; list with N
-`image_url` parts (each ≈6400 chars); list with `input_audio` parts (each a
-flat ≈50000 chars — never scaled by the base64 payload size, mirroring the
-image flat-rate); mixed; non-str/non-list → 0. The audio branch is CORE
-accounting: the full base64 MP3 lands in history verbatim, so pruning would
-crash/mis-account without it. These numbers feed pruning decisions, so drift
-here silently changes when trimming kicks in. Static-method test, zero setup.
+`image_url` parts (charged at 1000 tokens/megapixel — resolution decoded
+from the data URL, ×8 chars/token); list with `input_audio` parts (charged
+at 400 tokens/minute — MP3 frame-header duration parse with a per-payload
+cache); mixed; non-str/non-list → 0. Undecodable image URLs and unparseable
+audio payloads fall back to the legacy flat estimates (≈6400 / ≈50000
+chars) and never scale with the raw base64 payload size. The audio branch
+is CORE accounting: the full base64 MP3 lands in history verbatim, so
+pruning would crash/mis-account without it. These numbers feed pruning
+decisions, so drift here silently changes when trimming kicks in.
+Static-method test, zero setup.
 
 ### T-19 — Hysteresis pruning ladder (P0)
 

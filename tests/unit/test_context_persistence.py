@@ -51,14 +51,16 @@ from tests.helpers.fakes import chdir_tmp, output_block
 LOAD_ERROR_BANNER = "[System Error] Failed to load history:"
 
 # Realistic multimodal content part pair (same shape agent.py builds for
-# image-bearing turns; ~6400 chars are accounted per image_url part).
+# image-bearing turns; image parts are charged by decoded resolution —
+# this undecodable stub falls back to the flat ~6400 chars).
 IMAGE_PARTS = [
     {"type": "text", "text": "What does this screenshot show?"},
     {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
 ]
 
 # Realistic audio-bearing content (same shape agent.py builds for
-# transcribe-attached turns; flat-rated in _content_length).
+# transcribe-attached turns; this unparseable stub falls back to the flat
+# ~50000 chars in _content_length).
 AUDIO_PARTS = [
     {"type": "text", "text": "Transcribe this meeting."},
     {"type": "input_audio",

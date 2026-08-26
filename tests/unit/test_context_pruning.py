@@ -10,19 +10,32 @@ method for its context-size bookkeeping. Its contract:
 
   * plain strings count their character length,
   * multimodal lists count each {"type": "text"} part by its text length,
-  * each {"type": "image_url"} part costs a flat 6400 characters
-    (~800 tokens x 8 chars/token) REGARDLESS of the encoded payload size,
+  * {"type": "image_url"} parts are charged by IMAGE RESOLUTION:
+    1000 tokens per megapixel (rounded, then x8 chars/token), derived by
+    decoding the data URL.  Undecodable payloads / non-data URLs fall back
+    to a flat 6400 chars (~800 tokens).
+  * {"type": "input_audio"} parts are charged by CLIP LENGTH:
+    400 tokens per minute, derived by parsing the MP3 frame headers
+    (falling back to a 128kbps CBR estimate from payload bytes when header
+    parsing fails).  Unparseable payloads fall back to a flat 50000 chars.
+  * In NO case does the calculation scale with the raw base64 payload
+    length — a naive len(url)/len(data) would massively overstate context
+    pressure and trigger premature pruning.
   * bare strings nested inside a list count their own length,
   * junk items inside a list (ints, None, unknown dict types) contribute 0,
   * anything that is neither a str nor a list (None, int, dict, tuple)
     measures 0.
 
 Drift in these numbers silently shifts WHEN trimming kicks in, so the exact
-constants are pinned below. Per the plan this is a static-method test with
+rates are pinned below. Per the plan this is a static-method test with
 zero setup: no sandbox, no LLM, no filesystem, no mocks.
 """
 
+import base64
+import io
 import unittest
+
+from PIL import Image
 
 from bash_agent.context import ContextManager
 
@@ -35,6 +48,18 @@ def clen(content):
 # ---------------------------------------------------------------------------
 # T-18 — Multimodal content length accounting
 # ---------------------------------------------------------------------------
+
+def png_data_url(width, height, pixel_bytes=16):
+    """Encode a real PNG of the given dimensions as a data URL."""
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), (10, 20, 30)).save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{b64}"
+
+
+def mp3_b64(payload: bytes) -> str:
+    return base64.b64encode(payload).decode("ascii")
+
 
 class TestPlainStrings(unittest.TestCase):
     """Legacy string content is measured verbatim."""
@@ -73,25 +98,36 @@ class TestTextParts(unittest.TestCase):
 
 
 class TestImageParts(unittest.TestCase):
-    """Each image_url part costs a flat 6400 chars (~800 tokens)."""
+    """image_url parts are charged at 1000 tokens per megapixel."""
 
-    IMAGE_CHARS = 6400  # pinned constant from context.py
+    def test_exactly_one_megapixel_costs_8000_chars(self):
+        # 1000x1000 px = 1.0 MP -> 1000 tokens -> 8000 chars (x8).
+        img = [{"type": "image_url", "image_url": {"url": png_data_url(1000, 1000)}}]
+        self.assertEqual(clen(img), 8000)
 
-    def test_single_image_part_costs_exactly_6400(self):
-        img = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]
-        self.assertEqual(clen(img), self.IMAGE_CHARS)
+    def test_two_megapixels_cost_16000_chars(self):
+        img = [{"type": "image_url", "image_url": {"url": png_data_url(2000, 1000)}}]
+        self.assertEqual(clen(img), 16000)
 
-    def test_n_image_parts_cost_n_times_6400(self):
+    def test_half_megapixel_costs_4000_chars(self):
+        img = [{"type": "image_url", "image_url": {"url": png_data_url(1000, 500)}}]
+        self.assertEqual(clen(img), 4000)
+
+    def test_subpixel_resolution_rounds_down_to_0(self):
+        # 8x6 = 48 px is essentially 0 MP; the rounded estimate is 0 chars.
+        img = [{"type": "image_url", "image_url": {"url": png_data_url(8, 6)}}]
+        self.assertEqual(clen(img), 0)
+
+    def test_n_image_parts_cost_n_times_single(self):
         imgs = [
-            {"type": "image_url", "image_url": {"url": f"data:x{i}"}}
-            for i in range(3)
+            {"type": "image_url", "image_url": {"url": png_data_url(1000, 1000)}}
+            for _ in range(3)
         ]
-        self.assertEqual(clen(imgs), 3 * self.IMAGE_CHARS)
+        self.assertEqual(clen(imgs), 3 * 8000)
 
-    def test_image_cost_ignores_payload_size(self):
-        # Real data URLs are enormous base64 blobs. The flat-rate estimate
-        # must NOT scale with the payload — a naive len(url) here would
-        # massively overstate context pressure and trigger premature pruning.
+    def test_undecodable_data_url_falls_back_to_flat_6400(self):
+        # Whatever the "payload" is, junk base64 must never raise and never
+        # scale with its length; legacy flat rate applies instead.
         tiny = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,a"}}]
         huge = [
             {
@@ -99,16 +135,98 @@ class TestImageParts(unittest.TestCase):
                 "image_url": {"url": "data:image/png;base64," + "A" * 500_000},
             }
         ]
+        self.assertEqual(clen(tiny), 6400)
+        self.assertEqual(clen(huge), 6400)
         self.assertEqual(clen(tiny), clen(huge))
-        self.assertEqual(clen(huge), self.IMAGE_CHARS)
+
+    def test_non_data_url_falls_back_to_flat_6400(self):
+        # Plain http(s) URLs carry no embedded pixels -> flat estimate.
+        img = [{"type": "image_url", "image_url": {"url": "https://example.com/x.png"}}]
+        self.assertEqual(clen(img), 6400)
+
+    def test_missing_image_url_key_counts_fallback(self):
+        # Malformed part must not raise; flat estimate applies.
+        self.assertEqual(clen([{"type": "image_url"}]), 6400)
+
+    def test_legacy_bare_string_image_url_counts_fallback(self):
+        # Older clients use {"image_url": "http..."} instead of the
+        # nested {"image_url": {"url": ...}} dict; must not raise and
+        # falls back to the flat rate (no pixel data in a bare URL).
+        self.assertEqual(
+            clen([{"type": "image_url", "image_url": "https://x/y.png"}]),
+            6400,
+        )
+
+    def test_decodable_bare_string_data_url_still_scales(self):
+        # Even in the legacy bare-string shape, a decodable data URL is
+        # charged by its resolution.
+        self.assertEqual(
+            clen([{"type": "image_url", "image_url": png_data_url(1000, 1000)}]),
+            8000,
+        )
+
+    def test_dynamic_cost_does_not_scale_with_png_payload_size(self):
+        # Two same-resolution images with very different file sizes (e.g.
+        # solid color vs noisy) must cost the SAME: the resolution, not
+        # the byte length, drives the estimate.
+        buf_plain = io.BytesIO()
+        Image.new("RGB", (100, 100), (0, 0, 0)).save(buf_plain, format="PNG")
+        buf_noisy = io.BytesIO()
+        Image.new("RGB", (100, 100), (0, 0, 0))
+        # stack many identical PNGs is overkill; use a large random-looking
+        # payload inside a DIFFERENT but still decodable PNG by increasing
+        # color noise:
+        from PIL import Image as _I
+        noisy = _I.new("RGB", (100, 100))
+        px = noisy.load()
+        for y in range(100):
+            for x in range(100):
+                px[x, y] = (x * y % 256, (x + y) % 256, (x * 7 + y * 3) % 256)
+        noisy.save(buf_noisy, format="PNG")
+        b64_plain = base64.b64encode(buf_plain.getvalue()).decode()
+        b64_noisy = base64.b64encode(buf_noisy.getvalue()).decode()
+        self.assertLess(len(b64_plain), len(b64_noisy))
+        p1 = [{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_plain}"}}]
+        p2 = [{"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64_noisy}"}}]
+        self.assertEqual(clen(p1), clen(p2))
 
 
 class TestAudioParts(unittest.TestCase):
-    """Each input_audio part costs a flat 50000 chars (~6k tokens approx)."""
+    """input_audio parts are charged at 400 tokens per minute."""
 
-    AUDIO_CHARS = 50000  # pinned constant from context.py
+    # A 60-second, mono 128kbps MP3 (the exact profile transcribe.py's
+    # convert_to_mp3 emits). At 44100Hz/1152 samples per MPEG1 L3 frame:
+    # frame_len = (1152/8)*128000/44100 = 417.96 bytes/frame and
+    # frames/sec ≈ 38.28, so 60s ≈ 2297 frames ≈ 960KB.
+    MP3_FALLBACK_CHARS = 50000  # legacy flat fallback for unparseable audio
 
-    def _audio_part(self, b64_payload="SUQzBAAAAA=="):
+    @classmethod
+    def setUpClass(cls):
+        import shutil
+        import subprocess
+        import tempfile
+
+        if shutil.which("ffmpeg") is None:
+            raise unittest.SkipTest("ffmpeg not available to build MP3 fixtures")
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
+            cls._mp3_path = tf.name
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-f", "lavfi",
+                 "-i", "anullsrc=r=44100:cl=mono",
+                 "-t", "60", "-ac", "1", "-b:a", "128k",
+                 cls._mp3_path],
+                check=True, capture_output=True,
+            )
+            with open(cls._mp3_path, "rb") as f:
+                cls._sixty_sec_mp3 = f.read()
+        finally:
+            try:
+                os.unlink(cls._mp3_path)
+            except Exception:
+                pass
+
+    def _audio_part(self, b64_payload):
         return [
             {
                 "type": "input_audio",
@@ -116,34 +234,57 @@ class TestAudioParts(unittest.TestCase):
             }
         ]
 
-    def test_single_audio_part_costs_exactly_50000(self):
-        self.assertEqual(clen(self._audio_part()), self.AUDIO_CHARS)
+    def test_fifty_nine_to_sixty_second_mp3_costs_about_3200(self):
+        # 400 tokens/min * 1 minute = 400 tokens = 3200 chars. The header
+        # walk can shave a frame or two, so tolerate ±150 chars.
+        cost = clen(self._audio_part(mp3_b64(self._sixty_sec_mp3)))
+        self.assertTrue(3050 <= cost <= 3350, f"cost was {cost}")
 
-    def test_n_audio_parts_cost_n_times_50000(self):
-        parts = [
-            {"type": "input_audio",
-             "input_audio": {"data": f"DATA{i}", "format": "mp3"}}
-            for i in range(3)
-        ]
-        self.assertEqual(clen(parts), 3 * self.AUDIO_CHARS)
+    def test_two_minutes_double_the_length_contribution(self):
+        six = self._sixty_sec_mp3
+        two_min = six + six  # concatenated frames -> ~120s of audio
+        c1 = clen(self._audio_part(mp3_b64(six)))
+        c2 = clen(self._audio_part(mp3_b64(two_min)))
+        self.assertTrue(2 * c1 - 400 <= c2 <= 2 * c1 + 400, f"{c1} vs {c2}")
 
-    def test_audio_cost_ignores_payload_size(self):
-        # A real MP3 base64 blob can be megabytes. The flat-rate estimate
-        # must NOT scale with the payload — a naive len(data) here would
-        # massively overstate context pressure and trigger premature pruning.
+    def test_unparseable_payload_falls_back_to_flat_50000(self):
+        # Junk base64 never raises and never scales with its length.
         tiny = self._audio_part("a")
         huge = self._audio_part("A" * 500_000)
-        self.assertEqual(clen(tiny), clen(huge))
-        self.assertEqual(clen(huge), self.AUDIO_CHARS)
+        self.assertEqual(clen(tiny), self.MP3_FALLBACK_CHARS)
+        self.assertEqual(clen(huge), self.MP3_FALLBACK_CHARS)
+
+    def test_missing_input_audio_key_counts_fallback(self):
+        self.assertEqual(clen([{"type": "input_audio"}]), self.MP3_FALLBACK_CHARS)
+
+    def test_legacy_bare_string_input_audio_counts_fallback(self):
+        # Legacy shape {"input_audio": "base64..."} must not raise;
+        # junk payload falls back to the flat estimate.
+        self.assertEqual(
+            clen([{"type": "input_audio", "input_audio": "junk"}]),
+            self.MP3_FALLBACK_CHARS,
+        )
+
+    def test_decodable_bare_string_audio_scales_with_length(self):
+        # Even in the legacy bare-string shape, a real MP3 payload is
+        # charged by its clip length (≈3200 chars for 60s).
+        cost = clen(
+            [{"type": "input_audio", "input_audio": mp3_b64(self._sixty_sec_mp3)}]
+        )
+        self.assertTrue(3050 <= cost <= 3350, f"cost was {cost}")
+
+    def test_empty_payload_falls_back_to_flat_50000(self):
+        self.assertEqual(clen(self._audio_part("")), self.MP3_FALLBACK_CHARS)
 
     def test_text_plus_audio_mixed_content(self):
+        # Fallback flat rate for junk payload "DATA".
         content = [
-            {"type": "text", "text": "hello"},                          #      5
+            {"type": "text", "text": "hello"},                  #      5
             {"type": "input_audio",
-             "input_audio": {"data": "DATA", "format": "mp3"}},         # 50000
-            "bare!",                                                    #      5
+             "input_audio": {"data": "DATA", "format": "mp3"}}, # 50000
+            "bare!",                                            #      5
         ]
-        self.assertEqual(clen(content), 5 + self.AUDIO_CHARS + 5)
+        self.assertEqual(clen(content), 5 + self.MP3_FALLBACK_CHARS + 5)
 
 
 class TestMixedContent(unittest.TestCase):
@@ -152,11 +293,12 @@ class TestMixedContent(unittest.TestCase):
     def test_mixed_parts_and_bare_strings_sum(self):
         content = [
             {"type": "text", "text": "hello"},                       #    5
-            {"type": "image_url", "image_url": {"url": "data:…"}},   # 6400
+            {"type": "image_url",
+             "image_url": {"url": png_data_url(1000, 1000)}},        # 8000
             "bare string!",                                          #   12
             {"type": "text", "text": "!?"},                          #    2
         ]
-        self.assertEqual(clen(content), 5 + 6400 + 12 + 2)
+        self.assertEqual(clen(content), 5 + 8000 + 12 + 2)
 
     def test_empty_list_is_zero(self):
         self.assertEqual(clen([]), 0)
@@ -193,15 +335,19 @@ class TestPruningRelevance(unittest.TestCase):
     modalities that drives _trim_context_if_needed().
     """
 
-    def test_one_image_outweighs_a_chunky_text_message(self):
+    def test_one_megapixel_image_outweighs_a_chunky_text_message(self):
         chunky_output = "x" * 2000  # typical large tool output
-        one_image = [{"type": "image_url", "image_url": {"url": "u"}}]
+        one_image = [{"type": "image_url", "image_url": {"url": png_data_url(1000, 1000)}}]
         self.assertGreater(clen(one_image), clen(chunky_output))
 
-    def test_documented_token_exchange_rate(self):
-        # Source comment: "each Image is roughly 800 tokens. Or 6400 characters"
-        # i.e. 8 chars/token — keep the two numbers consistent.
-        self.assertEqual(6400 // 8, 800)
+    def test_documented_token_exchange_rates(self):
+        # 8 chars/token exchange rate, 400 tokens/min audio, and
+        # 1000 tokens/MP image are the documented rates driving pruning.
+        import bash_agent.context as context_module
+
+        self.assertEqual(context_module.CHARS_PER_TOKEN, 8)
+        self.assertEqual(context_module.AUDIO_TOKENS_PER_MINUTE, 400)
+        self.assertEqual(context_module.IMAGE_TOKENS_PER_MEGAPIXEL, 1000)
 
 
 # ---------------------------------------------------------------------------
