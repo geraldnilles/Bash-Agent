@@ -48,7 +48,7 @@ import unittest
 from unittest import mock
 
 from bash_agent import utils as utils_module
-from bash_agent.config import DEFAULT_MAX_TOKENS, DEFAULT_MODEL
+from bash_agent.config import DEFAULT_MAX_TOKENS, DEFAULT_MODEL, DEFAULT_REASONING_EFFORT
 from bash_agent.config_file import (
     CONFIG_FILENAME,
     KNOWN_KEYS,
@@ -285,7 +285,7 @@ class TestAgentConfigPrecedence(ConfigFileTestBase):
         with without_env_vars("OPENROUTER_MODEL"):
             agent = self._build_agent()
         self.assertEqual(agent.model, DEFAULT_MODEL)
-        self.assertIsNone(agent.reasoning_effort)
+        self.assertEqual(agent.reasoning_effort, DEFAULT_REASONING_EFFORT)
         self.assertEqual(agent.max_tokens, DEFAULT_MAX_TOKENS)
 
     def test_config_file_overrides_hardcoded_defaults(self):
@@ -365,7 +365,7 @@ class TestAgentConfigPrecedence(ConfigFileTestBase):
             with contextlib.redirect_stderr(stderr_buf):
                 agent = self._build_agent()
         self.assertEqual(agent.model, DEFAULT_MODEL)
-        self.assertIsNone(agent.reasoning_effort)
+        self.assertEqual(agent.reasoning_effort, DEFAULT_REASONING_EFFORT)
         self.assertEqual(agent.max_tokens, DEFAULT_MAX_TOKENS)
         self.assertIn("[Config]", stderr_buf.getvalue())
 

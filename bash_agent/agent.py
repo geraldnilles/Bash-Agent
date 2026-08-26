@@ -178,7 +178,7 @@ class Agent:
             # 'default' in the file means: use the model's built-in default
             self.reasoning_effort = None if file_effort == 'default' else file_effort
         else:
-            self.reasoning_effort = None
+            self.reasoning_effort = DEFAULT_REASONING_EFFORT
 
         if max_tokens is not None:
             self.max_tokens = max_tokens
@@ -255,25 +255,34 @@ class Agent:
             self.multimodal_capabilities = None
 
     def _fetch_model_reasoning_info(self):
-        """Query OpenRouter API to get the model's reasoning capabilities."""
+        """Query OpenRouter API to get the model's reasoning capabilities.
+
+        Uses the /models list endpoint: there is no reliable per-model
+        endpoint, and the list response nests each model under "data".
+        """
+        default_efforts = ["high", "medium", "low", "minimal", "none"]
         try:
-            # Extract author/slug from model id (e.g., "openai/gpt-4")
-            model_id = self.model
             req = urllib.request.Request(
-                f"https://openrouter.ai/api/v1/models/{model_id}",
+                "https://openrouter.ai/api/v1/models",
                 headers=llm.get_attribution_headers(),
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
-                model_data = json_module.loads(resp.read().decode("utf-8"))
-            
-            reasoning = model_data.get("reasoning", {}) or {}
-            self.reasoning_supported_efforts = reasoning.get("supported_efforts", ["high", "medium", "low", "minimal", "none"])
-            self.reasoning_mandatory = reasoning.get("mandatory", False)
-            self.reasoning_default_effort = reasoning.get("default_effort", "medium")
+                models_data = json_module.loads(resp.read().decode("utf-8"))
+            for m in models_data if isinstance(models_data, list) else models_data.get("data", []):
+                if m.get("id") != self.model:
+                    continue
+                reasoning = m.get("reasoning", {}) or {}
+                self.reasoning_supported_efforts = reasoning.get("supported_efforts") or default_efforts
+                self.reasoning_mandatory = reasoning.get("mandatory", False)
+                self.reasoning_default_effort = reasoning.get("default_effort", "medium")
+                return
+            # Model found in catalog without reasoning metadata; keep defaults.
         except Exception:
-            self.reasoning_supported_efforts = ["high", "medium", "low", "minimal", "none"]
-            self.reasoning_mandatory = False
-            self.reasoning_default_effort = "medium"
+            pass
+        # Network/API failure: fall back to permissive defaults.
+        self.reasoning_supported_efforts = default_efforts
+        self.reasoning_mandatory = False
+        self.reasoning_default_effort = "medium"
 
     def _get_lowest_reasoning_effort(self):
         """Get the lowest supported reasoning effort for the current model."""
