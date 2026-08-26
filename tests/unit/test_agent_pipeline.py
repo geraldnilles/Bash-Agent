@@ -39,6 +39,7 @@ from tests.helpers.fakes import (
     python_block,
     output_block,
     attached_image_block,
+    attached_audio_block,
     chdir_tmp,
     _make_agent,
     FakeSandbox,
@@ -713,6 +714,175 @@ class TestScratchpadCoCommitOrdering(PipelineCase):
         total = sum(u["content"].count("---START_SCRATCHPAD.md-") for u in users)
         self.assertEqual(total, 1)
         self.assertIn("LATEST", users[2]["content"])
+
+
+# ---------------------------------------------------------------------------
+# T-14b — Attached-audio fence extraction (transcribe)
+# ---------------------------------------------------------------------------
+
+class TestAttachedAudioFenceExtraction(PipelineCase):
+    """Audio fences emitted by transcribe.py in multimodal sandbox mode.
+
+    Mirrors TestAttachedImageFenceExtraction: the pipeline must strip the
+    ATTACHED_AUDIO fence + payload from the displayed output, append an
+    ``[Audio attached to conversation context.]`` note, collect
+    {"data": ..., "format": "mp3"} dicts onto _pending_multimodal_audio,
+    and commit them as OpenAI-style structured content with an
+    ``input_audio`` part. Foreign-UUID audio fences must pass through.
+    """
+
+    B64 = ("SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjYyLjE0LjEwMgAAAAAAAAAAAAAA"
+           "+P+P/P/P")
+
+    def test_payload_stripped_note_added_pending_populated(self):
+        """_execute_script level: displayed output loses the b64 payload and
+        gains the attachment note; pending queue receives the audio dict."""
+        out = "\n".join(
+            [
+                "Transcribing clip.",
+                attached_audio_block(self.uid, self.B64),
+                "Done.",
+            ]
+        )
+        fake_sb = FakeSandbox(execute_result=(0, out))
+        self.agent.sandbox = fake_sb
+
+        formatted = self.agent._execute_script("BASH", "transcribe clip.wav")
+
+        # Surrounding prose survives the strip
+        self.assertIn("Transcribing clip.", formatted)
+        self.assertIn("Done.", formatted)
+
+        # Payload + fences are gone from the DISPLAYED output entirely
+        self.assertNotIn(self.B64, formatted)
+        self.assertNotIn("ATTACHED_AUDIO", formatted)
+
+        # Attachment note added AFTER the trailing prose (inside OUTPUT fence)
+        self.assertIn("[Audio attached to conversation context.]", formatted)
+        self.assertGreater(
+            formatted.index("[Audio attached"),
+            formatted.index("Done."),
+        )
+
+        # Exit-code / VISIBLE headers intact
+        self.assertIn(f"EXIT_CODE_0-VISIBLE_100%-{self.uid}", formatted)
+
+        # Pending queue holds exactly the extracted audio object
+        self.assertEqual(
+            self.agent._pending_multimodal_audio,
+            [{"data": self.B64, "format": "mp3"}],
+        )
+        self.assertEqual(self.agent._pending_multimodal_images, [])
+
+    def test_full_turn_commits_structured_multimodal_message(self):
+        """End-to-end: parse_and_execute commits ONE user message whose
+        content is a LIST: [{type: text, ...}, {type: input_audio, ...}];
+        the pending audio queue is drained at commit time."""
+        fake_sb = FakeSandbox(
+            execute_result=(0, attached_audio_block(self.uid, self.B64))
+        )
+        self.agent.sandbox = fake_sb
+
+        executed, feedback = self.agent.parse_and_execute(
+            bash_block(self.uid, "transcribe clip.wav")
+        )
+
+        self.assertTrue(executed)
+        self.assertEqual(feedback, "")
+
+        users = self.user_messages()
+        self.assertEqual(len(users), 1)
+        content = users[0]["content"]
+
+        # Multimodal wire format: a LIST of typed parts
+        self.assertIsInstance(content, list)
+        self.assertEqual(len(content), 2)
+
+        # Part 0 - text carrying the OUTPUT fence + note, sans any payload
+        self.assertEqual(content[0]["type"], "text")
+        text_part = content[0]["text"]
+        self.assertIn(
+            f"---START_BASH_OUTPUT-EXIT_CODE_0-VISIBLE_100%-{self.uid}---",
+            text_part,
+        )
+        self.assertIn(f"---END_BASH_OUTPUT-{self.uid}---", text_part)
+        self.assertIn("[Audio attached to conversation context.]", text_part)
+        self.assertNotIn(self.B64, text_part)
+        self.assertNotIn("ATTACHED_AUDIO", text_part)
+
+        # Part 1 - input_audio part wrapping the audio object verbatim
+        self.assertEqual(content[1]["type"], "input_audio")
+        self.assertEqual(
+            content[1]["input_audio"],
+            {"data": self.B64, "format": "mp3"},
+        )
+
+        # Queue drained exactly once, at commit time
+        self.assertEqual(self.agent._pending_multimodal_audio, [])
+
+    def test_image_and_audio_commit_together_in_document_order(self):
+        """One output with BOTH fence types -> one user message with text,
+        image_url, AND input_audio parts; image part first, audio second."""
+        img_url = "data:image/png;base64,AAAA"
+        out = "\n".join(
+            [
+                attached_image_block(self.uid, img_url),
+                attached_audio_block(self.uid, self.B64),
+            ]
+        )
+        fake_sb = FakeSandbox(execute_result=(0, out))
+        self.agent.sandbox = fake_sb
+
+        executed, _ = self.agent.parse_and_execute(
+            bash_block(self.uid, "vision shot.png && transcribe clip.wav")
+        )
+
+        self.assertTrue(executed)
+        content = self.user_messages()[0]["content"]
+        self.assertEqual(content[0]["type"], "text")
+        self.assertEqual(
+            content[1],
+            {"type": "image_url", "image_url": {"url": img_url}},
+        )
+        self.assertEqual(
+            content[2],
+            {"type": "input_audio", "input_audio": {"data": self.B64, "format": "mp3"}},
+        )
+        # Both notes present in the visible text; no payload leaks anywhere
+        text_part = content[0]["text"]
+        self.assertIn("[Image attached to conversation context.]", text_part)
+        self.assertIn("[Audio attached to conversation context.]", text_part)
+        self.assertNotIn(img_url, text_part)
+        self.assertNotIn(self.B64, text_part)
+        # Both queues drained
+        self.assertEqual(self.agent._pending_multimodal_images, [])
+        self.assertEqual(self.agent._pending_multimodal_audio, [])
+
+    def test_foreign_uuid_audio_fence_is_never_consumed(self):
+        """An ATTACHED_AUDIO fence bearing a DIFFERENT session UUID must not
+        be stripped, must not populate pending, and leaves the commit a
+        plain string message (no multimodal wrapping)."""
+        foreign_uuid = str(uuid.uuid4())
+        foreign_fence = attached_audio_block(foreign_uuid, self.B64)
+        fake_sb = FakeSandbox(
+            execute_result=(0, f"before\n{foreign_fence}\nafter")
+        )
+        self.agent.sandbox = fake_sb
+
+        executed, feedback = self.agent.parse_and_execute(
+            bash_block(self.uid, "cat other.wav")
+        )
+
+        self.assertTrue(executed)
+        self.assertEqual(feedback, "")
+
+        # No audio pending -> classic string commit path
+        self.assertEqual(self.agent._pending_multimodal_audio, [])
+        content = self.user_messages()[0]["content"]
+        self.assertIsInstance(content, str)
+
+        # Foreign fence passes through untouched, payload visible
+        self.assertIn(foreign_fence, content)
 
 
 if __name__ == "__main__":

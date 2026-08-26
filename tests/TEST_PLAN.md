@@ -24,14 +24,14 @@
 | 0. Shared Test Infrastructure (`tests/helpers/fakes.py`) | 4 | 4 |
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
-| 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 6 | 6 |
-| 4. Context Management — `context.ContextManager` | 5 | 5 |
+| 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 7 | 7 |
+| 4. Context Management — `context.ContextManager` | 7 | 7 |
 | 5. LLM Adapter — `llm.py` | 4 | 4 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 3 |
 | 7. Integration — real processes, still offline | 3 | 3 |
-| 8. Supporting Modules | 9 | 9 |
+| 8. Supporting Modules | 10 | 10 |
 | 9. LLM Finish-Reason Handling — `agent._get_llm_response` | 2 | 2 |
-| **Total** | **47** | **47** |
+| **Total** | **50** | **50** |
 
 ---
 
@@ -251,6 +251,8 @@ payload stripped from displayed output, `[Image attached…]` note added,
 `_commit_execution_feedback` the context message content is a **list** with a
 text part followed by an `image_url` part (the multimodal wire format), and
 the pending list is cleared. This exercises the exact path `vision` uses.
+The same extraction pipeline is shared by attached audio (T-44), which
+additionally proves image+audio can be committed together in one message.
 
 ### T-15 — `/tmp/` failure warning heuristic (P1)
 
@@ -292,9 +294,12 @@ runs a turn, asserts old fence gone + new fence present exactly once. Exercises
 - [x] **Implemented** (`tests/unit/test_context_pruning.py`)
 
 `_content_length` on: plain string; list with text parts; list with N
-`image_url` parts (each ≈6400 chars); mixed; non-str/non-list → 0. These
-numbers feed pruning decisions, so drift here silently changes when trimming
-kicks in. Static-method test, zero setup.
+`image_url` parts (each ≈6400 chars); list with `input_audio` parts (each a
+flat ≈50000 chars — never scaled by the base64 payload size, mirroring the
+image flat-rate); mixed; non-str/non-list → 0. The audio branch is CORE
+accounting: the full base64 MP3 lands in history verbatim, so pruning would
+crash/mis-account without it. These numbers feed pruning decisions, so drift
+here silently changes when trimming kicks in. Static-method test, zero setup.
 
 ### T-19 — Hysteresis pruning ladder (P0)
 
@@ -309,7 +314,7 @@ with `...[TRUNCATED]`; index 0 never touched; loop terminates with total ≤
 target (80%). This is the most intricate logic in the package and currently
 has zero coverage.
 
-### T-20 — Image-bearing messages dropped wholesale (P0)
+### T-20 — Image- and audio-bearing messages dropped wholesale (P0)
 
 - [x] **Implemented** (`tests/unit/test_context_pruning.py`)
 
@@ -317,7 +322,10 @@ Under pruning pressure, a message whose content is a list (multimodal) must be
 removed entirely rather than regex-trimmed (which would raise TypeError).
 Constructs a tiny-limit history mixing list-content and string messages and
 asserts the list message is popped while string messages get the normal
-ladder treatment. Regression guard for the fix in commit 78773ca.
+ladder treatment. An explicit audio-bearing fixture (text + `input_audio`
+parts) pins the same wholesale-drop behavior for transcribe-attached turns;
+the audio drop uses the same `IMAGE_DROP_BANNER` banner as images. Regression
+guard for the fix in commit 78773ca.
 
 ### T-21 — Scratchpad hashing and VISIBLE math (P1)
 
@@ -514,7 +522,7 @@ Oversize image (>MAX_PIXELS, tiny patched limit) → exit 1 with stderr message.
 Fallback mode (no env): asserts the LLM message structure contains text +
 image_url parts. Uses `runpy`/subprocess-free invocation via patched sys.argv.
 
-### T-39 — `transcribe.py` helpers (P2)
+### T-39 — `transcribe.py` helpers and dual-mode (P2)
 
 - [x] **Implemented**
 
@@ -523,7 +531,27 @@ image_url parts. Uses `runpy`/subprocess-free invocation via patched sys.argv.
 threshold (oversize → SystemExit 1); context-file XML wrapping logic extracted
 via a tiny driver that mimics main()'s prompt assembly. ffmpeg conversion
 itself covered only if binary present (skipUnless), converting 0.5s of
-generated silence.
+generated silence. Multimodal sandbox attach mode is covered by T-44.
+
+### T-44 — `transcribe.py` multimodal attach mode (P1)
+
+- [x] **Implemented** (`tests/unit/test_transcribe.py`, `tests/unit/test_agent_pipeline.py`)
+
+Mirror of T-38 for audio. Scrub the environment of `BASH_AGENT_*` vars, then
+set `BASH_AGENT_UUID` + `BASH_AGENT_MULTIMODAL=audio` (or `image,audio`) and
+run `transcribe.main()` with the LLM client cache poisoned with a failing
+fake. Asserts: exit 0, a protocol-valid
+`---START_ATTACHED_AUDIO-{uuid}---<base64>---END_ATTACHED_AUDIO-{uuid}---`
+fence on stdout that decodes to real MP3 bytes, the temp converted MP3 is
+explicitly unlinked, and the poisoned client was never called. Variants:
+`BASH_AGENT_MULTIMODAL=image` (no audio) and no env both fall through to the
+LLM transcription path. At the agent layer, `_execute_script` strips the
+audio fence, appends `[Audio attached to conversation context.]`, and queues
+`{"data": ..., "format": "mp3"}` onto `_pending_multimodal_audio`; an
+end-to-end `parse_and_execute` commits a single list-form user message whose
+parts are text + `input_audio`, and a foreign-UUID audio fence is never
+consumed. Combining image + audio fences in one output commits both parts in
+document order.
 
 ### T-40 — `memo.py` pure helpers (P2)
 

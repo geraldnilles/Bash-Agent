@@ -161,11 +161,17 @@ vision -p "Extract all SQL table names from this ERD" schema.png
 
 ### Audio Transcription
 
-This tool uses an OpenRouter model that accesses audio input to generate a text transcription.
+If your chosen model supports native audio input, the agent can attach audio files directly to the conversation:
 
 ```bash
 transcribe meeting_recording.opus
+```
+
+For text-only models (or when invoked standalone), the `transcribe` command falls back to a separate audio-capable OpenRouter model and prints the resulting text transcription. You can add a specific prompt or provide context files:
+
+```bash
 transcribe -p "List all action items from this meeting" status_call.mp3
+transcribe -c notes.md -- meeting_recording.opus
 ```
 
 ### Voice Memo Recording

@@ -103,6 +103,49 @@ class TestImageParts(unittest.TestCase):
         self.assertEqual(clen(huge), self.IMAGE_CHARS)
 
 
+class TestAudioParts(unittest.TestCase):
+    """Each input_audio part costs a flat 50000 chars (~6k tokens approx)."""
+
+    AUDIO_CHARS = 50000  # pinned constant from context.py
+
+    def _audio_part(self, b64_payload="SUQzBAAAAA=="):
+        return [
+            {
+                "type": "input_audio",
+                "input_audio": {"data": b64_payload, "format": "mp3"},
+            }
+        ]
+
+    def test_single_audio_part_costs_exactly_50000(self):
+        self.assertEqual(clen(self._audio_part()), self.AUDIO_CHARS)
+
+    def test_n_audio_parts_cost_n_times_50000(self):
+        parts = [
+            {"type": "input_audio",
+             "input_audio": {"data": f"DATA{i}", "format": "mp3"}}
+            for i in range(3)
+        ]
+        self.assertEqual(clen(parts), 3 * self.AUDIO_CHARS)
+
+    def test_audio_cost_ignores_payload_size(self):
+        # A real MP3 base64 blob can be megabytes. The flat-rate estimate
+        # must NOT scale with the payload — a naive len(data) here would
+        # massively overstate context pressure and trigger premature pruning.
+        tiny = self._audio_part("a")
+        huge = self._audio_part("A" * 500_000)
+        self.assertEqual(clen(tiny), clen(huge))
+        self.assertEqual(clen(huge), self.AUDIO_CHARS)
+
+    def test_text_plus_audio_mixed_content(self):
+        content = [
+            {"type": "text", "text": "hello"},                          #      5
+            {"type": "input_audio",
+             "input_audio": {"data": "DATA", "format": "mp3"}},         # 50000
+            "bare!",                                                    #      5
+        ]
+        self.assertEqual(clen(content), 5 + self.AUDIO_CHARS + 5)
+
+
 class TestMixedContent(unittest.TestCase):
     """Lists mixing text parts, image parts, and bare strings."""
 
@@ -498,6 +541,21 @@ def image_msg(role, caption="describe this screenshot"):
     return {"role": role, "content": [text_part(caption), image_part()]}
 
 
+def audio_msg(role, caption="transcribe this recording"):
+    """A realistic audio-bearing multimodal message as built by
+    _commit_execution_feedback (input_audio part)."""
+    return {
+        "role": role,
+        "content": [
+            text_part(caption),
+            {
+                "type": "input_audio",
+                "input_audio": {"data": "SUQzBAAAAA==", "format": "mp3"},
+            },
+        ],
+    }
+
+
 class MultimodalPruningCase(PruningCase):
     """Shared pruning harness plus multimodal-specific assertion helpers."""
 
@@ -539,6 +597,52 @@ class TestImageMessageDroppedWholesale(MultimodalPruningCase):
         # Popping the flat-rate image alone frees plenty of space; the
         # surrounding string messages must come through without any
         # ladder treatment (no deletion marker, no truncation).
+        self.cm._trim_context_if_needed()
+        self.assertEqual(self.cm.history[0]["content"], self.sys_content)
+        self.assertEqual(self.cm.history[1]["content"], self.out["content"])
+        self.assertNotIn(DELETED_MARKER, self.cm.history[1]["content"])
+        self.assertNotIn(TRUNCATED_MARKER, self.cm.history[1]["content"])
+        self.assertEqual(self.cm.history[2]["content"], self.tail["content"])
+        self.assertLessEqual(_total_length(self.cm.history), TARGET)
+
+    def test_dedicated_banner_printed_not_failsafe(self):
+        # The multimodal branch has its own banner; assert we took THAT
+        # path and not the generic oldest-message failsafe drop.
+        self.cm._trim_context_if_needed()
+        out = self.stdout_buf.getvalue()
+        self.assertEqual(out.count(IMAGE_DROP_BANNER), 1)
+        self.assertEqual(out.count(HYSTERESIS_BANNER), 1)
+        self.assertNotIn("Dropping oldest conversational message", out)
+
+
+class TestAudioMessageDroppedWholesale(MultimodalPruningCase):
+    """Mirror of the image regression guard: a list-content message carrying
+    an input_audio part must be removed ENTIRELY under pruning pressure —
+    never regex-laddered (lists would crash the ladder) and never
+    partially truncated."""
+
+    def setUp(self):
+        super().setUp()
+        self.sys_content = self.system_prompt()
+        self.aud = audio_msg("user", "transcribe this meeting")
+        self.out = self.output_msg("assistant", "o" * 300)
+        self.tail = self.plain_msg("user", "t" * 300)
+        self.cm.history = [
+            self.plain_msg("system", self.sys_content),
+            dict(self.aud),
+            self.out,
+            self.tail,
+        ]
+        # ~128 + ~50005 (flat-rate audio) + ~445 + 300 >> LIMIT.
+        self.assertGreater(_total_length(self.cm.history), LIMIT,
+                           "fixture must start over the strict limit")
+
+    def test_list_message_removed_entirely(self):
+        self.cm._trim_context_if_needed()
+        self.assertEqual(self.list_messages(), [])
+        self.assertEqual(len(self.cm.history), 3)
+
+    def test_string_neighbors_untouched_by_the_drop(self):
         self.cm._trim_context_if_needed()
         self.assertEqual(self.cm.history[0]["content"], self.sys_content)
         self.assertEqual(self.cm.history[1]["content"], self.out["content"])

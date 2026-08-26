@@ -137,6 +137,27 @@ def attached_image_block(uuid_str: str, data_url: str) -> str:
     )
 
 
+def attached_audio_block(uuid_str: str, base64_audio: str) -> str:
+    """
+    Return a protocol-valid ATTACHED_AUDIO payload fence, byte-for-byte the
+    emission shape of bash_agent/transcribe.py in multimodal sandbox mode:
+
+        ---START_ATTACHED_AUDIO-{uuid}---
+        {base64_audio}
+        ---END_ATTACHED_AUDIO-{uuid}---
+
+    Agent._execute_script scans sandbox stdout for these fences, strips the
+    payloads, and queues {"data": ..., "format": "mp3"} dicts onto
+    _pending_multimodal_audio; _commit_execution_feedback then converts them
+    into input_audio content parts.
+    """
+    return (
+        f"---START_ATTACHED_AUDIO-{uuid_str}---\n"
+        f"{base64_audio}\n"
+        f"---END_ATTACHED_AUDIO-{uuid_str}---"
+    )
+
+
 # ---------------------------------------------------------------------------
 # T-00c — FakeLLMClient + cache seeding
 # ---------------------------------------------------------------------------
@@ -539,6 +560,7 @@ __all__ = [
     "python_block",
     "output_block",
     "attached_image_block",
+    "attached_audio_block",
     "FakeLLMClient",
     "FakeResponse",
     "FakeUsage",

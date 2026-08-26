@@ -202,6 +202,8 @@ class Agent:
 
         # Track attached images emitted by the sandbox (e.g., via the vision command)
         self._pending_multimodal_images = []
+        # Track attached audio emitted by the sandbox (e.g., via transcribe)
+        self._pending_multimodal_audio = []
         
         # Check for custom role definition in ROLE.md (only if not resuming)
         if not history_loaded:
@@ -380,14 +382,20 @@ class Agent:
 
         # Process and strip any attached image payloads
         img_pattern = rf"---START_ATTACHED_IMAGE-{self.uuid}---\s*(.*?)\s*---END_ATTACHED_IMAGE-{self.uuid}---"
+        aud_pattern = rf"---START_ATTACHED_AUDIO-{self.uuid}---\s*(.*?)\s*---END_ATTACHED_AUDIO-{self.uuid}---"
         image_matches = re.findall(img_pattern, raw_output, re.DOTALL)
+        audio_matches = re.findall(aud_pattern, raw_output, re.DOTALL)
         for b64_url in image_matches:
             self._pending_multimodal_images.append({"url": b64_url.strip()})
+        for b64_audio in audio_matches:
+            self._pending_multimodal_audio.append({"data": b64_audio.strip(), "format": "mp3"})
 
-        clean_output = re.sub(img_pattern, "", raw_output, flags=re.DOTALL).strip()
+        clean_output = re.sub(img_pattern, "", raw_output, flags=re.DOTALL)
+        clean_output = re.sub(aud_pattern, "", clean_output, flags=re.DOTALL).strip()
         if image_matches:
             clean_output = f"{clean_output}\n[Image attached to conversation context.]".strip()
-
+        if audio_matches:
+            clean_output = f"{clean_output}\n[Audio attached to conversation context.]".strip()
         formatted_output = self._format_output(exit_code, clean_output, cmd_type)
 
         # Remind the model that /tmp/ is wiped every turn when a failed command
@@ -412,12 +420,15 @@ class Agent:
         else:
             final_text = "\n".join(combined_outputs)
 
-        if self._pending_multimodal_images:
+        if self._pending_multimodal_images or self._pending_multimodal_audio:
             structured_content = [{"type": "text", "text": final_text}]
             for img_obj in self._pending_multimodal_images:
                 structured_content.append({"type": "image_url", "image_url": img_obj})
+            for aud_obj in self._pending_multimodal_audio:
+                structured_content.append({"type": "input_audio", "input_audio": aud_obj})
             self.context.add_message("user", structured_content)
             self._pending_multimodal_images.clear()
+            self._pending_multimodal_audio.clear()
         else:
             self.context.add_message("user", final_text)
 
@@ -502,6 +513,8 @@ class Agent:
                             f.write(block.get("text", "") + "\n")
                         elif block_type == "image_url":
                             f.write("[Image payload]\n")
+                        elif block_type == "input_audio":
+                            f.write("[Audio payload]\n")
                         else:
                             f.write(f"[{block_type} payload]\n")
                 else:

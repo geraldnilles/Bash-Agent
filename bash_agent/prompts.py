@@ -35,6 +35,32 @@ You have access to a vision tool that allows you to process and describe images.
 - Input image should be less than 2MP
 """
 
+    # Conditional transcribe section: native audio attach mode if the model
+    # supports audio input, otherwise text-only fallback.
+    has_audio_capability = "audio" in (multimodal_capabilities or [])
+    if has_audio_capability:
+        transcribe_section = """## TRANSCRIBE CAPABILITIES
+================================================================
+
+Use the `transcribe` command to attach an audio file to the conversation.
+- Usage: `transcribe <path_to_audio>`
+- You can execute `transcribe` as part of standard bash scripts, loops, or pipelines.
+- Attached audio will automatically be added to your multimodal context for the next turn.
+"""
+    else:
+        transcribe_section = """## TRANSCRIBE CAPABILITIES
+================================================================
+
+You have access to a transcription tool that converts audio files to text using an LLM. The `transcribe` script is available in your PATH.
+- By default, the program extracts all spoken words into text.
+    - Usage: `transcribe <path_to_audio>`
+- You can provide any arbitrary prompt to extract more specific information.
+    - Usage: `transcribe -p "List all action items from this meeting" <path_to_audio>`
+- You may also provide one ore more text files as context for the transcribing model.
+    - Usage: `transcribe -c <file1.md> <file2.md> -- <path_to_audio>`
+    - The `--` is needed to separate the context filenames from the audio file positional argument
+"""
+
 
     return f"""{role_text}
 
@@ -160,18 +186,7 @@ You should proactively discover and utilize `AGENTS.md` files throughout the cod
 {vision_section}
 
 ================================================================
-## TRANSCRIBE CAPABILITIES
-================================================================
-
-You have access to a transcription tool that converts audio files to text using an LLM. The `transcribe` script is available in your PATH.
-- By default, the program extracts all spoken words into text.
-    - Usage: `transcribe <path_to_audio>`
-- You can provide any arbitrary prompt to extract more specific information.
-    - Usage: `transcribe -p "List all action items from this meeting" <path_to_audio>`
-- You may also provide one ore more text files as context for the transcribing model.
-    - Usage: `transcribe -c <file1.md> <file2.md> -- <path_to_audio>`
-    - The `--` is needed to separate the context filenames from the audio file positional argument
-
+{transcribe_section}
 ================================================================
 ## PDF Processing
 ================================================================

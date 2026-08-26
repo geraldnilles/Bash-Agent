@@ -27,7 +27,7 @@ bash_agent/
 ├── utils.py         # Misc helpers (clipboard, cleanup, vim prompt)
 ├── search.py        # Semantic code search (embeddings + reranking)
 ├── vision.py        # Image analysis via LLM (native multimodal or fallback)
-├── transcribe.py    # Audio transcription via LLM
+├── transcribe.py    # Audio transcription via LLM (native multimodal or fallback)
 └── memo.py          # Voice memo recording (PipeWire + ffmpeg)
 ```
 
@@ -66,8 +66,8 @@ This is the heart of the project. The `Agent` class:
 | `parse_and_execute(agent_msg)` | Coordination pipeline: extracts blocks via `_extract_blocks()`, dispatches each to `_handle_special_command()` or `_execute_script()`, enforces `MAX_CODE_BLOCKS` limit, and commits results via `_commit_execution_feedback()`. Returns `(executed: bool, feedback: str)`. |
 | `_extract_blocks(response_text)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Returns `(blocks, None)` on success, or `([], warning_message)` when no blocks or malformed UUID fences are found. |
 | `_handle_special_command(cmd_type, script)` | Intercepts built-in agent commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Returns `(handled: bool, formatted_output: str)`. Commands that terminate the session (`exit`, `copy-to-clipboard`) call `sys.exit()` in-process. |
-| `_execute_script(cmd_type, script)` | Executes a bash or python script via `Sandbox.execute()` / `Sandbox.execute_python()`. Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` fences, strips base64 payloads, collects them in `self._pending_multimodal_images`, and returns formatted output. On non-zero exit whose output references a `/tmp/` file with a file-not-found style error, appends a reminder that `/tmp/` is wiped each turn and `.bash_agent_tmp/` should be used instead (see `_build_tmp_file_warning()`). |
-| `_commit_execution_feedback(outputs)` | Bundles output blocks and scratchpad updates into a user message and appends to context. Builds structured multimodal content when `self._pending_multimodal_images` is non-empty. |
+| `_execute_script(cmd_type, script)` | Executes a bash or python script via `Sandbox.execute()` / `Sandbox.execute_python()`. Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` and `---START_ATTACHED_AUDIO-{uuid}---` fences, strips base64 payloads, collects them in `self._pending_multimodal_images` / `self._pending_multimodal_audio`, and returns formatted output. On non-zero exit whose output references a `/tmp/` file with a file-not-found style error, appends a reminder that `/tmp/` is wiped each turn and `.bash_agent_tmp/` should be used instead (see `_build_tmp_file_warning()`). |
+| `_commit_execution_feedback(outputs)` | Bundles output blocks and scratchpad updates into a user message and appends to context. Builds structured multimodal content when `self._pending_multimodal_images` or `self._pending_multimodal_audio` is non-empty. |
 | `_check_model_capabilities()` | Queries the OpenRouter models API to determine the model's supported input modalities. Sets `self.multimodal_capabilities` to a list like `["image"]`, or `None` for text-only models (or if the probe fails). |
 
 **The fenced-block regex pattern** (used in `_extract_blocks`):
@@ -148,7 +148,7 @@ Manages the message list (`self.history: List[Dict[str, str]]`), context pruning
 4. **Scratchpad cleanup** (`remove_old_scratchpads()`): Strips old scratchpad blocks from history when a new one is injected.
 5. **Persistence** (`save_history()` / `load_history()`): Serializes `{uuid, history}` to `.bash_agent_tmp/history.json`. Called after every message. Loaded on `--resume`.
 
-**Content length calculation** (`_content_length()`): Handles both string content (legacy) and list-of-dicts content (multimodal format). Image blocks are estimated at ~800 tokens (~6400 chars).
+**Content length calculation** (`_content_length()`): Handles both string content (legacy) and list-of-dicts content (multimodal format). Image blocks are estimated at ~800 tokens (~6400 chars); attached audio (`input_audio` parts) is estimated at a flat ~6000 tokens (~50000 chars, ≈ a 30-minute call) and never scales with the base64 payload size.
 
 ---
 
@@ -178,7 +178,7 @@ systemd-run --user --quiet --wait --collect --pipe \
 - `stderr` is merged into `stdout` via `subprocess.STDOUT` — output is always a single string
 - Timeout produces exit code 124 (matching `timeout` command convention)
 - The host `PATH` and `OPENROUTER_API_KEY` are forwarded into the sandbox environment
-- When `uuid` is set, `BASH_AGENT_UUID` is forwarded. `BASH_AGENT_MULTIMODAL` is set to a comma-separated list of the model's input modalities (e.g. `image` or `image,audio`, empty string when text-only) so tools like `vision.py` can emit attached-image payloads
+- When `uuid` is set, `BASH_AGENT_UUID` is forwarded. `BASH_AGENT_MULTIMODAL` is set to a comma-separated list of the model's input modalities (e.g. `image` or `image,audio`, empty string when text-only) so tools like `vision.py` and `transcribe.py` can emit attached-image / attached-audio payloads
 
 ---
 
@@ -274,8 +274,11 @@ Standalone CLI (`transcribe` command). Sends audio files to an LLM for transcrip
 **Flow:**
 1. Reads the audio file, checks size (default max 50 MB)
 2. Auto-converts to mono MP3 via ffmpeg for broader backend compatibility
-3. Base64-encodes and sends to the LLM with a transcription prompt (or custom prompt via `-p`)
-4. Optional: includes context files (`-c file1.md file2.md -- audio.opus`)
+3. When `BASH_AGENT_MULTIMODAL` includes `audio` and a session UUID is present, emits a fenced base64 MP3 payload (`---START_ATTACHED_AUDIO-{uuid}---`) on stdout instead of calling the API.
+4. `agent.py:_execute_script()` scans all sandbox output for these fences, strips the base64 from the visible output/context, and collects them in `self._pending_multimodal_audio`.
+5. If audio was collected, the user message is built as a structured content array with `input_audio` blocks; otherwise it stays plain text.
+6. When the env vars are absent (standalone CLI or text-only model), base64-encodes and sends to the LLM with a transcription prompt (or custom prompt via `-p`)
+7. Optional: includes context files (`-c file1.md file2.md -- audio.opus`)
 
 ---
 
@@ -312,7 +315,8 @@ Agent.run() loop
     │       ├─► _extract_blocks()               ──► Parse UUID-fenced blocks
     │       ├─► _handle_special_command()       ──► exit, reset, request-write, ask-user, copy-to-clipboard
     │       ├─► _execute_script()               ──► Sandbox.execute / execute_python
-    │       │       └─► image fences extracted  ──► _pending_multimodal_images
+    │       │       ├─► image fences extracted  ──► _pending_multimodal_images
+    │       │       └─► audio fences extracted  ──► _pending_multimodal_audio
     │       ├─► _commit_execution_feedback()    ──► ContextManager.add_message (text or multimodal)
     │       │
     │       ▼ (output blocks injected into conversation)
@@ -385,7 +389,7 @@ To add a new tool (like `vision` or `search`):
    foo = "bash_agent.foo:main"
    ```
 3. **Update the system prompt** in `prompts.py` to document the new tool for the LLM
-4. **Pass agent state via environment variables** (e.g., `Sandbox` already exposes `BASH_AGENT_UUID` and `BASH_AGENT_MULTIMODAL`); have your tool emit `---START_ATTACHED_IMAGE-{uuid}---` fenced payloads on stdout if it needs to inject multimodal content, and `agent.py` will parse and attach them automatically.
+4. **Pass agent state via environment variables** (e.g., `Sandbox` already exposes `BASH_AGENT_UUID` and `BASH_AGENT_MULTIMODAL`); have your tool emit `---START_ATTACHED_IMAGE-{uuid}---` (image) or `---START_ATTACHED_AUDIO-{uuid}---` (audio) fenced payloads on stdout if it needs to inject multimodal content, and `agent.py` will parse and attach them automatically.
 5. **Add test/example** if applicable
 
 ---
@@ -396,7 +400,7 @@ To add a new tool (like `vision` or `search`):
 - **`systemd-run` permissions**: Adding `--property=` flags can break isolation. Always test with a command that tries to write to `/etc` to confirm sandboxing.
 - **Context pruning off-by-one**: The system prompt is at index 0. Pruning iterates from index 1. Don't change this without understanding the trimming loop.
 - **Scratchpad hash caching**: `ContextManager.last_scratchpad_hash` prevents re-injecting unchanged scratchpad. If you modify scratchpad injection logic, reset this hash or you'll get stale behavior.
-- **Multimodal content format**: When `multimodal_capabilities` includes `"image"`, images attached via `vision.py` cause the agent to construct content as a list of content blocks `[{"type": "text", ...}, {"type": "image_url", ...}]` instead of a plain string. The `_content_length()` method and pruning logic must handle both formats.
+- **Multimodal content format**: When `multimodal_capabilities` includes `"image"` and/or `"audio"`, images/audio attached via `vision.py`/`transcribe.py` cause the agent to construct content as a list of content blocks `[{"type": "text", ...}, {"type": "image_url", ...}, {"type": "input_audio", ...}]` instead of a plain string. The `_content_length()` method and pruning logic must handle both formats.
 
 ---
 

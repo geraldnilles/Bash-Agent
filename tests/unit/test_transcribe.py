@@ -37,6 +37,7 @@ import contextlib
 import glob
 import io
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -47,7 +48,10 @@ from unittest import mock
 
 from bash_agent import llm
 from bash_agent import transcribe
-from tests.helpers.fakes import make_fake_response
+from tests.helpers.fakes import (
+    attached_audio_block,
+    make_fake_response,
+)
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
 
@@ -308,6 +312,168 @@ class TestMainBasicCall(TranscribeMainCase):
         self.assertIsInstance(result["exit"], SystemExit)
         self.assertEqual(result["exit"].code, 1)
         self.assertIn("not found", result["stderr"])
+
+
+class TranscribeAttachCase(unittest.TestCase):
+    """Harness for transcribe.main() multimodal sandbox attach mode.
+
+    Differences from TranscribeMainCase:
+      * environment is SCRUBBED of all BASH_AGENT_* vars, then selectively
+        re-added via extra_env (the agent harness exports these while the
+        unit suite runs),
+      * LLM cache is POISONED in attach tests to prove no HTTP call happens,
+      * real ffmpeg conversion still runs; NamedTemporaryFile is redirected
+        into the per-test tmpdir so temp-MP3 cleanup can be asserted.
+    """
+
+    SESSION_UUID = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.wav_path = write_silence_wav(
+            os.path.join(self.tmpdir, "memo.wav"), seconds=0.3)
+        # Snapshot & empty the client cache so poisoned/seeded clients
+        # cannot leak into (or come from) other tests.
+        self._cache_backup = dict(llm._CLIENT_CACHE)
+        llm._CLIENT_CACHE.clear()
+        self.captured = {}
+
+    def tearDown(self):
+        llm._CLIENT_CACHE.clear()
+        llm._CLIENT_CACHE.update(self._cache_backup)
+        self._tmp.cleanup()
+
+    @property
+    def tmpdir(self):
+        return self._tmp.name
+
+    def poison_cache(self):
+        """Seed every backend with a client that fails LOUDLY if used."""
+        poison = mock.MagicMock(name="poisoned_llm_client")
+        poison.chat.completions.create.side_effect = AssertionError(
+            "transcribe must NOT call the LLM in multimodal attach mode")
+        llm._CLIENT_CACHE["openrouter"] = poison
+        return poison
+
+    def seed_llm(self, content="TRANSCRIBED TEXT"):
+        """Patch llm.create_chat_completion for fallback-path assertions."""
+        def fake_create(**kwargs):
+            self.captured.update(kwargs)
+            return make_fake_response(content=content)
+        return mock.patch("bash_agent.llm.create_chat_completion",
+                          new=fake_create)
+
+    def redirect_tempfiles(self):
+        """Point NamedTemporaryFile at the per-test tmpdir for cleanup asserts."""
+        real_ntf = transcribe.tempfile.NamedTemporaryFile
+
+        def fake_ntf(*args, **kwargs):
+            kwargs["dir"] = self.tmpdir
+            return real_ntf(*args, **kwargs)
+
+        return mock.patch.object(transcribe.tempfile, "NamedTemporaryFile",
+                                 side_effect=fake_ntf)
+
+    def run_main(self, argv, extra_env=None):
+        """
+        Run transcribe.main() under patched sys.argv and a scrubbed
+        environment (all BASH_AGENT_* vars removed unless re-added via
+        extra_env). Returns dict with exit/SystemExit, stdout, stderr.
+        """
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("BASH_AGENT_")}
+        env.update(extra_env or {})
+        stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.redirect_tempfiles():
+                with contextlib.redirect_stdout(stdout_buf), \
+                        contextlib.redirect_stderr(stderr_buf):
+                    with mock.patch("sys.argv", argv):
+                        exc = None
+                        try:
+                            transcribe.main()
+                        except SystemExit as e:
+                            exc = e
+        return {"exit": exc,
+                "stdout": stdout_buf.getvalue(),
+                "stderr": stderr_buf.getvalue()}
+
+    def extracted_payload(self, stdout):
+        """Extract the base64 body of an ATTACHED_AUDIO fence from stdout."""
+        m = re.search(
+            rf"---START_ATTACHED_AUDIO-.*?---\n(.*?)\n---END_ATTACHED_AUDIO",
+            stdout, re.DOTALL)
+        self.assertIsNotNone(m, "no ATTACHED_AUDIO fence found on stdout")
+        return m.group(1)
+
+
+class TestSandboxAttachMode(TranscribeAttachCase):
+    """UUID + audio modality -> fenced payload on stdout, zero LLM calls."""
+
+    ATTACH_NOTE = "attached to conversation context"
+
+    def test_emits_valid_fence_and_exits_0_without_llm_call(self):
+        poison = self.poison_cache()
+        res = self.run_main(
+            ["transcribe", self.wav_path],
+            extra_env={"BASH_AGENT_UUID": self.SESSION_UUID,
+                       "BASH_AGENT_MULTIMODAL": "audio"})
+
+        self.assertIsInstance(res["exit"], SystemExit)
+        self.assertEqual(res["exit"].code, 0)
+
+        # The exact helper-built fence must appear on stdout
+        b64 = self.extracted_payload(res["stdout"])
+        expected = attached_audio_block(self.SESSION_UUID, b64)
+        self.assertIn(expected, res["stdout"])
+        self.assertIn(f"Audio '{self.wav_path}' {self.ATTACH_NOTE}",
+                      res["stdout"])
+
+        # Payload decodes to real MP3 bytes (ID3 tag or 0xFF frame sync)
+        decoded = base64.b64decode(b64)
+        self.assertGreater(len(decoded), 0)
+        self.assertTrue(decoded[:3] == b"ID3" or decoded[0] == 0xFF,
+                        f"payload not MP3: {decoded[:4]!r}")
+
+        # The heart of the contract: the LLM layer was never touched.
+        poison.chat.completions.create.assert_not_called()
+
+        # The attach path exits before try/finally; the explicit unlink in
+        # the attach branch must have removed the converted temp MP3.
+        self.assertEqual(glob.glob(os.path.join(self.tmpdir, "*.mp3")), [])
+
+    def test_comma_separated_modality_list_still_attaches(self):
+        # Sandbox exports e.g. "image,audio"; parsing must tolerate commas.
+        self.poison_cache()
+        res = self.run_main(
+            ["transcribe", self.wav_path],
+            extra_env={"BASH_AGENT_UUID": self.SESSION_UUID,
+                       "BASH_AGENT_MULTIMODAL": "image,audio"})
+        self.assertIsInstance(res["exit"], SystemExit)
+        self.assertEqual(res["exit"].code, 0)
+        self.assertIn(f"---START_ATTACHED_AUDIO-{self.SESSION_UUID}---",
+                      res["stdout"])
+        self.assertIn(f"---END_ATTACHED_AUDIO-{self.SESSION_UUID}---",
+                      res["stdout"])
+
+    def test_uuid_without_audio_capability_falls_through_to_llm(self):
+        # Gate is a CONJUNCTION: UUID present but modalities lack "audio"
+        # => standard fallback path (an LLM call DOES happen here).
+        with self.seed_llm(content="fallback answer"):
+            res = self.run_main(
+                ["transcribe", self.wav_path],
+                extra_env={"BASH_AGENT_UUID": self.SESSION_UUID,
+                           "BASH_AGENT_MULTIMODAL": "image"})
+        self.assertIsNone(res["exit"])
+        self.assertEqual(res["stdout"], "fallback answer\n")
+
+    def test_no_env_falls_back_to_llm(self):
+        # No BASH_AGENT_* vars at all -> standard fallback path.
+        with self.seed_llm(content="fallback answer"):
+            res = self.run_main(["transcribe", self.wav_path])
+        self.assertIsNone(res["exit"])
+        self.assertEqual(res["stdout"], "fallback answer\n")
 
 
 if __name__ == "__main__":

@@ -35,6 +35,10 @@ class ContextManager:
                     # Lets assume each Image is roughly 800 tokens.  Or 6400 characters
                     elif item.get("type") == "image_url":
                         total += 6400
+                    # Flat rate for attached audio (~30-min call ≈ 6k tokens);
+                    # must NOT scale with the base64 payload size.
+                    elif item.get("type") == "input_audio":
+                        total += 50000
                 elif isinstance(item, str):
                     total += len(item)
             return total

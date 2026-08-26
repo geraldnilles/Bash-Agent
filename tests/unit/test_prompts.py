@@ -40,6 +40,8 @@ DEFAULT_ROLE_LINE = "You are an expert, autonomous Linux Scripting Agent."
 ATTACH_USAGE = "`vision <path_to_image>`"
 ATTACH_NOTE = "Attached images will automatically be added to your multimodal context"
 FALLBACK_USAGE = "`vision [-p <text prompt>] <path_to_image>`"
+TRANSCRIBE_ATTACH_USAGE = "Use the `transcribe` command to attach an audio file to the conversation."
+TRANSCRIBE_FALLBACK_USAGE = 'transcribe -p "List all action items from this meeting"'
 
 
 class GetSystemPromptCase(unittest.TestCase):
@@ -157,6 +159,37 @@ class TestStructureStability(GetSystemPromptCase):
         self.assertEqual(
             self.build(multimodal_capabilities=["image"]).count(
                 "## VISION CAPABILITIES"), 1)
+
+
+class TestTranscribeSection(GetSystemPromptCase):
+    """Two mutually exclusive TRANSCRIBE variants keyed on 'audio' capability."""
+
+    def test_audio_capable_model_gets_attach_mode_section(self):
+        prompt = self.build(multimodal_capabilities=["audio"])
+        self.assertIn(TRANSCRIBE_ATTACH_USAGE, prompt)
+        # The fallback usage must NOT leak into attach mode.
+        self.assertNotIn(TRANSCRIBE_FALLBACK_USAGE, prompt)
+
+    def test_comma_style_capability_list_still_enables_attach_mode(self):
+        prompt = self.build(multimodal_capabilities=["image", "audio"])
+        self.assertIn(TRANSCRIBE_ATTACH_USAGE, prompt)
+        self.assertNotIn(TRANSCRIBE_FALLBACK_USAGE, prompt)
+
+    def test_none_capabilities_get_text_fallback_section(self):
+        prompt = self.build(multimodal_capabilities=None)
+        self.assertIn(TRANSCRIBE_FALLBACK_USAGE, prompt)
+        self.assertNotIn(TRANSCRIBE_ATTACH_USAGE, prompt)
+
+    def test_empty_capabilities_list_behaves_like_none(self):
+        prompt = self.build(multimodal_capabilities=[])
+        self.assertIn(TRANSCRIBE_FALLBACK_USAGE, prompt)
+        self.assertNotIn(TRANSCRIBE_ATTACH_USAGE, prompt)
+
+    def test_image_only_capabilities_get_text_fallback_section(self):
+        # "image" grants vision attach but NOT audio attach.
+        prompt = self.build(multimodal_capabilities=["image"])
+        self.assertIn(TRANSCRIBE_FALLBACK_USAGE, prompt)
+        self.assertNotIn(TRANSCRIBE_ATTACH_USAGE, prompt)
 
 
 if __name__ == "__main__":

@@ -97,6 +97,10 @@ def main():
     # Check file size
     check_file_size(args.audio, args.max_size)
 
+    # Keep the original input path for the attach note (args.audio is
+    # reassigned to the converted temp file below).
+    original_audio_path = args.audio
+
     # Convert input file to MP3 for broader backend compatibility
     args.audio = convert_to_mp3(args.audio)
     audio_format = "mp3"
@@ -104,6 +108,31 @@ def main():
 
     # Encode audio
     base64_audio = encode_audio(args.audio)
+    # --- MULTIMODAL SANDBOX MODE ---
+    # When executed inside the agent sandbox, BASH_AGENT_MULTIMODAL is a
+    # comma-separated list of the active model's input modalities. If it
+    # includes "audio" and a session UUID is present, emit the MP3 as a
+    # fenced base64 payload on stdout. The agent harness parses these
+    # fences and attaches the audio to its next LLM request. No HTTP call.
+    sandbox_modalities = os.environ.get("BASH_AGENT_MULTIMODAL", "")
+    is_sandbox_multimodal = "audio" in [m.strip() for m in sandbox_modalities.split(",") if m.strip()]
+    session_uuid = os.environ.get("BASH_AGENT_UUID")
+    if is_sandbox_multimodal and session_uuid:
+        # Guard: a huge MP3 would clog the pipe/output. Fall through to the
+        # LLM path instead if the base64 payload is unreasonably large.
+        if len(base64_audio) <= 5_000_000:
+            print(f"---START_ATTACHED_AUDIO-{session_uuid}---")
+            print(base64_audio)
+            print(f"---END_ATTACHED_AUDIO-{session_uuid}---")
+            print(f"Audio '{original_audio_path}' attached to conversation context.")
+            # The attach path exits BEFORE the try/finally block, so the temp
+            # MP3 would leak. Remove it explicitly (best-effort).
+            try:
+                if os.path.exists(args.audio):
+                    os.unlink(args.audio)
+            except Exception:
+                pass
+            sys.exit(0)
 
     # Load context files if provided
     prompt_text = args.prompt

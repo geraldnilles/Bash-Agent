@@ -57,6 +57,14 @@ IMAGE_PARTS = [
     {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
 ]
 
+# Realistic audio-bearing content (same shape agent.py builds for
+# transcribe-attached turns; flat-rated in _content_length).
+AUDIO_PARTS = [
+    {"type": "text", "text": "Transcribe this meeting."},
+    {"type": "input_audio",
+     "input_audio": {"data": "SUQzBAAAAA==", "format": "mp3"}},
+]
+
 
 def new_uid():
     return str(uuid_module.uuid4())
@@ -178,6 +186,23 @@ class TestRoundTrip(PersistenceCase):
         self.assertEqual(list_msgs[0]["content"], IMAGE_PARTS)
         # Hash cache reset on load.
         self.assertIsNone(cm_b.last_scratchpad_hash)
+
+    def test_input_audio_parts_round_trip_exactly(self):
+        """A message carrying an input_audio part survives the JSON round
+        trip byte-for-byte (pruning/_content_length depend on the shape)."""
+        self.patch_history_file()
+        uid = new_uid()
+        cm_a = ContextManager(uid)
+        cm_a.add_message("user", AUDIO_PARTS)
+        expected = list(cm_a.history)
+        cm_a.save_history()
+
+        cm_b = ContextManager(new_uid())
+        self.assertTrue(cm_b.load_history())
+        self.assertEqual(cm_b.history, expected)
+        list_msgs = [m for m in cm_b.history if isinstance(m["content"], list)]
+        self.assertEqual(len(list_msgs), 1)
+        self.assertEqual(list_msgs[0]["content"], AUDIO_PARTS)
 
     def test_load_resets_hash_so_scratchpad_reinjects_after_resume(self):
         # Functional consequence of the hash reset: with the scratchpad file
