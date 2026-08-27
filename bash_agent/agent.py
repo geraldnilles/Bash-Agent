@@ -169,6 +169,9 @@ class Agent:
         
         if not history_loaded:
             self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout, uuid=self.uuid, multimodal_capabilities=self.multimodal_capabilities)
+        # Attach the session UUID to all OpenRouter calls (consistent routing
+        # improves prompt-cache hits across requests in the same session).
+        llm.set_session_id(self.uuid)
         # Remember whether this session was restored from history.json;
         # run() uses it to skip the protocol warmup exchanges on --resume.
         self.resumed_session = history_loaded
@@ -607,7 +610,7 @@ class Agent:
 
     def _handle_retry_backoff(self, retry_count: int) -> None:
         """Wait with exponential backoff while allowing interactive token limit doubling."""
-        retry_delay = 30 * (2 ** retry_count)
+        retry_delay = min(5 * (2 ** retry_count), 160)
         print(f"Retrying in {retry_delay} seconds... (Type '2x' and press Enter to double max_tokens to {self.max_tokens * 2})")
 
         start_wait = time.time()

@@ -156,6 +156,10 @@ def rerank_documents(client, query, documents, top_n):
         "query": query,
         "top_n": min(top_n, len(documents))
     }
+    # Attach the agent session id (same UUID as the LLM calls) for
+    # consistent routing / cache hits on OpenRouter.
+    if llm.get_session_id():
+        payload["session_id"] = llm.get_session_id()
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",

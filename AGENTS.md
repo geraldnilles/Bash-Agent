@@ -86,7 +86,7 @@ The agent strips leading/trailing whitespace from the captured code before execu
 
 **Special commands** must be the SOLE content of a bash block. They are intercepted in `_handle_special_command()` BEFORE sandbox execution. See the system prompt in `prompts.py` for the complete list.
 
-**Error handling:** On API failure, the agent uses exponential backoff (2^n seconds). During the wait, the user can type `2x` + Enter to double `max_tokens` and retry immediately. This is handled via `select.select()` on stdin.
+**Error handling:** On API failure, the agent uses exponential backoff starting at 5s and doubling, capped at 160s max (`min(5 * 2^n, 160)` seconds). During the wait, the user can type `2x` + Enter to double `max_tokens` and retry immediately. This is handled via `select.select()` on stdin.
 
 When `finish_reason == "length"` occurs and `choice.message.reasoning` contains partial thoughts, the agent performs a three-step recovery:
 1. Temporarily appends `<thinking>{reasoning}</thinking>` as an assistant message and an instruction prompt as a user message.
@@ -191,12 +191,15 @@ Abstraction layer over the OpenRouter backend. Normalizes payloads and request s
 
 **`get_attribution_headers()`**: Returns the OpenRouter App Attribution headers (`HTTP-Referer`, `X-OpenRouter-Title`, `X-OpenRouter-Categories`) built from the `APP_URL`, `APP_TITLE`, and `APP_CATEGORIES` config constants. These identify this application on OpenRouter's analytics dashboards and public model rankings. Used by every OpenRouter-backed request (chat, embedding, model-metadata probes in `agent.py`, and the rerank call in `search.py`).
 
+**Session id (cache routing)**: `set_session_id()` / `get_session_id()` manage a module-level session identifier. `Agent.__init__()` calls `llm.set_session_id(self.uuid)` once the session UUID is resolved (fresh or resumed), so ALL OpenRouter calls in one session (chat, embedding, and the rerank call in `search.py` via `llm.get_session_id()`) carry the same `session_id`. OpenRouter uses this for consistent request routing, improving prompt-cache hits. When unset, no `session_id` key is added to any payload.
+
 **`create_chat_completion(model, messages, max_tokens, extra_body, reasoning_effort)`**: The main LLM call:
 - Injects `extra_headers = get_attribution_headers()` on every request
+- Injects `session_id` into `extra_body` (when a session id is set)
 - Injects `reasoning.effort` into `extra_body`
 - Injects `provider.only` whitelist from `MODEL_PROVIDERS` config
 
-**`create_embedding(model, input_texts)`**: Thin wrapper for embedding generation (used by `search.py`). Attaches `extra_headers = get_attribution_headers()` on every request.
+**`create_embedding(model, input_texts)`**: Thin wrapper for embedding generation (used by `search.py`). Attaches `extra_headers = get_attribution_headers()` and `session_id` (when set) on every request.
 
 ---
 

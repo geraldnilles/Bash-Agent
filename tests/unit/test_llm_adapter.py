@@ -58,6 +58,12 @@ class _OfflineLLMTestCase(unittest.TestCase):
         openai_patcher.start()
         self.addCleanup(openai_patcher.stop)
 
+        # Some Agent-instantiating tests set a module-level session id via
+        # llm.set_session_id(); isolate it so payload assertions are exact.
+        session_patcher = mock.patch.object(llm, "_SESSION_ID", None)
+        session_patcher.start()
+        self.addCleanup(session_patcher.stop)
+
         _OpenAIRecorder.instances.clear()
         _OpenAIRecorder.init_kwargs_log.clear()
 
@@ -140,6 +146,64 @@ class TestOpenRouterPayloadNormalization(_OfflineLLMTestCase):
             model="openai/gpt-5-mini", messages=self.MESSAGES
         )
         self.assertIs(result, scripted)
+
+
+# ---------------------------------------------------------------------------
+# Session id injection (cache-routing)
+# ---------------------------------------------------------------------------
+
+class TestSessionIdInjection(_OfflineLLMTestCase):
+    """When a session id is set via llm.set_session_id(), every OpenRouter
+    payload (chat, embeddings) carries it in extra_body; when unset, nothing
+    is added."""
+
+    MESSAGES = [{"role": "user", "content": "hello"}]
+
+    def setUp(self):
+        super().setUp()
+        self.scripted = make_fake_response(content="ok")
+        self.fake = FakeLLMClient([self.scripted] * 5)
+        llm._CLIENT_CACHE["openrouter"] = self.fake
+
+    def test_chat_injects_session_id_into_extra_body(self):
+        llm.set_session_id("sess-1234")
+        llm.create_chat_completion(model="m", messages=self.MESSAGES)
+        self.assertEqual(
+            self.fake.calls[-1]["extra_body"].get("session_id"), "sess-1234"
+        )
+
+    def test_chat_session_id_coexists_with_reasoning_and_provider(self):
+        llm.set_session_id("sess-1234")
+        with mock.patch.object(config, "MODEL_PROVIDERS", {"m": ["p"]}):
+            llm.create_chat_completion(
+                model="m", messages=self.MESSAGES, reasoning_effort="low"
+            )
+        ebody = self.fake.calls[-1]["extra_body"]
+        self.assertEqual(
+            ebody,
+            {
+                "session_id": "sess-1234",
+                "reasoning": {"effort": "low"},
+                "provider": {"only": ["p"]},
+            },
+        )
+
+    def test_chat_no_session_id_means_no_key(self):
+        llm.create_chat_completion(model="m", messages=self.MESSAGES)
+        self.assertNotIn("session_id", self.fake.calls[-1].get("extra_body", {}))
+
+    def test_embedding_injects_session_id_into_extra_body(self):
+        llm.set_session_id("sess-1234")
+        llm.create_embedding(model="e", input_texts=["x"])
+        self.assertEqual(
+            self.fake.embedding_calls[-1]["extra_body"],
+            {"session_id": "sess-1234"},
+        )
+
+    def test_getter_roundtrip(self):
+        self.assertIsNone(llm.get_session_id())
+        llm.set_session_id("abc")
+        self.assertEqual(llm.get_session_id(), "abc")
 
 
 # ---------------------------------------------------------------------------

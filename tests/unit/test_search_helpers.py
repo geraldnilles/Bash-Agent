@@ -289,6 +289,28 @@ class TestRerankDocuments(unittest.TestCase):
         self.assertEqual(headers["Authorization"], "Bearer sk-test-key")
         self.assertEqual(headers["Content-Type"], "application/json")
 
+
+    def test_session_id_included_when_set(self):
+        """When a session id is set via llm.set_session_id(), the rerank
+        payload carries it; llm state is restored afterwards."""
+        import io as _io
+        from bash_agent import llm as _llm
+        payload = {"results": [{"index": 0, "relevance_score": 0.9}]}
+        with mock.patch.object(_llm, "_SESSION_ID", "sess-abc"):
+            with mock.patch("bash_agent.search.requests.post",
+                            return_value=self._post_mock(payload)) as p:
+                search.rerank_documents(mock.MagicMock(), "q", self.DOCS, top_n=1)
+        self.assertEqual(p.call_args.kwargs["json"]["session_id"], "sess-abc")
+
+    def test_session_id_absent_when_unset(self):
+        from bash_agent import llm as _llm
+        payload = {"results": [{"index": 0, "relevance_score": 0.9}]}
+        with mock.patch.object(_llm, "_SESSION_ID", None):
+            with mock.patch("bash_agent.search.requests.post",
+                            return_value=self._post_mock(payload)) as p:
+                search.rerank_documents(mock.MagicMock(), "q", self.DOCS, top_n=1)
+        self.assertNotIn("session_id", p.call_args.kwargs["json"])
+
     def test_top_n_clamped_to_document_count(self):
         payload = {"results": [{"index": i, "relevance_score": 0.5}
                                for i in range(3)]}

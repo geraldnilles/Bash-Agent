@@ -11,6 +11,23 @@ from bash_agent import config
 # Cache for the shared OpenRouter client instance
 _CLIENT_CACHE = {}
 
+# Optional per-session identifier sent with every OpenRouter call so the
+# provider can route consecutive requests of a session consistently
+# (improves prompt-cache hits). Set once per Agent session via
+# set_session_id(); when unset, nothing is added to any payload.
+_SESSION_ID = None
+
+
+def set_session_id(session_id):
+    """Set the session id attached to all subsequent OpenRouter calls."""
+    global _SESSION_ID
+    _SESSION_ID = session_id
+
+
+def get_session_id():
+    """Return the current session id (or None if not set)."""
+    return _SESSION_ID
+
 
 def get_llm_client():
     """Fetches a cached OpenRouter client or initializes one if it doesn't exist."""
@@ -53,6 +70,11 @@ def create_chat_completion(model, messages, max_tokens=None, extra_body=None, re
             ebody["reasoning"] = {}
         ebody["reasoning"]["effort"] = reasoning_effort
 
+    # Attach the session id (same UUID for the whole agent session) so
+    # OpenRouter can route consecutive requests consistently (cache hits).
+    if get_session_id():
+        ebody["session_id"] = get_session_id()
+
     # Handle dynamic provider whitelisting
     model_providers = getattr(config, "MODEL_PROVIDERS", {})
     if model and model in model_providers:
@@ -70,8 +92,11 @@ def create_chat_completion(model, messages, max_tokens=None, extra_body=None, re
 def create_embedding(model, input_texts):
     """Wraps and normalizes OpenAI-compatible embedding calls."""
     client = get_llm_client()
-    return client.embeddings.create(
-        model=model,
-        input=input_texts,
-        extra_headers=get_attribution_headers(),
-    )
+    kwargs = {
+        "model": model,
+        "input": input_texts,
+        "extra_headers": get_attribution_headers(),
+    }
+    if get_session_id():
+        kwargs["extra_body"] = {"session_id": get_session_id()}
+    return client.embeddings.create(**kwargs)
