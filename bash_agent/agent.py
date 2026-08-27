@@ -17,6 +17,12 @@ from bash_agent.config_file import load_config
 from bash_agent import llm
 from bash_agent.context import ContextManager
 from bash_agent.sandbox import Sandbox
+try:
+    from bash_agent import sfx as _sfx
+    _SFX_AVAILABLE = True
+except Exception:
+    _sfx = None
+    _SFX_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Warmup exchanges
@@ -363,6 +369,11 @@ class Agent:
         if script == "exit":
             print("\n[System] Agent has initiated exit.")
             self._log_debug_history()
+            if _SFX_AVAILABLE:
+                try:
+                    _sfx.chime_sync()
+                except Exception:
+                    pass
             sys.exit(0)
 
         if script == "reset":
@@ -377,6 +388,11 @@ class Agent:
             copy_project_to_clipboard(file_paths)
             print("[System] Files copied to clipboard successfully. Exiting session.")
             self._log_debug_history()
+            if _SFX_AVAILABLE:
+                try:
+                    _sfx.chime_sync()
+                except Exception:
+                    pass
             sys.exit(0)
 
         return False, ""
@@ -823,6 +839,11 @@ class Agent:
             while True:
                 print("[Agent is thinking...]")
                 agent_msg = self._get_llm_response()
+                if _SFX_AVAILABLE:
+                    try:
+                        _sfx.click()
+                    except Exception:
+                        pass
 
                 print(f"\n[Agent]:\n{self._colorize_commands(agent_msg)}")
                 self.context.add_message("assistant", agent_msg)
@@ -836,6 +857,11 @@ class Agent:
                 self._log_debug_history()
 
                 if not self._handle_turn_budget_and_stats():
+                    if _SFX_AVAILABLE:
+                        try:
+                            _sfx.chime_sync()
+                        except Exception:
+                            pass
                     break
 
         except KeyboardInterrupt:

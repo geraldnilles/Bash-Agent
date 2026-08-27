@@ -28,6 +28,7 @@ bash_agent/
 ├── search.py        # Semantic code search (embeddings + reranking)
 ├── vision.py        # Image analysis via LLM (native multimodal or fallback)
 ├── transcribe.py    # Audio transcription via LLM (native multimodal or fallback)
+├── sfx.py           # Subtle sound FX — programmatic wav synthesis (PipeWire: pw-play/paplay)
 └── memo.py          # Voice memo recording (PipeWire + ffmpeg)
 ```
 

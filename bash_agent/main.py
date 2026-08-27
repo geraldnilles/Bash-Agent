@@ -18,6 +18,7 @@ def parse_args():
     parser.add_argument("--reasoning-effort", type=str, choices=['none', 'minimal', 'low', 'medium', 'high', 'default'], default=None, help="Reasoning effort (none, minimal, low, medium, high, or default to use model's built-in default)")
     parser.add_argument("--max-tokens", type=int, default=None, help='Override max output tokens for LLM')
     parser.add_argument("-t", "--timeout", type=int, default=None, help="Command timeout in seconds (default: 60)")
+    parser.add_argument("--no-sfx", action="store_true", help="Disable subtle sound effects (also BAGENT_SFX=0 / BAGENT_NO_SFX=1)")
     parser.add_argument("-b", "--budget", type=float, default=0.10, help="Total session cost budget in USD (default: 0.10)")
     parser.add_argument("--commit", action="store_true", help="Resume the last session and create a git commit message for the changes.")
     parser.add_argument("-r","--resume", action="store_true", help="Restore the history from the last agent conversation and append the new prompt.")
@@ -77,6 +78,8 @@ def main():
             f.write("")
         print("[System] SCRATCHPAD.md cleared.")
     
+    if args.no_sfx:
+        os.environ["BAGENT_NO_SFX"] = "1"
     agent = Agent(keep_tmp=args.keep_tmp, debug=args.debug, model=args.model, reasoning_effort=args.reasoning_effort, max_tokens=args.max_tokens, timeout=args.timeout, resume=args.resume, budget=args.budget)
     agent.run(initial_task)
 
