@@ -6,7 +6,6 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
 
 ## In Progress / High Priority
 
-- **Context limit warning:** Add a warning message to the LLM when approaching the context limit, suggesting the agent store important notes in the SCRATCHPAD.md before history is pruned.
 - **Improved error recovery:** Better handling of API failures, model glitches, and safety filters with more graceful fallback strategies.
 - **Model Specific Context Limit:** Look at model properties and set a context limit based on what the model can actually handle.
 - **Use Tokens for Context Limit:** Right now, we are using characters as a proxy for tokens. THat is helpful for when decided how many message to remove, but 
@@ -36,6 +35,7 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
 ---
 
 ## ✅ Completed
+- **Context limit warning:** when the conversation crosses `CONTEXT_WARN_PERCENT`% (95%) of `CONTEXT_LIMIT`, `add_message()` injects a one-time user-role message telling the LLM to back up important findings/notes to the SCRATCHPAD before the oldest ~20% of history is trimmed. Trimming is deferred until an assistant turn confirms the warning was read, so the backup commands+outputs at the tail survive the trim; it is acceptable to briefly exceed `CONTEXT_LIMIT` to deliver the warning. `reset` re-arms the flags.
 - **Scratchpad injected once at session start (not on every change)** — `Agent.run()` reads `SCRATCHPAD.md` once and prepends it to the first user message of a fresh session. Later edits are NOT auto-injected; the model re-reads via `cat` when it needs a refresh. `SCRATCHPAD_LIMIT` (80k) truncation with `VISIBLE_%` reporting is preserved. Simplifies context accounting and avoids cache bloat from repeated re-injection.
 - **Thinking token recovery on length termination** — captures reasoning tokens on `finish_reason: length`, injects `<thinking>` block and immediate answer prompt, then cleans up temporary messages from history upon completion.
 

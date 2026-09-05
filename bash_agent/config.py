@@ -32,6 +32,7 @@ DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 # Limits & Timeouts
 HISTORY_FILE = os.path.abspath(".bash_agent_tmp/history.json")
 CONTEXT_LIMIT = 256000*2
+CONTEXT_WARN_PERCENT = 99
 SCRATCHPAD_LIMIT = 80000
 OUTPUT_LIMIT = 10000
 MAX_PIXELS = 2_000_000  # Maximum image resolution (2MP) for vision/multimodal features
@@ -59,7 +60,8 @@ DEFAULT_MAX_TOKENS = 1024*8
 MODEL_PROVIDERS = {
     "deepseek/deepseek-v4-pro": ["deepseek"],
     "deepseek/deepseek-v4-pro-0813": ["deepseek"],
-    "deepseek/deepseek-v4-flash-0731": ["fireworks"],
+    "deepseek/deepseek-v4-flash-0731": ["fireworks","deepseek"],
+    "deepseek/deepseek-v4-flash-vision-exp": ["fireworks","deepseek"],
     "xiaomi/mimo-v2.5-pro": ["xiaomi"],
     "xiaomi/mimo-v2.5": ["xiaomi"],
     #"moonshotai/kimi-k3": ["modal","baseten"]

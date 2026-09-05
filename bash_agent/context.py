@@ -5,7 +5,7 @@ import base64
 from typing import List, Dict, Union
 import json
 import sys
-from bash_agent.config import CONTEXT_LIMIT, SCRATCHPAD_LIMIT, HISTORY_FILE
+from bash_agent.config import CONTEXT_LIMIT, CONTEXT_WARN_PERCENT, SCRATCHPAD_LIMIT, HISTORY_FILE
 
 # Token → character conversion rate used throughout the context-accounting
 # code. Tokens are converted to characters at 8 chars/token (the historically
@@ -49,6 +49,17 @@ class ContextManager:
         tmp_dir = os.path.abspath(".bash_agent_tmp")
         os.makedirs(tmp_dir, exist_ok=True)
         self.scratchpad_path = os.path.join(tmp_dir, "SCRATCHPAD.md")
+
+        # Context-limit warning bookkeeping. `_warning_sent` marks that the
+        # "back up your notes to the SCRATCHPAD" warning has been injected
+        # exactly once when the conversation crossed CONTEXT_WARN_PERCENT% of
+        # CONTEXT_LIMIT. `_warning_confirmed` marks that the LLM has since
+        # produced an assistant turn (proving it read the warning). Hard
+        # trimming is deferred until the warning is confirmed so the LLM gets
+        # a chance to write its findings to the SCRATCHPAD first; it is
+        # acceptable to briefly exceed CONTEXT_LIMIT to deliver the warning.
+        self._warning_sent = False
+        self._warning_confirmed = False
 
         if not os.path.exists(self.scratchpad_path):
             with open(self.scratchpad_path, "w") as f:
@@ -238,8 +249,59 @@ class ContextManager:
         return (bitrate_kbps * 1000, sample_rate, frame_samples)
 
     def add_message(self, role: str, content: str):
+        """Append a message and manage the context-limit warning / trimming.
+
+        Flow:
+          1. Append the message.
+          2. If the warning hasn't been sent yet and the history has crossed
+             CONTEXT_WARN_PERCENT% of CONTEXT_LIMIT, inject a one-time
+             user-role warning telling the LLM to back up important notes to
+             the SCRATCHPAD before the oldest ~20% of the conversation is
+             trimmed. No trimming happens yet — it is acceptable to briefly
+             exceed CONTEXT_LIMIT so the warning is actually delivered to the
+             model.
+          3. Once an assistant message follows (proving the LLM saw the
+             warning), set `_warning_confirmed` and let pruning proceed.
+        """
         self.history.append({"role": role, "content": content})
-        self._trim_context_if_needed()
+
+        total_chars = sum(
+            ContextManager._content_length(m.get("content", "")) for m in self.history
+        )
+        warn_threshold = int(CONTEXT_LIMIT * (CONTEXT_WARN_PERCENT / 100.0))
+
+        if not self._warning_sent and total_chars > warn_threshold:
+            self._warning_sent = True
+            # Defer trimming: the LLM must see this warning first so it can
+            # write its findings to the SCRATCHPAD before history is pruned.
+            self.history.append(
+                {"role": "user", "content": self._context_warning_message()}
+            )
+            return
+
+        if role == "assistant":
+            self._warning_confirmed = True
+
+        if self._warning_confirmed:
+            self._trim_context_if_needed()
+
+    @staticmethod
+    def _context_warning_message() -> str:
+        """Build the one-time warning asking the LLM to back up the SCRATCHPAD.
+
+        The warning is injected as a user message so the LLM literally sees it
+        in its next turn, right before its latest notes-writing commands are
+        executed and committed.
+        """
+        return (
+            "\u26a0\ufe0f [SYSTEM WARNING] The conversation is approaching the context "
+            "limit. The oldest ~20% of this conversation is about to be trimmed. "
+            "Before that happens, back up any important findings, decisions, and "
+            "notes to the SCRATCHPAD (e.g. `cat >> .bash_agent_tmp/SCRATCHPAD.md`, "
+            "or use the scratchpad path shown in the system prompt). The commands "
+            "you run in this turn and their outputs will survive the trim, but "
+            "older history will be removed once you proceed."
+        )
 
     def _trim_context_if_needed(self):
         total_chars = sum(ContextManager._content_length(m.get("content", "")) for m in self.history)

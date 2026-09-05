@@ -25,13 +25,13 @@
 | 1. Protocol Parsing — `agent._extract_blocks` | 5 | 5 |
 | 2. Special Commands — `agent._handle_special_command` | 6 | 6 |
 | 3. Execution Pipeline — `parse_and_execute` / `_execute_script` | 7 | 7 |
-| 4. Context Management — `context.ContextManager` | 7 | 7 |
+| 4. Context Management — `context.ContextManager` | 8 | 8 |
 | 5. LLM Adapter — `llm.py` | 4 | 4 |
 | 6. Sandbox — `sandbox.Sandbox` | 3 | 3 |
 | 7. Integration — real processes, still offline | 3 | 3 |
 | 8. Supporting Modules | 10 | 10 |
 | 9. LLM Finish-Reason Handling — `agent._get_llm_response` | 2 | 2 |
-| **Total** | **50** | **50** |
+| **Total** | **51** | **51** |
 
 ---
 
@@ -343,6 +343,23 @@ UUID (resume re-binding depends on this). Corrupt-file case is a regression
 guard for the fixed `import sys`: a malformed `history.json` must print
 `[System Error] Failed to load history: …` to stderr and return `False`
 (previously raised `NameError`).
+
+### T-23 — Context-limit warning injection and deferred trim (P0)
+
+- [x] **Implemented** (`tests/unit/test_context_warning.py`)
+
+`add_message()` must warn the LLM to back up findings to the SCRATCHPAD once
+the conversation crosses `CONTEXT_WARN_PERCENT`% (95%) of `CONTEXT_LIMIT`,
+then DEFER hard pruning until the warning has been seen by the model, so the
+latest backup commands/outputs survive. Patch
+`bash_agent.context.CONTEXT_LIMIT` tiny (CONTEXT_WARN_PERCENT stays 95); assert:
+below threshold → no warning; exactly at threshold → no warning (guard is
+strictly `>`); crossing threshold → exactly ONE user-role warning injected,
+no trim yet; subsequent user traffic (backup-command commits) still triggers
+NO trim; the next ASSISTANT message confirms the warning and triggers pruning
+to the 80% target with the system prompt preserved and the warning + fresh
+backup content surviving; the warning text mentions the SCRATCHPAD; and the
+`reset` handler re-arms both flags so a fresh session can warn again.
 
 ---
 

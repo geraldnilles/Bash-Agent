@@ -383,6 +383,10 @@ class Agent:
             print("\n[System] Agent resetting context...")
             # Preserve the system prompt (index 0); tolerate an empty history.
             self.context.history = [self.context.history[0]] if self.context.history else []
+            # Re-arm the context-limit warning so the fresh session can warn
+            # again as its new conversation grows toward the limit.
+            self.context._warning_sent = False
+            self.context._warning_confirmed = False
             return True, self._format_output(0, "Context history has been reset.", cmd_type)
 
         if script.startswith("copy-to-clipboard "):

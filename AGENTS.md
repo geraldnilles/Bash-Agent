@@ -110,6 +110,7 @@ All tunable constants. **Modify this file to change defaults.**
 |----------|---------|------------|
 | `DEFAULT_MODEL` | `"deepseek/deepseek-v4-pro"` | `agent.py` — fallback model |
 | `CONTEXT_LIMIT` | 256,000 chars | `context.py` — triggers pruning |
+| `CONTEXT_WARN_PERCENT` | 95% | `context.py` — % of `CONTEXT_LIMIT` at which the one-time SCRATCHPAD-backup warning is injected |
 | `SCRATCHPAD_LIMIT` | 80,000 chars | `context.py` — scratchpad truncation warning |
 | `OUTPUT_LIMIT` | 10,000 chars | `agent.py` — output block truncation |
 | `MAX_CODE_BLOCKS` | 1 | `agent.py` — max code blocks executed per LLM response |
@@ -133,7 +134,8 @@ Manages the message list (`self.history: List[Dict[str, str]]`), context pruning
 
 **Key responsibilities:**
 
-1. **Message storage:** `add_message(role, content)` appends and triggers pruning.
+1. **Message storage:** `add_message(role, content)` appends.
+   - **Context-limit warning:** once the conversation crosses `CONTEXT_WARN_PERCENT`% of `CONTEXT_LIMIT` (95%), a one-time user-role message is injected telling the LLM to back up important notes to the SCRATCHPAD before the oldest ~20% of history is trimmed. Trimming is DEFERRED until the warning is confirmed — an ASSISTANT message must be added afterward (proving the model read the warning and issued its backup commands). It is acceptable to briefly exceed `CONTEXT_LIMIT` to deliver the warning. `reset` re-arms the flags.
 2. **Context pruning** (`_trim_context_if_needed()`): When total characters exceed `CONTEXT_LIMIT`, incrementally trims the oldest messages down to 80% of the limit:
    - Multimodal messages (list content, e.g. `image_url` blocks) cannot be block-trimmed because the regex operations require strings (a list would raise `TypeError`). They are dropped entirely with no breadcrumb marker; surrounding context makes it obvious what happened.
    - Step 1: Delete the content of old `BASH_OUTPUT`/`PYTHON_OUTPUT` blocks entirely (replaced with `[BASH_OUTPUT DELETED TO SAVE CONTEXT]`)
@@ -318,9 +320,9 @@ Agent.run() loop
     │       │
     │       ▼ (output blocks injected into conversation)
     │
-    ├─► ContextManager.add_message("assistant", response)
-    ├─► ContextManager.add_message("user", output)
-    ├─► ContextManager._trim_context_if_needed()  (hysteresis pruning)
+    ├─► ContextManager.add_message("assistant", response)  ── confirms warning
+    ├─► ContextManager.add_message("user", output)           ── may inject warning
+    ├─► ContextManager._trim_context_if_needed()  (hysteresis pruning, deferred until warning confirmed)
     ├─► ContextManager.save_history()            ──► history.json
     │
     └─► Loop continues until exit or budget exhausted
