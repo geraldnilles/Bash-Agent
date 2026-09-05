@@ -2,7 +2,6 @@ import os
 import re
 import io
 import base64
-import hashlib
 from typing import List, Dict, Union
 import json
 import sys
@@ -45,7 +44,6 @@ class ContextManager:
     def __init__(self, uuid_str: str):
         self.history: List[Dict[str, str]] = []
         self.uuid = uuid_str
-        self.last_scratchpad_hash = None
         
         # Create the new temp directory and set the scratchpad path inside it
         tmp_dir = os.path.abspath(".bash_agent_tmp")
@@ -313,14 +311,6 @@ class ContextManager:
                 else:
                     break
 
-    def remove_old_scratchpads(self):
-        # Match the scratchpad block including optional error message and surrounding newlines
-        pattern = rf"\n?---START_SCRATCHPAD\.md-VISIBLE_\d+%-{self.uuid}---\n.*?\n---END_SCRATCHPAD\.md-{self.uuid}---(\n\[ERROR\]: Scratchpad truncated\. Please clean it up using bash commands\.)?\n?"
-        for msg in self.history:
-            if isinstance(msg["content"], str):
-                msg["content"] = re.sub(pattern, "", msg["content"], flags=re.DOTALL).strip()
-
-
     def save_history(self):
         """Persist UUID and conversation history to disk."""
         state = {
@@ -340,22 +330,21 @@ class ContextManager:
                 state = json.load(f)
             self.uuid = state["uuid"]
             self.history = state["history"]
-            self.last_scratchpad_hash = None
             return True
         except Exception as e:
             print(f"[System Error] Failed to load history: {e}", file=sys.stderr)
             return False
 
     def get_scratchpad_block(self) -> str:
+        """Read the scratchpad file once and return it as a fenced block.
+
+        Called ONCE at conversation start (not on every change). Applies the
+        SCRATCHPAD_LIMIT truncation with honest VISIBLE_% reporting so the LLM
+        knows how much of the file it is seeing.
+        """
         with open(self.scratchpad_path, "r") as f:
             content = f.read()
-            
-        current_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
-        if current_hash == self.last_scratchpad_hash:
-            return ""
-            
-        self.last_scratchpad_hash = current_hash
-        
+
         visible = 100
         error_msg = ""
         original_len = len(content)
@@ -363,6 +352,5 @@ class ContextManager:
             content = content[:SCRATCHPAD_LIMIT]
             visible = int((SCRATCHPAD_LIMIT / original_len) * 100)
             error_msg = "\n[ERROR]: Scratchpad truncated. Please clean it up using bash commands."
-            
-        return f"\n---START_SCRATCHPAD.md-VISIBLE_{visible}%-{self.uuid}---\n{content}\n---END_SCRATCHPAD.md-{self.uuid}---{error_msg}\n"
 
+        return f"\n---START_SCRATCHPAD.md-VISIBLE_{visible}%-{self.uuid}---\n{content}\n---END_SCRATCHPAD.md-{self.uuid}---{error_msg}\n"

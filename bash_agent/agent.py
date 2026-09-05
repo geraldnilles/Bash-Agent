@@ -438,17 +438,12 @@ class Agent:
 
     def _commit_execution_feedback(self, combined_outputs: list[str]) -> None:
         """
-        Bundles output blocks and scratchpad updates into a message and appends to context.
+        Bundles output blocks into a message and appends to context.
         """
         if not combined_outputs:
             return
 
-        scratchpad_block = self.context.get_scratchpad_block()
-        if scratchpad_block:
-            self.context.remove_old_scratchpads()
-            final_text = f"{scratchpad_block}\n" + "\n".join(combined_outputs)
-        else:
-            final_text = "\n".join(combined_outputs)
+        final_text = "\n".join(combined_outputs)
 
         if self._pending_multimodal_images or self._pending_multimodal_audio:
             structured_content = [{"type": "text", "text": final_text}]
@@ -824,10 +819,12 @@ class Agent:
 
         task = initial_task if initial_task else get_vim_prompt()
 
-        # Inject scratchpad into the very first message
-        scratchpad_block = self.context.get_scratchpad_block()
-        if scratchpad_block:
-            task = scratchpad_block + "\n" + task
+        # Inject the scratchpad ONCE at the start of a fresh session (resume
+        # restores the full history from disk, so the block is already there).
+        if not self.resumed_session:
+            scratchpad_block = self.context.get_scratchpad_block()
+            if scratchpad_block:
+                task = scratchpad_block + "\n" + task
 
         self.context.add_message("user", task)
         self.context.save_history()

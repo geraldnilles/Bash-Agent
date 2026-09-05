@@ -20,7 +20,7 @@ bash_agent/
 ├── agent.py         # Core Agent class — the main run loop
 ├── config.py        # All constants, defaults, env var names
 ├── config_file.py   # Optional .bash_agent_tmp/config.json loader (model/max_tokens/reasoning_effort)
-├── context.py       # ContextManager — conversation history, pruning, scratchpad
+├── context.py       # ContextManager — conversation history, pruning
 ├── sandbox.py       # Sandbox — systemd-run execution wrapper
 ├── llm.py           # LLM provider adapter layer (OpenRouter)
 ├── prompts.py       # System prompt template generation
@@ -68,7 +68,7 @@ This is the heart of the project. The `Agent` class:
 | `_extract_blocks(response_text)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Returns `(blocks, None)` on success, or `([], warning_message)` when no blocks or malformed UUID fences are found. |
 | `_handle_special_command(cmd_type, script)` | Intercepts built-in agent commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Returns `(handled: bool, formatted_output: str)`. Commands that terminate the session (`exit`, `copy-to-clipboard`) call `sys.exit()` in-process. |
 | `_execute_script(cmd_type, script)` | Executes a bash or python script via `Sandbox.execute()` / `Sandbox.execute_python()`. Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` and `---START_ATTACHED_AUDIO-{uuid}---` fences, strips base64 payloads, collects them in `self._pending_multimodal_images` / `self._pending_multimodal_audio`, and returns formatted output. On non-zero exit whose output references a `/tmp/` file with a file-not-found style error, appends a reminder that `/tmp/` is wiped each turn and `.bash_agent_tmp/` should be used instead (see `_build_tmp_file_warning()`). |
-| `_commit_execution_feedback(outputs)` | Bundles output blocks and scratchpad updates into a user message and appends to context. Builds structured multimodal content when `self._pending_multimodal_images` or `self._pending_multimodal_audio` is non-empty. |
+| `_commit_execution_feedback(outputs)` | Bundles output blocks into a user message and appends to context. Builds structured multimodal content when `self._pending_multimodal_images` or `self._pending_multimodal_audio` is non-empty. |
 | `_check_model_capabilities()` | Queries the OpenRouter models API to determine the model's supported input modalities. Sets `self.multimodal_capabilities` to a list like `["image"]`, or `None` for text-only models (or if the probe fails). |
 
 **The fenced-block regex pattern** (used in `_extract_blocks`):
@@ -129,7 +129,7 @@ All tunable constants. **Modify this file to change defaults.**
 
 ### Conversation Management: `context.py` → `class ContextManager`
 
-Manages the message list (`self.history: List[Dict[str, str]]`), context pruning, scratchpad injection, and session persistence.
+Manages the message list (`self.history: List[Dict[str, str]]`), context pruning, scratchpad one-shot injection, and session persistence.
 
 **Key responsibilities:**
 
@@ -140,14 +140,8 @@ Manages the message list (`self.history: List[Dict[str, str]]`), context pruning
    - Step 2: Truncate old `BASH_COMMAND`/`PYTHON_COMMAND` blocks to 80 chars
    - Step 3 (failsafe): Drop the oldest message entirely
    - Uses hysteresis (targets 80%) to avoid thrashing on every message
-3. **Scratchpad injection** (`get_scratchpad_block()`): Reads `SCRATCHPAD.md`, hashes it, and only injects it into the conversation if it changed. Injected as:
-   ```
-   ---START_SCRATCHPAD.md-VISIBLE_{pct}%-{uuid}---
-   [content]
-   ---END_SCRATCHPAD.md-{uuid}---
-   ```
-4. **Scratchpad cleanup** (`remove_old_scratchpads()`): Strips old scratchpad blocks from history when a new one is injected.
-5. **Persistence** (`save_history()` / `load_history()`): Serializes `{uuid, history}` to `.bash_agent_tmp/history.json`. Called after every message. Loaded on `--resume`.
+3. **Scratchpad one-shot injection** (`get_scratchpad_block()`): Reads `SCRATCHPAD.md` and returns a fenced block with a `VISIBLE_{pct}%` header (truncated at `SCRATCHPAD_LIMIT` with an `[ERROR]` suffix when oversized). `Agent.run()` calls it once for a fresh session's first user message — NOT re-injected on later changes.
+4. **Persistence** (`save_history()` / `load_history()`): Serializes `{uuid, history}` to `.bash_agent_tmp/history.json`. Called after every message. Loaded on `--resume`.
 
 **Content length calculation** (`_content_length()`): Handles both string content (legacy) and list-of-dicts content (multimodal format). Image blocks are charged by resolution at 1000 tokens/megapixel (×8 chars/token), derived by decoding the data URL; audio (`input_audio` parts) is charged by clip length at 400 tokens/minute, derived by parsing the MP3 frame headers (cached per payload). Undecodable/unparseable payloads fall back to the legacy flat rates (~800 tokens/6400 chars for images, ~6000 tokens/50000 chars for audio). Never scales with the raw base64 payload size.
 
@@ -308,7 +302,6 @@ User CLI (main.py)
     ▼
 Agent.run() loop
     │
-    ├─► ContextManager.get_scratchpad_block()  ──► Reads SCRATCHPAD.md
     ├─► ContextManager.add_message("user", task)
     ├─► llm.create_chat_completion(history)     ──► OpenRouter API
     │       │
@@ -403,7 +396,7 @@ To add a new tool (like `vision` or `search`):
 - **Regex escaping in `_extract_blocks()`**: The fenced block patterns use raw strings (`r"..."`). Be careful with the UUID interpolation — it's a literal string, not a regex group.
 - **`systemd-run` permissions**: Adding `--property=` flags can break isolation. Always test with a command that tries to write to `/etc` to confirm sandboxing.
 - **Context pruning off-by-one**: The system prompt is at index 0. Pruning iterates from index 1. Don't change this without understanding the trimming loop.
-- **Scratchpad hash caching**: `ContextManager.last_scratchpad_hash` prevents re-injecting unchanged scratchpad. If you modify scratchpad injection logic, reset this hash or you'll get stale behavior.
+- **Scratchpad one-shot injection**: `Agent.run()` calls `ContextManager.get_scratchpad_block()` once at the start of a FRESH session (skipped on `--resume` since history already carries it). The block is prepended to the first user message. It is NOT re-injected on later changes — the LLM re-reads via `cat` when it needs a refresh. `get_scratchpad_block()` applies the `SCRATCHPAD_LIMIT` truncation (80k chars) with an honest `VISIBLE_%` header.
 - **Multimodal content format**: When `multimodal_capabilities` includes `"image"` and/or `"audio"`, images/audio attached via `vision.py`/`transcribe.py` cause the agent to construct content as a list of content blocks `[{"type": "text", ...}, {"type": "image_url", ...}, {"type": "input_audio", ...}]` instead of a plain string. The `_content_length()` method and pruning logic must handle both formats.
 
 ---

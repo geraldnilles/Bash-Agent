@@ -198,6 +198,7 @@ The host machine has poppler-utils installed.  You can use this to directly extr
 ================================================================
 - Path: {scratchpad_path}
 - Purpose: Context window is aggressively pruned by the agent harness. Use this file to store crucial state, plans, or code snippets that will never be pruned.
+- Reading: The file content is injected ONCE at the start of a fresh session (not on every change). If you need a refresh later, read it manually with `cat {scratchpad_path}`.
 - Update Strategy: Append or overwrite natively:
   `echo "Target function is on line 42" >> {scratchpad_path}`
 

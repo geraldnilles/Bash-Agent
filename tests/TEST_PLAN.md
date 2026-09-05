@@ -52,7 +52,7 @@ changes. One subtlety documented for implementers: `config.HISTORY_FILE` is an
 import-time constant, so persistence tests must patch
 `bash_agent.context.HISTORY_FILE` (context.py binds it via `from ... import`,
 so patching bash_agent.config would NOT be seen — same subtlety as
-CONTEXT_LIMIT / SCRATCHPAD_LIMIT) rather than rely on chdir alone.
+CONTEXT_LIMIT) rather than rely on chdir alone.
 
 ### T-00b — Fenced-block builders (P0)
 
@@ -274,19 +274,6 @@ advice line; small outputs pass through untouched with `VISIBLE_100%`. Verifies
 the truncation point arithmetic (5,000/5,000 split) and that exit codes survive
 in the header. Direct-call test on a pure method.
 
-### T-17 — Scratchpad co-commit ordering (P1)
-
-- [x] **Implemented**
-
-When the scratchpad changed during a turn (test writes to it mid-test),
-`parse_and_execute` must prepend a fresh SCRATCHPAD block to the committed
-user message and strip older scratchpad blocks from prior messages. Seeds a
-prior message containing an old-format scratchpad fence, changes the file,
-runs a turn, asserts old fence gone + new fence present exactly once. Exercises
-`get_scratchpad_block` hash caching through the public pipeline.
-
----
-
 ## 4. Context Management — `context.ContextManager`
 
 ### T-18 — Multimodal content length accounting (P1)
@@ -331,17 +318,19 @@ parts) pins the same wholesale-drop behavior for transcribe-attached turns;
 the audio drop uses the same `IMAGE_DROP_BANNER` banner as images. Regression
 guard for the fix in commit 78773ca.
 
-### T-21 — Scratchpad hashing and VISIBLE math (P1)
+### T-21 — Scratchpad one-shot injection and VISIBLE math (P1)
 
 - [x] **Implemented** (`tests/unit/test_context_scratchpad.py`)
 
-Three cases: unchanged file between calls → second call returns `""` (hash
-cache); changed file → new block emitted; oversized file (>SCRATCHPAD_LIMIT,
-patch constant small) → truncated body of exactly SCRATCHPAD_LIMIT chars plus
-`[ERROR]` suffix. Regression guard for the fixed VISIBLE math: the percentage
-must be computed from the *pre-truncation* length (e.g., LIMIT=80k over 100k
-original → `VISIBLE_80%`), not from the truncated body (which would always
-yield 100%).
+`get_scratchpad_block()` reads `SCRATCHPAD.md` and emits a fenced block
+(`---START_SCRATCHPAD.md-VISIBLE_{pct}%-{uuid}---`) carrying the full content.
+It is called EXACTLY ONCE by `Agent.run()` for a fresh session's first user
+message (skipped on `--resume`); it is NOT re-injected when the file later
+changes — the model re-reads via `cat`. Tests pin: exact wire format; no hash
+caching (a second call re-emits — one-shot semantics live in the caller);
+empty file yields an empty fenced body; oversized file (>SCRATCHPAD_LIMIT,
+patched small) truncates to EXACTLY SCRATCHPAD_LIMIT chars with `[ERROR]`
+suffix and `VISIBLE_%` computed from the PRE-TRUNCATION length.
 
 ### T-22 — History persistence round-trip (P0)
 
@@ -353,10 +342,10 @@ different UUID; `load_history()` must restore both fields and adopt the saved
 UUID (resume re-binding depends on this). Corrupt-file case is a regression
 guard for the fixed `import sys`: a malformed `history.json` must print
 `[System Error] Failed to load history: …` to stderr and return `False`
-(previously raised `NameError`). Also verifies `last_scratchpad_hash` resets
-to None on load so the scratchpad re-injects after resume.
+(previously raised `NameError`).
 
 ---
+
 
 ## 5. LLM Adapter — `llm.py`
 
@@ -442,7 +431,7 @@ Constructs an Agent with capability probe patched out, seeds
 context stats, (3) `exit`. Drives `agent.run("integration test task")` inside
 `chdir_tmp`. Asserts across the whole stack: sandbox really ran the scripts
 (real files created in tmpdir), OUTPUT blocks landed in history with correct
-EXIT_CODE headers, `history.json` written and reloadable, scratchpad injected
+EXIT_CODE headers, `history.json` written and reloadable, scratchpad file present
 on first message, budget/stats path exercised, clean SystemExit(0). This is
 the closest thing to "run bagent" that requires no network, and it would have
 caught bugs #1–#4 automatically.

@@ -8,7 +8,7 @@ While mostly declarative, regressions here cascade silently:
 
   * DEFAULT_MODEL change -> wrong provider, wrong capabilities
   * HISTORY_FILE path resolution -> resume loses session or writes to /tmp
-  * CONTEXT_LIMIT / SCRATCHPAD_LIMIT -> pruning fires at wrong boundaries
+  * CONTEXT_LIMIT -> pruning fires at wrong boundaries
   * MAX_PIXELS -> vision tool accepts oversized images
   * OPENROUTER_API_KEY -> auth failures with cryptic errors
 
@@ -56,8 +56,6 @@ class TestConfigConstants(unittest.TestCase):
         config = self._import_config_with_empty_env()
         self.assertIsInstance(config.CONTEXT_LIMIT, int)
         self.assertGreater(config.CONTEXT_LIMIT, 0)
-        self.assertIsInstance(config.SCRATCHPAD_LIMIT, int)
-        self.assertGreater(config.SCRATCHPAD_LIMIT, 0)
         self.assertIsInstance(config.OUTPUT_LIMIT, int)
         self.assertGreater(config.OUTPUT_LIMIT, 0)
         self.assertIsInstance(config.MAX_PIXELS, int)
@@ -159,7 +157,7 @@ class TestConfigExportedSymbols(unittest.TestCase):
         expected = [
             "OPENROUTER_API_KEY", "OPENROUTER_BASE_URL",
             "DEFAULT_MODEL",
-            "HISTORY_FILE", "CONTEXT_LIMIT", "SCRATCHPAD_LIMIT",
+            "HISTORY_FILE", "CONTEXT_LIMIT",
             "OUTPUT_LIMIT", "MAX_PIXELS", "MAX_CODE_BLOCKS",
             "BASH_TIMEOUT", "DEFAULT_BUDGET",
             "COLOR_CMD", "COLOR_OUT", "COLOR_PY_CMD", "COLOR_COST", "COLOR_RESET",
