@@ -37,7 +37,7 @@ HISTORY_FILE = os.path.abspath(".bash_agent_tmp/history.json")
 # context_length (tokens x 8 chars per token), so this is only
 # the safety net that keeps sessions bounded when offline/unknown.
 CONTEXT_LIMIT = 256000*2
-CONTEXT_WARN_PERCENT = 95
+CONTEXT_WARN_PERCENT = 99
 SCRATCHPAD_LIMIT = 80000
 OUTPUT_LIMIT = 10000
 MAX_PIXELS = 2_000_000  # Maximum image resolution (2MP) for vision/multimodal features

@@ -350,10 +350,10 @@ guard for the fixed `import sys`: a malformed `history.json` must print
 - [x] **Implemented** (`tests/unit/test_context_warning.py`)
 
 `add_message()` must warn the LLM to back up findings to the SCRATCHPAD once
-the conversation crosses `CONTEXT_WARN_PERCENT`% (95%) of `CONTEXT_LIMIT`,
+the conversation crosses `CONTEXT_WARN_PERCENT`% (99%) of `CONTEXT_LIMIT`,
 then DEFER hard pruning until the warning has been seen by the model, so the
 latest backup commands/outputs survive. Patch
-`bash_agent.context.CONTEXT_LIMIT` tiny (CONTEXT_WARN_PERCENT stays 95); assert:
+`bash_agent.context.CONTEXT_LIMIT` tiny (CONTEXT_WARN_PERCENT stays 99); assert:
 below threshold → no warning; exactly at threshold → no warning (guard is
 strictly `>`); crossing threshold → exactly ONE user-role warning injected,
 no trim yet; subsequent user traffic (backup-command commits) still triggers
@@ -654,7 +654,7 @@ SCRATCHPAD warning threshold (`N * CONTEXT_WARN_PERCENT / 100`) and the 80%
 hysteresis trim target instead of the module constant `CONTEXT_LIMIT`. Tests
 construct a manager with a deliberately tiny ceiling (1000 chars) even though
 the real module constant is ~512k, then prove:
-warning fires when history crosses `N*95%`;
+warning fires when history crosses `N*99%`;
 once the warning is confirmed, pruning drives history ≤ `N`;
 and a manager built with no explicit `context_limit` still equals the module
 `CONTEXT_LIMIT` (preserving the historical fallback so older tests stay valid).

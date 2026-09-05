@@ -25,7 +25,7 @@ Contract pinned here:
 Seam notes: context.py binds CONTEXT_LIMIT and CONTEXT_WARN_PERCENT via
 `from bash_agent.config import`, so tests patch
 bash_agent.context.CONTEXT_LIMIT (CONTEXT_WARN_PERCENT stays at production
-95).
+99).
 """
 
 import contextlib
@@ -42,8 +42,8 @@ from bash_agent.context import ContextManager
 # ---------------------------------------------------------------------------
 
 LIMIT = 2000                              # patched CONTEXT_LIMIT
-WARN_PERCENT = 95                          # production config value
-WARN_THRESHOLD = int(LIMIT * (WARN_PERCENT / 100.0))  # 1900
+WARN_PERCENT = 99                          # production config value
+WARN_THRESHOLD = int(LIMIT * (WARN_PERCENT / 100.0))  # 1980
 TARGET = int(LIMIT * 0.8)                  # 1600 hysteresis target
 
 HYSTERESIS_BANNER = "Initiating hysteresis cleanup"
@@ -105,7 +105,7 @@ class TestWarningInjection(WarningCase):
         self.cm.history = [sys_msg, self.plain_msg("user", "a" * 1700)]
         before_len = len(self.cm.history)
 
-        self.cm.add_message("user", "z" * 50)  # 127+1700+50 = 1877 < 1900
+        self.cm.add_message("user", "z" * 50)  # 127+1700+50 = 1877 < 1980
 
         self.assertEqual(len(self.cm.history), before_len + 1)
         self.assertFalse(self.cm._warning_sent)
@@ -140,9 +140,9 @@ class TestWarningInjection(WarningCase):
         # pruning may happen yet (the LLM has not seen it / not responded).
         sys_msg = self.plain_msg("system", self.system_prompt())
         self.cm.history = [sys_msg, self.plain_msg("user", "a" * 1700)]
-        before = _total_length(self.cm.history)  # 1827 < 1900
+        before = _total_length(self.cm.history)  # 1827 < 1980
 
-        self.cm.add_message("user", "x" * 100)  # 1927 > 1900
+        self.cm.add_message("user", "x" * 200)  # 2027 > 1980
 
         self.assertTrue(self.cm._warning_sent)
         self.assertFalse(self.cm._warning_confirmed)
@@ -184,7 +184,7 @@ class TestDeferredTrimUntilConfirmed(WarningCase):
         sys_msg = self.plain_msg("system", self.system_prompt())
         self.cm.history = [sys_msg, self.plain_msg("user", "a" * 1700)]
         # Cross the threshold -> warning injected, trim deferred.
-        self.cm.add_message("user", "x" * 100)
+        self.cm.add_message("user", "x" * 200)  # 1827 + 200 = 2027 > 1980
         self.assertTrue(self.cm._warning_sent)
         self.assertFalse(self.cm._warning_confirmed)
 

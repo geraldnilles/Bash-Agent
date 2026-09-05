@@ -113,7 +113,7 @@ All tunable constants. **Modify this file to change defaults.**
 |----------|---------|------------|
 | `DEFAULT_MODEL` | `"deepseek/deepseek-v4-pro"` | `agent.py` — fallback model |
 | `CONTEXT_LIMIT` | 512,000 chars (fallback) | `context.py` — *fallback* context ceiling. The runtime ceiling is normally model-derived (`context_length` × 8 chars/token ÷ 2) by `agent.py`; this constant is only used when the OpenRouter probe fails or the model isn't catalogued. |
-| `CONTEXT_WARN_PERCENT` | 95% | `context.py` — % of the *instance* `context_limit` at which the one-time SCRATCHPAD-backup warning is injected |
+| `CONTEXT_WARN_PERCENT` | 99% | `context.py` — % of the *instance* `context_limit` at which the one-time SCRATCHPAD-backup warning is injected |
 | `SCRATCHPAD_LIMIT` | 80,000 chars | `context.py` — scratchpad truncation warning |
 | `OUTPUT_LIMIT` | 10,000 chars | `agent.py` — output block truncation |
 | `MAX_CODE_BLOCKS` | 1 | `agent.py` — max code blocks executed per LLM response |
@@ -138,7 +138,7 @@ Manages the message list (`self.history: List[Dict[str, str]]`), context pruning
 **Key responsibilities:**
 
 1. **Message storage:** `add_message(role, content)` appends. The effective ceiling comes from the instance attribute `self.context_limit` (set by `Agent` from the model's `context_length`; defaults to the module constant `CONTEXT_LIMIT` when constructed bare).
-   - **Context-limit warning:** once the conversation crosses `CONTEXT_WARN_PERCENT`% of the instance `context_limit` (95%), a one-time user-role message is injected telling the LLM to back up important notes to the SCRATCHPAD before the oldest ~20% of history is trimmed. Trimming is DEFERRED until the warning is confirmed — an ASSISTANT message must be added afterward (proving the model read the warning and issued its backup commands). It is acceptable to briefly exceed the ceiling to deliver the warning. `reset` re-arms the flags.
+   - **Context-limit warning:** once the conversation crosses `CONTEXT_WARN_PERCENT`% of the instance `context_limit` (99%), a one-time user-role message is injected telling the LLM to back up important notes to the SCRATCHPAD before the oldest ~20% of history is trimmed. Trimming is DEFERRED until the warning is confirmed — an ASSISTANT message must be added afterward (proving the model read the warning and issued its backup commands). It is acceptable to briefly exceed the ceiling to deliver the warning. `reset` re-arms the flags.
 2. **Context pruning** (`_trim_context_if_needed()`): When total characters exceed the instance `context_limit`, incrementally trims the oldest messages down to 80% of that limit:
    - Multimodal messages (list content, e.g. `image_url` blocks) cannot be block-trimmed because the regex operations require strings (a list would raise `TypeError`). They are dropped entirely with no breadcrumb marker; surrounding context makes it obvious what happened.
    - Step 1: Delete the content of old `BASH_OUTPUT`/`PYTHON_OUTPUT` blocks entirely (replaced with `[BASH_OUTPUT DELETED TO SAVE CONTEXT]`)

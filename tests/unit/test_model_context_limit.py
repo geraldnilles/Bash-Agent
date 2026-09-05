@@ -55,7 +55,7 @@ class InstanceLimitCase(unittest.TestCase):
     """ContextManager(..., context_limit=N) honours N instead of CONTEXT_LIMIT."""
 
     INSTANCE_LIMIT = 1000
-    WARN_THRESHOLD = int(INSTANCE_LIMIT * (95 / 100.0))   # 950
+    WARN_THRESHOLD = int(INSTANCE_LIMIT * (99 / 100.0))   # 990
 
     def setUp(self):
         self._chdir_cm = chdir_tmp()
@@ -78,7 +78,7 @@ class InstanceLimitCase(unittest.TestCase):
         self.cm.history = [self.sys_msg()]
         filler = self.WARN_THRESHOLD - _total_length(self.cm.history)
         self.cm.history.append({"role": "user", "content": "a" * filler})
-        # a single char crosses 950 -> warning must fire even though the
+        # a single char crosses 990 -> warning must fire even though the
         # module CONTEXT_LIMIT (512000) is thousands of chars away
         self.cm.add_message("user", "x")
         self.assertTrue(self.cm._warning_sent)
