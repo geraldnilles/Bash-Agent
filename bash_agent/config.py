@@ -31,8 +31,13 @@ DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 
 # Limits & Timeouts
 HISTORY_FILE = os.path.abspath(".bash_agent_tmp/history.json")
+# Fallback context ceiling (chars) used when the OpenRouter /models probe for
+# the selected model's context_length fails or is unavailable. The Agent now
+# derives the real per-session ceiling from the model's context_length/2*8
+# (half of the context window in tokens x 8 chars per token), so this is only
+# the safety net that keeps sessions bounded when offline/unknown.
 CONTEXT_LIMIT = 256000*2
-CONTEXT_WARN_PERCENT = 99
+CONTEXT_WARN_PERCENT = 95
 SCRATCHPAD_LIMIT = 80000
 OUTPUT_LIMIT = 10000
 MAX_PIXELS = 2_000_000  # Maximum image resolution (2MP) for vision/multimodal features

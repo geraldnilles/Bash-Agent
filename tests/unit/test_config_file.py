@@ -56,7 +56,7 @@ from bash_agent.config_file import (
     get_config_path,
     load_config,
 )
-from tests.helpers.fakes import _make_agent, _stub_model_reasoning_info, chdir_tmp
+from tests.helpers.fakes import _make_agent, _stub_model_reasoning_info, _stub_model_context_info, chdir_tmp
 
 
 # ---------------------------------------------------------------------------
@@ -382,8 +382,9 @@ class TestFreshSessionKeepsConfigOnDisk(ConfigFileTestBase):
         from bash_agent.agent import Agent
         with mock.patch.object(Agent, "_check_model_capabilities", return_value=None):
             with mock.patch.object(Agent, "_fetch_model_reasoning_info", _stub_model_reasoning_info):
-                with without_env_vars("OPENROUTER_MODEL"):
-                    agent = Agent()  # fresh session -> cleanup runs inside __init__
+                with mock.patch.object(Agent, "_fetch_model_context_limit", _stub_model_context_info):
+                    with without_env_vars("OPENROUTER_MODEL"):
+                        agent = Agent()  # fresh session -> cleanup runs inside __init__
 
         self.assertEqual(agent.model, "survivor/model")
         self.assertEqual(agent.max_tokens, 256)

@@ -503,6 +503,16 @@ def _stub_model_reasoning_info(self):
     self.reasoning_default_effort = "medium"
 
 
+def _stub_model_context_info(self):
+    """Offline stand-in for Agent._fetch_model_context_limit.
+
+    Mirrors the production method's API-failure fallback (sets
+    model_context_limit_chars = None) so __init__ resolves the config
+    default ceiling without any network access.
+    """
+    self.model_context_limit_chars = None
+
+
 def _make_agent(uuid_str: Optional[str] = None, **agent_kwargs) -> Any:
     """
     Construct a bash_agent.agent.Agent without network or systemd effects.
@@ -519,16 +529,18 @@ def _make_agent(uuid_str: Optional[str] = None, **agent_kwargs) -> Any:
     # Default: no network probe
     patch_target = "bash_agent.agent.Agent._check_model_capabilities"
     reasoning_target = "bash_agent.agent.Agent._fetch_model_reasoning_info"
+    context_target = "bash_agent.agent.Agent._fetch_model_context_limit"
     with mock.patch(patch_target, return_value=None):
         # NOTE: must be a plain function (not a MagicMock side_effect) so the
         # descriptor protocol binds `self` and we can set instance attrs,
         # mirroring Agent._fetch_model_reasoning_info()'s API-failure fallback.
         with mock.patch(reasoning_target, _stub_model_reasoning_info):
-            # Also avoid filesystem pollution from cleanup_tmp_folder during construction
-            # by patching it; caller can opt out by passing keep_tmp=True behavior,
-            # but we patch by default to keep tests hermetic unless inside chdir_tmp.
-            with mock.patch("bash_agent.agent.cleanup_tmp_folder", return_value=None):
-                agent = Agent(**agent_kwargs)
+            with mock.patch(context_target, _stub_model_context_info):
+                # Also avoid filesystem pollution from cleanup_tmp_folder during construction
+                # by patching it; caller can opt out by passing keep_tmp=True behavior,
+                # but we patch by default to keep tests hermetic unless inside chdir_tmp.
+                with mock.patch("bash_agent.agent.cleanup_tmp_folder", return_value=None):
+                    agent = Agent(**agent_kwargs)
     # Swap sandbox
     fake_sandbox = FakeSandbox()
     agent.sandbox = fake_sandbox
@@ -570,6 +582,8 @@ __all__ = [
     "FakeSandbox",
     "_make_agent",
     "make_agent",
+    "_stub_model_reasoning_info",
+    "_stub_model_context_info",
 ]
 
 

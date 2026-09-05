@@ -15,7 +15,7 @@ from bash_agent.config import DEFAULT_MODEL, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLO
 from bash_agent.utils import cleanup_tmp_folder, copy_project_to_clipboard, get_clipboard_content, get_vim_prompt
 from bash_agent.config_file import load_config
 from bash_agent import llm
-from bash_agent.context import ContextManager
+from bash_agent.context import ContextManager, CHARS_PER_TOKEN
 from bash_agent.sandbox import Sandbox
 try:
     from bash_agent import sfx as _sfx
@@ -120,6 +120,12 @@ def _build_tmp_file_warning(exit_code: int, output: str) -> str | None:
 TRUNCATION_BANNER = "\n\n---⚠️⛔⚠️-OUTPUT_TRUNCATED_HERE-{uuid}-⚠️⛔⚠️---\n\n"
 
 
+# Short-lived cache of the OpenRouter /models catalog (+ fetch timestamp)
+# so the multimodal/reasoning/context probes share a single HTTP request per
+# hour instead of tripping OpenRouter three times at every startup.
+_MODELS_CACHE = {"data": None, "fetched_at": 0.0}
+
+
 class Agent:
     def __init__(self, keep_tmp=False, debug=False, model=None, reasoning_effort=None, max_tokens=None, timeout=None, resume=False, budget=None):
         self.uuid = str(uuid.uuid4())
@@ -147,15 +153,32 @@ class Agent:
         if not keep_tmp and not resume:
             cleanup_tmp_folder()
         
-        self.context = ContextManager(self.uuid)
-        
         # Multimodal detection (must happen before Sandbox instantiation so the
-        # sandbox environment can expose BASH_AGENT_MULTIMODAL to vision.py)
+        # sandbox environment can expose BASH_AGENT_MULTIMODAL to vision.py).
         self.multimodal_capabilities = None
         self._check_model_capabilities()
         
         # Fetch reasoning capabilities from OpenRouter
         self._fetch_model_reasoning_info()
+        
+        # Fetch the model's context window so the per-session context ceiling
+        # can be a fraction of what the model can actually handle, instead of a
+        # fixed char count that may be far too small (wasted capacity) or far
+        # too large (pushing the model past its limits). See
+        # _fetch_model_context_limit() for how the char ceiling is derived.
+        # Falls back to config.CONTEXT_LIMIT on API failure.
+        self._fetch_model_context_limit()
+        self.context_limit = (
+            self.model_context_limit_chars
+            if self.model_context_limit_chars
+            else CONTEXT_LIMIT
+        )
+
+        # Build the ContextManager with the resolved per-model ceiling. The
+        # ContextManager's pruning/warning logic uses self.context_limit for
+        # every comparison, so no code in context.py reads config.CONTEXT_LIMIT
+        # anymore at runtime (that constant is only the module-level fallback).
+        self.context = ContextManager(self.uuid, context_limit=self.context_limit)
 
         # Handle Resume: attempt to restore previous session
         history_loaded = False
@@ -216,7 +239,8 @@ class Agent:
                 f"[Debug] Model '{self.model}' capabilities:\n"
                 f"[Debug]   reasoning supported={self.reasoning_supported_efforts}, "
                 f"mandatory={self.reasoning_mandatory}, default={self.reasoning_default_effort}, selected={_selected}\n"
-                f"[Debug]   multimodal={self.multimodal_capabilities}"
+                f"[Debug]   multimodal={self.multimodal_capabilities}\n"
+                f"[Debug]   context_limit={self.context_limit:,} chars"
             )
             print(_blob)
 
@@ -244,8 +268,17 @@ class Agent:
         self.last_step_input_tokens = 0
         self.last_step_provider = None
 
-    def _check_model_capabilities(self):
-        """Query OpenRouter API to detect the active model's input modalities."""
+    def _get_models_catalog(self):
+        """Return the parsed OpenRouter /models catalog (list of model dicts).
+
+        Uses a short-lived module cache so the three startup probes
+        (multimodal, reasoning, context length) share one HTTP request.
+        Returns [] on any failure so callers fall back to safe defaults.
+        """
+        now = time.time()
+        cached = _MODELS_CACHE.get("data")
+        if cached is not None and now - _MODELS_CACHE["fetched_at"] < 3600:
+            return cached
         try:
             req = urllib.request.Request(
                 "https://openrouter.ai/api/v1/models",
@@ -253,13 +286,26 @@ class Agent:
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 models_data = json_module.loads(resp.read().decode("utf-8"))
-            for m in models_data if isinstance(models_data, list) else models_data.get("data", []):
+            models = models_data if isinstance(models_data, list) else models_data.get("data", [])
+            _MODELS_CACHE["data"] = models
+            _MODELS_CACHE["fetched_at"] = now
+            return models
+        except Exception:
+            _MODELS_CACHE["data"] = []
+            _MODELS_CACHE["fetched_at"] = now
+            return []
+
+    def _check_model_capabilities(self):
+        """Query OpenRouter API to detect the active model's input modalities."""
+        try:
+            for m in self._get_models_catalog():
                 if m.get("id") == self.model:
                     arch = m.get("architecture", {}) or {}
                     input_modalities = arch.get("input_modalities", [])
                     if input_modalities:
                         self.multimodal_capabilities = list(input_modalities)
                     return
+            self.multimodal_capabilities = None
         except Exception:
             self.multimodal_capabilities = None
 
@@ -271,13 +317,7 @@ class Agent:
         """
         default_efforts = ["high", "medium", "low", "minimal", "none"]
         try:
-            req = urllib.request.Request(
-                "https://openrouter.ai/api/v1/models",
-                headers=llm.get_attribution_headers(),
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                models_data = json_module.loads(resp.read().decode("utf-8"))
-            for m in models_data if isinstance(models_data, list) else models_data.get("data", []):
+            for m in self._get_models_catalog():
                 if m.get("id") != self.model:
                     continue
                 reasoning = m.get("reasoning", {}) or {}
@@ -292,6 +332,34 @@ class Agent:
         self.reasoning_supported_efforts = default_efforts
         self.reasoning_mandatory = False
         self.reasoning_default_effort = "medium"
+
+    def _fetch_model_context_limit(self):
+        """Query OpenRouter API for the selected model's context_length and
+        derive a session-safe character ceiling.
+
+        OpenRouter reports context_length in TOKENS. Historical accounting
+        converts tokens to characters at ~8 chars/token; we then halve that
+        so the agent never tries to fill more than ~half the model's actual
+        context window (giving the model room for its own output, tool-call
+        shaping, and API overhead).
+
+        On any problem (offline, catalog missing the model, or no
+        context_length), self.model_context_limit_chars stays None so
+        __init__ falls back to the config.CONTEXT_LIMIT default.
+        """
+        try:
+            for m in self._get_models_catalog():
+                if m.get("id") != self.model:
+                    continue
+                ctx_tokens = m.get("context_length")
+                if isinstance(ctx_tokens, int) and ctx_tokens > 0:
+                    chars = int(ctx_tokens * CHARS_PER_TOKEN / 2)
+                    self.model_context_limit_chars = chars
+                    return
+            # Model found but had no usable context_length.
+        except Exception:
+            pass
+        self.model_context_limit_chars = None
 
     def _get_lowest_reasoning_effort(self):
         """Get the lowest supported reasoning effort for the current model."""
@@ -760,7 +828,9 @@ class Agent:
         Returns True if the session should continue, False if the budget was exceeded."""
         # Calculate current context size
         current_context_chars = sum(ContextManager._content_length(m.get("content", "")) for m in self.context.history)
-        context_percent = (current_context_chars / CONTEXT_LIMIT) * 100
+        # Percentage relative to THIS session's model-derived ceiling (falls
+        # back to config.CONTEXT_LIMIT if the OpenRouter probe failed).
+        context_percent = (current_context_chars / self.context.context_limit) * 100
 
         if self.last_step_cost > 0.0:
             step_info = f"This request: ${self.last_step_cost:.3f} ({self.last_step_input_tokens} tokens)"

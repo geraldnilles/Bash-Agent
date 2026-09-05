@@ -31,7 +31,8 @@
 | 7. Integration — real processes, still offline | 3 | 3 |
 | 8. Supporting Modules | 10 | 10 |
 | 9. LLM Finish-Reason Handling — `agent._get_llm_response` | 2 | 2 |
-| **Total** | **51** | **51** |
+| 10. Model-Specific Context Limit — `agent` + `context` | 3 | 3 |
+| **Total** | **54** | **54** |
 
 ---
 
@@ -641,6 +642,50 @@ history (no `<thinking>`, no warning), and the follow-up text is returned to
 the caller. Seam: same as T-43.
 
 ---
+
+## 10. Model-Specific Context Limit — `agent` + `context`
+
+### T-45 — `ContextManager` honors a per-instance `context_limit` (P0)
+
+- [x] **Implemented** (`tests/unit/test_model_context_limit.py::InstanceLimitCase`)
+
+`ContextManager(uuid, context_limit=N)` now uses `self.context_limit` for the
+SCRATCHPAD warning threshold (`N * CONTEXT_WARN_PERCENT / 100`) and the 80%
+hysteresis trim target instead of the module constant `CONTEXT_LIMIT`. Tests
+construct a manager with a deliberately tiny ceiling (1000 chars) even though
+the real module constant is ~512k, then prove:
+warning fires when history crosses `N*95%`;
+once the warning is confirmed, pruning drives history ≤ `N`;
+and a manager built with no explicit `context_limit` still equals the module
+`CONTEXT_LIMIT` (preserving the historical fallback so older tests stay valid).
+
+### T-46 — `Agent._fetch_model_context_limit` derivation (P0)
+
+- [x] **Implemented** (`tests/unit/test_model_context_limit.py::AgentContextDerivationCase`)
+
+`_fetch_model_context_limit()` reads the selected model's `context_length`
+(in tokens) from the OpenRouter catalog and sets
+`model_context_limit_chars = int(context_length * CHARS_PER_TOKEN / 2)` where
+CHARS_PER_TOKEN=8 — i.e. half the token window expressed in characters, so the
+agent keeps ~50% headroom inside the real window. The method returns/leaves
+`None` whenever the network fails, the model id is absent from the cached
+catalog, or the entry lacks a usable `context_length`, so `__init__` always
+has a safe fallback.
+
+### T-47 — `Agent.__init__` wires the model ceiling into ContextManager (P0)
+
+- [x] **Implemented** (`tests/unit/test_model_context_limit.py::AgentConstructorWiringCase`)
+
+`__init__` resolves `context_limit = model_context_limit_chars or
+config.CONTEXT_LIMIT` and passes that value into `ContextManager(...,
+context_limit=...)`, and the budget-reporting percentage divides by
+`self.context.context_limit`. With the shared offline stub (which mirrors the
+production API-failure path and yields `None`) the agent falls back to
+`config.CONTEXT_LIMIT`; with a stub that simulates a successful probe (e.g.
+4096 ctx tokens → 16384 chars) both `agent.context_limit` and
+`agent.context.context_limit` equal that derived ceiling. `self._get_models_catalog()`
+caches the /models payload for ~1h so the three startup probes (multimodal,
+reasoning, context) issue a single HTTP GET.
 
 ## Suggested Implementation Order
 

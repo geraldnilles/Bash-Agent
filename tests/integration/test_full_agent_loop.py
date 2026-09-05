@@ -57,6 +57,7 @@ from tests.helpers.fakes import (
     python_block,
     chdir_repo_tmp,
     systemd_user_bus_available,
+    _stub_model_context_info,
 )
 
 
@@ -138,6 +139,12 @@ class FullLoopCase(unittest.TestCase):
         )
         self._cap_patch.start()
 
+        # Neutralize the model context-length probe (kept offline).
+        self._ctx_patch = mock.patch.object(
+            Agent, "_fetch_model_context_limit", _stub_model_context_info
+        )
+        self._ctx_patch.start()
+
         # Fresh agent for the primary session; tests may construct more.
         self.agent = Agent()
         self.uid = self.agent.uuid
@@ -146,6 +153,7 @@ class FullLoopCase(unittest.TestCase):
         self._old_client = llm._CLIENT_CACHE.get("openrouter")
 
     def tearDown(self):
+        self._ctx_patch.stop()
         self._cap_patch.stop()
         self._hist_patch.stop()
         if self._old_client is None:

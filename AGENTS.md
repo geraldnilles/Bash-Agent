@@ -61,7 +61,7 @@ This is the heart of the project. The `Agent` class:
 
 | Method | Purpose |
 |--------|---------|
-| `__init__()` | Sets up UUID, model, sandbox, context, budget. Handles `--resume`. Checks multimodal capabilities. |
+| `__init__()` | Sets up UUID, model, sandbox, context, budget. Handles `--resume`. Resolves the model's context ceiling and passes it to `ContextManager` (see `_fetch_model_context_limit`). |
 | `run(initial_task)` | The main loop. Sends prompts, parses responses, executes commands. |
 | `_run_warmup_exchanges()` | Protocol warmup: on FRESH sessions only (`--resume` skips it), pre-fills history with two scripted assistant turns from the `WARMUP_TURNS` constant (a PYTHON version check plus a listing of all installed 3rd-party PyPI packages, then a BASH `ls -la`). Each template is parsed via the production `_extract_blocks()` (raises if it ever fails to parse) and executed via `_execute_script()`, so the injected transcript is byte-for-byte identical in format to a live exchange. Called from `run()` right after the initial task is committed. |
 | `parse_and_execute(agent_msg)` | Coordination pipeline: extracts blocks via `_extract_blocks()`, dispatches each to `_handle_special_command()` or `_execute_script()`, enforces `MAX_CODE_BLOCKS` limit, and commits results via `_commit_execution_feedback()`. Returns `(executed: bool, feedback: str)`. |
@@ -69,7 +69,10 @@ This is the heart of the project. The `Agent` class:
 | `_handle_special_command(cmd_type, script)` | Intercepts built-in agent commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Returns `(handled: bool, formatted_output: str)`. Commands that terminate the session (`exit`, `copy-to-clipboard`) call `sys.exit()` in-process. |
 | `_execute_script(cmd_type, script)` | Executes a bash or python script via `Sandbox.execute()` / `Sandbox.execute_python()`. Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` and `---START_ATTACHED_AUDIO-{uuid}---` fences, strips base64 payloads, collects them in `self._pending_multimodal_images` / `self._pending_multimodal_audio`, and returns formatted output. On non-zero exit whose output references a `/tmp/` file with a file-not-found style error, appends a reminder that `/tmp/` is wiped each turn and `.bash_agent_tmp/` should be used instead (see `_build_tmp_file_warning()`). |
 | `_commit_execution_feedback(outputs)` | Bundles output blocks into a user message and appends to context. Builds structured multimodal content when `self._pending_multimodal_images` or `self._pending_multimodal_audio` is non-empty. |
+| `_get_models_catalog()` | Fetches & caches the OpenRouter `/api/v1/models` catalog for ~1h. Returns a list of model dicts, or `[]` on API failure so callers fall back to safe defaults. Sharing one HTTP request across the multimodal/reasoning/context probes avoids three API calls at startup. |
 | `_check_model_capabilities()` | Queries the OpenRouter models API to determine the model's supported input modalities. Sets `self.multimodal_capabilities` to a list like `["image"]`, or `None` for text-only models (or if the probe fails). |
+| `_fetch_model_reasoning_info()` | Queries the OpenRouter models API for the model's reasoning support and sets `reasoning_supported_efforts`, `reasoning_mandatory`, `reasoning_default_effort`. Falls back to permissive defaults on network failure. |
+| `_fetch_model_context_limit()` | Queries the OpenRouter models API for the model's `context_length` (tokens) and sets `model_context_limit_chars = int(context_length_tokens * CHARS_PER_TOKEN / 2)`, i.e. half of the model window converted to characters at 8 chars/token. Sets `None` on any failure/model miss so `__init__` falls back to `config.CONTEXT_LIMIT`. |
 
 **The fenced-block regex pattern** (used in `_extract_blocks`):
 - Bash: `---START_BASH_COMMAND-{uuid}---\n(.*?)\n---END_BASH_COMMAND-{uuid}---`
@@ -109,8 +112,8 @@ All tunable constants. **Modify this file to change defaults.**
 | Constant | Default | Where Used |
 |----------|---------|------------|
 | `DEFAULT_MODEL` | `"deepseek/deepseek-v4-pro"` | `agent.py` — fallback model |
-| `CONTEXT_LIMIT` | 256,000 chars | `context.py` — triggers pruning |
-| `CONTEXT_WARN_PERCENT` | 95% | `context.py` — % of `CONTEXT_LIMIT` at which the one-time SCRATCHPAD-backup warning is injected |
+| `CONTEXT_LIMIT` | 512,000 chars (fallback) | `context.py` — *fallback* context ceiling. The runtime ceiling is normally model-derived (`context_length` × 8 chars/token ÷ 2) by `agent.py`; this constant is only used when the OpenRouter probe fails or the model isn't catalogued. |
+| `CONTEXT_WARN_PERCENT` | 95% | `context.py` — % of the *instance* `context_limit` at which the one-time SCRATCHPAD-backup warning is injected |
 | `SCRATCHPAD_LIMIT` | 80,000 chars | `context.py` — scratchpad truncation warning |
 | `OUTPUT_LIMIT` | 10,000 chars | `agent.py` — output block truncation |
 | `MAX_CODE_BLOCKS` | 1 | `agent.py` — max code blocks executed per LLM response |
@@ -134,9 +137,9 @@ Manages the message list (`self.history: List[Dict[str, str]]`), context pruning
 
 **Key responsibilities:**
 
-1. **Message storage:** `add_message(role, content)` appends.
-   - **Context-limit warning:** once the conversation crosses `CONTEXT_WARN_PERCENT`% of `CONTEXT_LIMIT` (95%), a one-time user-role message is injected telling the LLM to back up important notes to the SCRATCHPAD before the oldest ~20% of history is trimmed. Trimming is DEFERRED until the warning is confirmed — an ASSISTANT message must be added afterward (proving the model read the warning and issued its backup commands). It is acceptable to briefly exceed `CONTEXT_LIMIT` to deliver the warning. `reset` re-arms the flags.
-2. **Context pruning** (`_trim_context_if_needed()`): When total characters exceed `CONTEXT_LIMIT`, incrementally trims the oldest messages down to 80% of the limit:
+1. **Message storage:** `add_message(role, content)` appends. The effective ceiling comes from the instance attribute `self.context_limit` (set by `Agent` from the model's `context_length`; defaults to the module constant `CONTEXT_LIMIT` when constructed bare).
+   - **Context-limit warning:** once the conversation crosses `CONTEXT_WARN_PERCENT`% of the instance `context_limit` (95%), a one-time user-role message is injected telling the LLM to back up important notes to the SCRATCHPAD before the oldest ~20% of history is trimmed. Trimming is DEFERRED until the warning is confirmed — an ASSISTANT message must be added afterward (proving the model read the warning and issued its backup commands). It is acceptable to briefly exceed the ceiling to deliver the warning. `reset` re-arms the flags.
+2. **Context pruning** (`_trim_context_if_needed()`): When total characters exceed the instance `context_limit`, incrementally trims the oldest messages down to 80% of that limit:
    - Multimodal messages (list content, e.g. `image_url` blocks) cannot be block-trimmed because the regex operations require strings (a list would raise `TypeError`). They are dropped entirely with no breadcrumb marker; surrounding context makes it obvious what happened.
    - Step 1: Delete the content of old `BASH_OUTPUT`/`PYTHON_OUTPUT` blocks entirely (replaced with `[BASH_OUTPUT DELETED TO SAVE CONTEXT]`)
    - Step 2: Truncate old `BASH_COMMAND`/`PYTHON_COMMAND` blocks to 80 chars
@@ -349,7 +352,7 @@ Agent.run() loop
 - The `VISIBLE_{pct}%` header tells the LLM how much was shown
 
 ### 4. Context Pruning
-- Uses 80% hysteresis: only prunes when over `CONTEXT_LIMIT`, prunes down to 80% of `CONTEXT_LIMIT`
+- Uses 80% hysteresis: only prunes when over the instance `context_limit` (model-derived; falls back to the `CONTEXT_LIMIT` constant), prunes down to 80% of that ceiling
 - System prompt (index 0) is NEVER pruned
 - Old OUTPUT blocks are deleted first (biggest savings), then COMMAND blocks are truncated, then entire messages are dropped
 

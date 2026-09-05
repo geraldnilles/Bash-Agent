@@ -7,7 +7,6 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
 ## In Progress / High Priority
 
 - **Improved error recovery:** Better handling of API failures, model glitches, and safety filters with more graceful fallback strategies.
-- **Model Specific Context Limit:** Look at model properties and set a context limit based on what the model can actually handle.
 - **Use Tokens for Context Limit:** Right now, we are using characters as a proxy for tokens. THat is helpful for when decided how many message to remove, but 
 
 
@@ -35,6 +34,7 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
 ---
 
 ## ✅ Completed
+- **Model Specific Context Limit:** the per-session context ceiling is now derived from the OpenRouter model's `context_length` (tokens) × `CHARS_PER_TOKEN` (8) ÷ 2 instead of a fixed character constant. `Agent` queries `/api/v1/models` once at startup (cached for reuse by the multimodal/reasoning/context probes), resolves `context_limit = int(context_length * 8 / 2)` chars, and passes that ceiling into `ContextManager`, which honors it for the SCRATCHPAD warning threshold and 80% hysteresis trim. On any API failure or a model missing from the catalog it gracefully falls back to `config.CONTEXT_LIMIT`.
 - **Context limit warning:** when the conversation crosses `CONTEXT_WARN_PERCENT`% (95%) of `CONTEXT_LIMIT`, `add_message()` injects a one-time user-role message telling the LLM to back up important findings/notes to the SCRATCHPAD before the oldest ~20% of history is trimmed. Trimming is deferred until an assistant turn confirms the warning was read, so the backup commands+outputs at the tail survive the trim; it is acceptable to briefly exceed `CONTEXT_LIMIT` to deliver the warning. `reset` re-arms the flags.
 - **Scratchpad injected once at session start (not on every change)** — `Agent.run()` reads `SCRATCHPAD.md` once and prepends it to the first user message of a fresh session. Later edits are NOT auto-injected; the model re-reads via `cat` when it needs a refresh. `SCRATCHPAD_LIMIT` (80k) truncation with `VISIBLE_%` reporting is preserved. Simplifies context accounting and avoids cache bloat from repeated re-injection.
 - **Thinking token recovery on length termination** — captures reasoning tokens on `finish_reason: length`, injects `<thinking>` block and immediate answer prompt, then cleans up temporary messages from history upon completion.

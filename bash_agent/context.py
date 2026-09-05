@@ -41,9 +41,14 @@ _MISSING = object()
 
 
 class ContextManager:
-    def __init__(self, uuid_str: str):
+    def __init__(self, uuid_str: str, context_limit: int | None = None):
         self.history: List[Dict[str, str]] = []
         self.uuid = uuid_str
+        # Per-session context ceiling in characters. An explicitly provided
+        # value (Agent resolves it from the OpenRouter model's context_length
+        # so the agent never pushes past ~half of what the model can hold)
+        # wins over the module-level fallback CONTEXT_LIMIT.
+        self.context_limit = context_limit if context_limit is not None else CONTEXT_LIMIT
         
         # Create the new temp directory and set the scratchpad path inside it
         tmp_dir = os.path.abspath(".bash_agent_tmp")
@@ -268,7 +273,7 @@ class ContextManager:
         total_chars = sum(
             ContextManager._content_length(m.get("content", "")) for m in self.history
         )
-        warn_threshold = int(CONTEXT_LIMIT * (CONTEXT_WARN_PERCENT / 100.0))
+        warn_threshold = int(self.context_limit * (CONTEXT_WARN_PERCENT / 100.0))
 
         if not self._warning_sent and total_chars > warn_threshold:
             self._warning_sent = True
@@ -306,13 +311,13 @@ class ContextManager:
     def _trim_context_if_needed(self):
         total_chars = sum(ContextManager._content_length(m.get("content", "")) for m in self.history)
 
-        # Guard: Do not trigger cleanup until the strict CONTEXT_LIMIT is reached/exceeded
-        if total_chars <= CONTEXT_LIMIT:
+        # Guard: Do not trigger cleanup until the strict context_limit is reached/exceeded
+        if total_chars <= self.context_limit:
             return
 
         # Calculate the 80% hysteresis target limit
-        target_limit = int(CONTEXT_LIMIT * 0.8)
-        print(f"[System] Context limit exceeded ({total_chars} chars). Initiating hysteresis cleanup down to 80% ({target_limit} chars)...")
+        target_limit = int(self.context_limit * 0.8)
+        print(f"[System] Context limit exceeded ({total_chars} chars, ceiling {self.context_limit}). Initiating hysteresis cleanup down to 80% ({target_limit} chars)...")
 
         # Incrementally trim the oldest messages until under the hysteresis target limit
         while True:

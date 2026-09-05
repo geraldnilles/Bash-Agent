@@ -18,6 +18,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from bash_agent import config as _cfg
 from tests.helpers.fakes import (
     chdir_tmp,
     ChdirTmp,
@@ -301,12 +302,12 @@ class TestFakeLLMClient(unittest.TestCase):
         extra = kwargs.get("extra_body", {})
         self.assertIn("reasoning", extra)
         self.assertEqual(extra["reasoning"]["effort"], "low")
-        # Provider whitelist for whitelisted models
-        if "deepseek/deepseek-v4-flash-0731" in self.llm_mod.config.MODEL_PROVIDERS if hasattr(self.llm_mod, "config") else False:
-            pass  # covered below with direct assertion
-        # Ensure provider key exists for this model (configured in config.py)
+        # Provider whitelist for whitelisted models. bash_agent.config is the
+        # single source of truth; compare order-insensitively so this test does
+        # not break when providers are added/reordered in config.py.
         self.assertIn("provider", extra)
-        self.assertEqual(extra["provider"]["only"], ["deepseek"])
+        expected = list(_cfg.MODEL_PROVIDERS["deepseek/deepseek-v4-flash-0731"])
+        self.assertEqual(sorted(extra["provider"]["only"]), sorted(expected))
 
     def test_cache_seeding_makes_create_chat_completion_offline(self):
         """Seeding _CLIENT_CACHE must make create_chat_completion return fake without network."""
