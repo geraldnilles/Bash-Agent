@@ -72,7 +72,7 @@ This is the heart of the project. The `Agent` class:
 | `_get_models_catalog()` | Fetches & caches the OpenRouter `/api/v1/models` catalog for ~1h. Returns a list of model dicts, or `[]` on API failure so callers fall back to safe defaults. Sharing one HTTP request across the multimodal/reasoning/context probes avoids three API calls at startup. |
 | `_check_model_capabilities()` | Queries the OpenRouter models API to determine the model's supported input modalities. Sets `self.multimodal_capabilities` to a list like `["image"]`, or `None` for text-only models (or if the probe fails). |
 | `_fetch_model_reasoning_info()` | Queries the OpenRouter models API for the model's reasoning support and sets `reasoning_supported_efforts`, `reasoning_mandatory`, `reasoning_default_effort`. Falls back to permissive defaults on network failure. |
-| `_fetch_model_context_limit()` | Queries the OpenRouter models API for the model's `context_length` (tokens) and sets `model_context_limit_chars = int(context_length_tokens * CHARS_PER_TOKEN / 2)`, i.e. half of the model window converted to characters at 8 chars/token. Sets `None` on any failure/model miss so `__init__` falls back to `config.CONTEXT_LIMIT`. |
+| `_fetch_model_context_limit()` | Queries the OpenRouter models API for the model's `context_length` (tokens) and sets `model_context_limit_chars = int(context_length_tokens * CHARS_PER_TOKEN / 4)`, i.e. a quarter of the model window converted to characters at 8 chars/token. Sets `None` on any failure/model miss so `__init__` falls back to `config.CONTEXT_LIMIT`. |
 
 **The fenced-block regex pattern** (used in `_extract_blocks`):
 - Bash: `---START_BASH_COMMAND-{uuid}---\n(.*?)\n---END_BASH_COMMAND-{uuid}---`

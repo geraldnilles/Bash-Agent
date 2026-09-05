@@ -665,9 +665,9 @@ and a manager built with no explicit `context_limit` still equals the module
 
 `_fetch_model_context_limit()` reads the selected model's `context_length`
 (in tokens) from the OpenRouter catalog and sets
-`model_context_limit_chars = int(context_length * CHARS_PER_TOKEN / 2)` where
-CHARS_PER_TOKEN=8 — i.e. half the token window expressed in characters, so the
-agent keeps ~50% headroom inside the real window. The method returns/leaves
+`model_context_limit_chars = int(context_length * CHARS_PER_TOKEN / 4)` where
+CHARS_PER_TOKEN=8 — i.e. a quarter of the token window expressed in characters,
+so the agent keeps ~75% headroom inside the real window. The method returns/leaves
 `None` whenever the network fails, the model id is absent from the cached
 catalog, or the entry lacks a usable `context_length`, so `__init__` always
 has a safe fallback.
@@ -682,7 +682,7 @@ context_limit=...)`, and the budget-reporting percentage divides by
 `self.context.context_limit`. With the shared offline stub (which mirrors the
 production API-failure path and yields `None`) the agent falls back to
 `config.CONTEXT_LIMIT`; with a stub that simulates a successful probe (e.g.
-4096 ctx tokens → 16384 chars) both `agent.context_limit` and
+4096 ctx tokens → 8192 chars) both `agent.context_limit` and
 `agent.context.context_limit` equal that derived ceiling. `self._get_models_catalog()`
 caches the /models payload for ~1h so the three startup probes (multimodal,
 reasoning, context) issue a single HTTP GET.

@@ -5,12 +5,13 @@ Replace the fixed char context ceiling with one that is a fraction of the
 selected model's reported context_length (tokens) from the OpenRouter
 /models catalog:
 
-    context_limit_chars = int(context_length_tokens * CHARS_PER_TOKEN / 2)
+    context_limit_chars = int(context_length_tokens * CHARS_PER_TOKEN / 4)
 
 * CHARS_PER_TOKEN (8) converts the token figure to the character accounting
   the ContextManager actually uses.
-* The /2 keeps the agent comfortably under the model's usable window,
-  leaving headroom for its own output, tool-call shaping and API overhead.
+* The /4 keeps the agent comfortably under the model's usable window,
+  leaving generous headroom for its own output, tool-call shaping and
+  API overhead.
 
 Contract pinned here:
 
@@ -22,7 +23,7 @@ Contract pinned here:
       (existing pruning / warning tests stay valid unchanged).
 
   Agent
-    * _fetch_model_context_limit() derives int(ctx_tokens * 8 / 2) from the
+    * _fetch_model_context_limit() derives int(ctx_tokens * 8 / 4) from the
       catalog entry whose id == self.model, or None on catalog failure /
       model miss (so __init__ always has a safe fallback).
     * __init__ resolves self.context_limit (None -> config.CONTEXT_LIMIT) and
@@ -124,12 +125,12 @@ class AgentContextDerivationCase(unittest.TestCase):
     def _catalog(self, context_length):
         return [{"id": self.agent.model, "context_length": context_length}]
 
-    def test_derives_half_model_window(self):
+    def test_derives_quarter_model_window(self):
         self.agent._get_models_catalog = lambda: self._catalog(4096)
         self.agent._fetch_model_context_limit()
         self.assertEqual(
             self.agent.model_context_limit_chars,
-            int(4096 * CHARS_PER_TOKEN / 2),   # 16384
+            int(4096 * CHARS_PER_TOKEN / 4),   # 8192
         )
 
     def test_catalog_miss_sets_none(self):
@@ -166,12 +167,12 @@ class AgentConstructorWiringCase(unittest.TestCase):
 
     def test_resolved_limit_is_passed_to_context_manager(self):
         # Replicate _make_agent scaffolding but with a context stub that
-        # reports a real derived ceiling (e.g. 4096 tokens -> 16384 chars).
+        # reports a real derived ceiling (e.g. 4096 tokens -> 8192 chars).
         from bash_agent.agent import Agent
         from tests.helpers.fakes import FakeSandbox
 
         def custom_ctx(self):
-            self.model_context_limit_chars = int(4096 * CHARS_PER_TOKEN / 2)
+            self.model_context_limit_chars = int(4096 * CHARS_PER_TOKEN / 4)
 
         with mock.patch.object(Agent, "_check_model_capabilities", return_value=None):
             with mock.patch.object(Agent, "_fetch_model_reasoning_info", _custom_full_reasoning):
@@ -180,8 +181,8 @@ class AgentConstructorWiringCase(unittest.TestCase):
                         agent = Agent()
         agent.sandbox = FakeSandbox()
 
-        self.assertEqual(agent.context_limit, 16384)
-        self.assertEqual(agent.context.context_limit, 16384)
+        self.assertEqual(agent.context_limit, 8192)
+        self.assertEqual(agent.context.context_limit, 8192)
         self.assertEqual(agent.context.context_limit, agent.context_limit)
 
 

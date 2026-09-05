@@ -46,7 +46,7 @@ class ContextManager:
         self.uuid = uuid_str
         # Per-session context ceiling in characters. An explicitly provided
         # value (Agent resolves it from the OpenRouter model's context_length
-        # so the agent never pushes past ~half of what the model can hold)
+        # so the agent never pushes past ~a quarter of what the model can hold)
         # wins over the module-level fallback CONTEXT_LIMIT.
         self.context_limit = context_limit if context_limit is not None else CONTEXT_LIMIT
         

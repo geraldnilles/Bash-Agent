@@ -338,10 +338,10 @@ class Agent:
         derive a session-safe character ceiling.
 
         OpenRouter reports context_length in TOKENS. Historical accounting
-        converts tokens to characters at ~8 chars/token; we then halve that
-        so the agent never tries to fill more than ~half the model's actual
-        context window (giving the model room for its own output, tool-call
-        shaping, and API overhead).
+        converts tokens to characters at ~8 chars/token; we then quarter that
+        so the agent never tries to fill more than ~a quarter of the model's
+        actual context window (giving the model room for its own output,
+        tool-call shaping, and API overhead).
 
         On any problem (offline, catalog missing the model, or no
         context_length), self.model_context_limit_chars stays None so
@@ -353,7 +353,7 @@ class Agent:
                     continue
                 ctx_tokens = m.get("context_length")
                 if isinstance(ctx_tokens, int) and ctx_tokens > 0:
-                    chars = int(ctx_tokens * CHARS_PER_TOKEN / 2)
+                    chars = int(ctx_tokens * CHARS_PER_TOKEN / 4)
                     self.model_context_limit_chars = chars
                     return
             # Model found but had no usable context_length.
