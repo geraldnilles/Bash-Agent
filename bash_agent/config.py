@@ -59,7 +59,7 @@ DEFAULT_MAX_TOKENS = 1024*8
 MODEL_PROVIDERS = {
     "deepseek/deepseek-v4-pro": ["deepseek"],
     "deepseek/deepseek-v4-pro-0813": ["deepseek"],
-    "deepseek/deepseek-v4-flash-0731": ["deepseek"],
+    "deepseek/deepseek-v4-flash-0731": ["fireworks"],
     "xiaomi/mimo-v2.5-pro": ["xiaomi"],
     "xiaomi/mimo-v2.5": ["xiaomi"],
     #"moonshotai/kimi-k3": ["modal","baseten"]
