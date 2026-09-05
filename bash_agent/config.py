@@ -31,7 +31,7 @@ DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 
 # Limits & Timeouts
 HISTORY_FILE = os.path.abspath(".bash_agent_tmp/history.json")
-CONTEXT_LIMIT = 256000
+CONTEXT_LIMIT = 256000*2
 SCRATCHPAD_LIMIT = 80000
 OUTPUT_LIMIT = 10000
 MAX_PIXELS = 2_000_000  # Maximum image resolution (2MP) for vision/multimodal features
