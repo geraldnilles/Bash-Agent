@@ -1,8 +1,6 @@
 # Bash Agent — Test Suite (Planning Documents)
 
-> **STATUS: IMPLEMENTATION IN PROGRESS.** Tests are being implemented group by
-> group following [`TEST_PLAN.md`](TEST_PLAN.md) — see its Progress Summary for
-> what is done. Helpers (`helpers/fakes.py`), the protocol-parsing group
+> Helpers (`helpers/fakes.py`), the protocol-parsing group
 > (`unit/test_agent_blocks.py`), the special-commands group
 > (`unit/test_agent_special_commands.py`), the execution-pipeline group
 > (`unit/test_agent_pipeline.py`), the context-management group
@@ -63,7 +61,6 @@ side effect of adding tests.
 tests/
 ├── README.md            # This file — how to run, principles, known bugs
 ├── AGENTS.md            # Context for AI coding agents working in this folder
-├── TEST_PLAN.md         # The proposed test inventory (the design doc)
 ├── helpers/
 │   ├── __init__.py
 │   └── fakes.py         # Shared fakes: FakeSandbox, FakeLLMClient,

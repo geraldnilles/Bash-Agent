@@ -478,7 +478,7 @@ class TestAttachedImageFenceExtraction(PipelineCase):
 class TestTmpFileWarningHeuristic(unittest.TestCase):
     """Parametrized matrix over Agent._build_tmp_file_warning.
 
-    Pure-function test per TEST_PLAN T-15: direct import, zero mocks, zero
+    Pure-function test: direct import, zero mocks, zero
     filesystem. The heuristic must fire ONLY when ALL three conditions hold:
 
       1. the command exited non-zero,

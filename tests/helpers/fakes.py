@@ -126,7 +126,7 @@ def chdir_tmp():
             open("file.txt", "w").write("hi")
         # CWD restored, tmpdir deleted
 
-    Implementation notes (per TEST_PLAN):
+    Implementation notes:
       * Uses tempfile.TemporaryDirectory() + os.chdir()
       * Modules that use import-time constants (config.HISTORY_FILE) must be
         patched separately; chdir alone is not sufficient for those.

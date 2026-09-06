@@ -4,7 +4,7 @@ Group 8 — pure-helper tests for bash_agent.memo.
 T-40  memo helpers (P2)
 
 Recording itself is hardware-dependent (PipeWire microphones, pw-record,
-Ctrl+C timing) and stays untested BY DESIGN per TEST_PLAN.md. What CAN be
+Ctrl+C timing) and stays untested BY DESIGN. What CAN be
 pinned offline is the parsing/formatting logic around it:
 
   * get_sources            — parses canned `pactl list sources short` output;

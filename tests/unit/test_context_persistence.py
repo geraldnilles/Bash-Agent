@@ -29,7 +29,7 @@ Seam notes:
     HISTORY_FILE`, so tests patch bash_agent.context.HISTORY_FILE —
     patching bash_agent.config.HISTORY_FILE would NOT be seen (same
     subtlety of CONTEXT_LIMIT in the sibling test
-    module; TEST_PLAN.md.s original wording said config and was fixed).
+    module).
   * ContextManager.__init__ creates .bash_agent_tmp/SCRATCHPAD.md in the
     CWD, so every test runs inside chdir_tmp (T-00a).
 """

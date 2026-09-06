@@ -4,12 +4,9 @@
 
 ## What lives here
 
-The test suite for the `bash_agent` package, implemented incrementally against
-the authoritative inventory in `TEST_PLAN.md` (T-00 … T-41):
+The test suite for the `bash_agent` package:
 
 - `README.md` — running instructions, constraints, known-bug register
-- `TEST_PLAN.md` — the authoritative test inventory, each entry with rationale
-  and the mocking/seam strategy; its Progress Summary tracks implementation state
 - `helpers/fakes.py` — shared offline fakes (T-00a–d): `chdir_tmp`,
   fenced-block builders, `FakeLLMClient`, `FakeSandbox`, `_make_agent()`,
   plus `deterministic_count_tokens` / `DeterministicTokenCounts` — an
@@ -40,9 +37,21 @@ installed or which model slug is selected.
    directly for persistence tests.
 4. **Never edit `bash_agent/` source to make a test pass.** Pin buggy behavior
    with `@unittest.expectedFailure` and record it in the README bug table.
-5. **Update `TEST_PLAN.md` status column** whenever you implement a test group
-   (`PROPOSED` → `IMPLEMENTED`), and update `README.md` if you discover a new
-   latent bug.
+5. **Keep test docstrings self-explanatory.** There is no external test
+   inventory; each test class/module docstring must state WHAT is tested, WHY
+   it matters, and WHICH seam keeps it offline. Update `README.md` if you
+   discover a new latent bug.
+
+## Historical note: "T-nn" labels
+
+Many docstrings carry legacy labels like `T-19` or `T-42` from a former design
+document (`tests/TEST_PLAN.md`, removed). They are stable, unique test
+identifiers and may be kept in docstrings, but they no longer refer to any
+external file — the docstring itself is the specification. The suite was
+written with three priorities: P0 = protocol-critical / regression guard, P1 =
+important behavior, P2 = hardening; every network or OS boundary is mocked at
+a narrow seam (`llm._CLIENT_CACHE`, `urllib.request.urlopen`,
+`requests.post`, `subprocess.run`) so all tests stay offline and hermetic.
 
 ## Useful facts for writing tests
 
