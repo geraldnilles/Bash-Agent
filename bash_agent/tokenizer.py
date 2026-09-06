@@ -51,6 +51,14 @@ from bash_agent.config import DEFAULT_MODEL
 # ~3.5 chars/token measured across real session transcripts.
 FALLBACK_CHARS_PER_TOKEN = 3.5
 
+# Best AVAILABLE OFFLINE proxy encoding for Google Gemini. Gemini's real
+# SentencePiece tokenizer (256k vocab) is not open-and-loadable here, but
+# tiktoken ``o200k_base`` tracks its multilingual/rare-char density far
+# better than LiteLLM's generic ``cl100k_base`` (the encoding LiteLLM
+# collapses every non-bare slug onto). If a true Gemma offline asset is ever
+# vendored, route ``gemini/*`` there instead and remove this constant.
+GEMINI_PROXY_ENCODING = "o200k_base"
+
 # Bounded cache so the hysteresis trim loop (which re-measures the same
 # strings repeatedly) does not re-encode text every pass. Keyed by
 # ``(model, text)`` so different model slugs never share wrong counts.
@@ -200,6 +208,27 @@ def _route_openai_family(model: str, text: str) -> int | None:
         return None
 
 
+def _route_gemini_proxy(text: str) -> int | None:
+    """Offline token-count proxy for Google Gemini slugs.
+
+    Uses tiktoken ``o200k_base`` (see ``GEMINI_PROXY_ENCODING``) because the
+    real Gemini SentencePiece is not open/loadable in this project. Returns
+    ``None`` (so the caller falls through to LiteLLM) if tiktoken is missing
+    or encoding fails.
+    """
+    tk = _load_tiktoken()
+    if tk is None:
+        return None
+    try:
+        enc = tk.get_encoding(GEMINI_PROXY_ENCODING)
+    except Exception:
+        return None
+    try:
+        return len(enc.encode(text, disallowed_special=()))
+    except Exception:
+        return None
+
+
 def _route_model_specific(model: str, text: str) -> int | None:
     """Return a model-specific token count or ``None`` to fall through.
 
@@ -210,6 +239,11 @@ def _route_model_specific(model: str, text: str) -> int | None:
     low = model.lower()
     if "deepseek/" in low:
         n = _route_deepseek(text)
+        if n is not None:
+            return n
+    # Google Gemini (bare, gemini/..., google/...): best offline proxy.
+    if low.startswith("gemini/") or low.startswith("google/gemini"):
+        n = _route_gemini_proxy(text)
         if n is not None:
             return n
     # OpenAI-family (bare names or openai/-prefixed): o200k-family encodings
@@ -253,7 +287,8 @@ def count_tokens(text: str, model: str | None = None) -> int:
     Estimation strategy (first applicable wins):
       1. family-specific offline tokenizer (DeepSeek via ``deepseek_tokenizer``,
          OpenAI-family via tiktoken ``encoding_for_model``, with an ``openai/``
-         prefix stripped);
+         prefix stripped; Google Gemini via the ``o200k_base`` proxy -- see
+         ``GEMINI_PROXY_ENCODING``);
       2. vendor-neutral LiteLLM ``token_counter`` (resolves provider-slugs and
          degrades to a generic tiktoken BPE for unregistered slugs);
       3. measured ``round(len(text) / FALLBACK_CHARS_PER_TOKEN)`` heuristic.

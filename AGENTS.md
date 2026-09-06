@@ -20,7 +20,7 @@ bash_agent/
 ├── agent.py         # Core Agent class — the main run loop
 ├── config.py        # All constants, defaults, env var names
 ├── config_file.py   # Optional .bash_agent_tmp/config.json loader (model/max_tokens/reasoning_effort)
-├── tokenizer.py     # Model-aware local token counting (DeepSeek BPE, tiktoken o200k family for OpenAI, LiteLLM, ~3.5 chars/token last resort)
+├── tokenizer.py     # Model-aware local token counting (DeepSeek BPE, tiktoken o200k family for OpenAI, o200k proxy for Gemini, LiteLLM, ~3.5 chars/token last resort)
 ├── context.py       # ContextManager — conversation history, pruning
 ├── sandbox.py       # Sandbox — systemd-run execution wrapper
 ├── llm.py           # LLM provider adapter layer (OpenRouter)
@@ -179,6 +179,11 @@ heuristic:
      `open_ai_chat_completion_models` catalog contains only bare names — it
      would otherwise remap `openai/gpt-4o` to `gpt-3.5-turbo`/`cl100k_base`,
      silently losing the 4o family's encoding.
+   * `gemini/*` and `google/gemini*` → **tiktoken `o200k_base`** as the best
+     OFFLINE proxy for Gemini's real (256k-vocab) SentencePiece tokenizer,
+     which is not open/downloadable. `o200k_base` tracks Gemini's density on
+     multilingual/emoji text far better than LiteLLM's generic `cl100k_base`
+     (the encoding every unknown slug otherwise collapses onto).
 2. **Provider-neutral LiteLLM path** (`litellm.token_counter`) for any other
    slug — understands OpenRouter slugs and degrades to a bundled tiktoken BPE
    for unregistered ones.

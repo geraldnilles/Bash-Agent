@@ -131,3 +131,36 @@ class CacheCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GeminiProxyCase(unittest.TestCase):
+    """Google Gemini slugs use the o200k_base offline proxy (not cl100k)."""
+
+    def setUp(self):
+        clear_token_cache()
+
+    def test_gemini_routes_through_o200k_proxy(self):
+        # Non-ASCII-heavy text where o200k differs from cl100k.
+        text = ("Gemini 🌍 中文 한국어 русский français émoji 🚀 " * 20
+                + "\n".join("def f%d(x): return x + %d\n" % (i, i) for i in range(30)))
+        import tiktoken
+        enc = tiktoken.get_encoding("o200k_base")
+        expected = len(enc.encode(text, disallowed_special=()))
+        for slug in ("gemini/gemini-2.5-flash", "google/gemini-2.5-pro",
+                     "gemini/gemini-1.5-pro"):
+            self.assertEqual(count_tokens(text, model=slug), expected)
+
+    def test_gemini_differs_from_cl100k_litellm_slug(self):
+        text = "Gemini 🌍 中文 한국어 🇪🇸 résumé — café émoji 🚀 " * 25
+        from bash_agent.tokenizer import count_tokens
+        gem = count_tokens(text, model="gemini/gemini-2.5-flash")
+        # claude has no family tokenizer -> LiteLLM -> cl100k
+        oth = count_tokens(text, model="anthropic/claude-3-7-sonnet")
+        self.assertNotEqual(gem, oth)
+
+    def test_gemini_eq_openai_o200k_family(self):
+        """Gemini o200k proxy and gpt-4o (o200k) agree on plain-ASCII text."""
+        text = "Hello world, this is a test. " * 40
+        g = count_tokens(text, model="gemini/gemini-2.5-flash")
+        o = count_tokens(text, model="gpt-4o")
+        self.assertEqual(g, o)
