@@ -11,7 +11,8 @@ import select
 from typing import List, Dict
 
 from bash_agent.prompts import get_system_prompt
-from bash_agent.config import DEFAULT_MODEL, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, CONTEXT_LIMIT, DEFAULT_BUDGET
+from bash_agent.config import DEFAULT_MODEL, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, DEFAULT_BUDGET
+from bash_agent.token_budget import parse_token_budget, resolve_budget
 from bash_agent.utils import cleanup_tmp_folder, copy_project_to_clipboard, get_clipboard_content, get_vim_prompt
 from bash_agent.config_file import load_config
 from bash_agent import llm
@@ -127,7 +128,7 @@ _MODELS_CACHE = {"data": None, "fetched_at": 0.0}
 
 
 class Agent:
-    def __init__(self, keep_tmp=False, debug=False, model=None, reasoning_effort=None, max_tokens=None, timeout=None, resume=False, budget=None):
+    def __init__(self, keep_tmp=False, debug=False, model=None, reasoning_effort=None, max_tokens=None, token_budget=None, timeout=None, resume=False, budget=None):
         self.uuid = str(uuid.uuid4())
         self.debug = debug
         
@@ -161,17 +162,27 @@ class Agent:
         # Fetch reasoning capabilities from OpenRouter
         self._fetch_model_reasoning_info()
         
-        # Fetch the model's context window so the per-session context ceiling
-        # can be a fraction of what the model can actually handle, instead of a
-        # fixed count that may be far too small (wasted capacity) or far too
-        # large (pushing the model past its limits). See
-        # _fetch_model_context_limit() for how the TOKEN ceiling is derived.
-        # Falls back to config.CONTEXT_LIMIT on API failure.
+        # Fetch the model's FULL context window so the per-session context
+        # ceiling (self.context_limit) can be derived from it. By default we
+        # reserve room for the model's own output, tool-call shaping and API
+        # overhead by using a QUARTER of the window as the budget (see
+        # _fetch_model_context_limit()). The `token_budget` constructor arg
+        # overrides that quarter with either an exact token count ("256K") or
+        # a percentage of the window ("25%"). Falls back to config.CONTEXT_LIMIT
+        # (or the equivalent of 25% of the presumed default window when a
+        # percentage is given) on API failure / model miss.
         self._fetch_model_context_limit()
-        self.context_limit = (
-            self.model_context_limit_tokens
-            if self.model_context_limit_tokens
-            else CONTEXT_LIMIT
+        # token_budget: raw user spec (str like "25%" or "256K", int, or None).
+        # Keep the raw arg around for debugging/status lines.
+        self.token_budget = token_budget
+        spec = parse_token_budget(token_budget)
+        self.context_limit = resolve_budget(spec, self.model_full_context_tokens)
+        # Retain the derived quarter (None when the probe failed) in case any
+        # external introspection still references the old attribute.
+        self.model_context_limit_tokens = (
+            int(self.model_full_context_tokens / 4)
+            if self.model_full_context_tokens is not None
+            else None
         )
 
         # Build the ContextManager with the resolved per-model ceiling. The
@@ -334,22 +345,22 @@ class Agent:
         self.reasoning_default_effort = "medium"
 
     def _fetch_model_context_limit(self):
-        """Query OpenRouter API for the selected model's context_length and
-        derive a session-safe TOKEN ceiling.
+        """Query OpenRouter API for the selected model's FULL context window.
 
-        OpenRouter reports context_length in TOKENS. We quarter it so the
-        agent never tries to fill more than ~a quarter of the model's actual
-        context window (reserving room for the model's own output, tool-call
-        shaping, and API overhead). The full window (tokens) is saved so the
-        stats line can show % of the FULL model window too.
+        OpenRouter reports context_length in TOKENS. This method only records
+        that full window on self.model_full_context_tokens; the session-safe
+        ceiling (self.context_limit) is then derived from it in __init__ by
+        resolve_budget() — by default a QUARTER of the window, overridable via
+        the token_budget constructor arg to an exact token count or another
+        percentage.
 
         On any problem (offline, catalog missing the model, or no
-        context_length), self.model_context_limit_tokens and
-        self.model_full_context_tokens stay None so __init__ falls back to the
-        config.CONTEXT_LIMIT token default.
+        context_length), self.model_full_context_tokens stays None so
+        __init__ falls back to the config.CONTEXT_LIMIT default (or the
+        equivalent fraction of the presumed default window for a percentage
+        override).
         """
         try:
-            self.model_context_limit_tokens = None
             self.model_full_context_tokens = None
             for m in self._get_models_catalog():
                 if m.get("id") != self.model:
@@ -357,12 +368,10 @@ class Agent:
                 ctx_tokens = m.get("context_length")
                 if isinstance(ctx_tokens, int) and ctx_tokens > 0:
                     self.model_full_context_tokens = ctx_tokens
-                    self.model_context_limit_tokens = int(ctx_tokens / 4)
                     return
             # Model found but had no usable context_length.
         except Exception:
             pass
-        self.model_context_limit_tokens = None
         self.model_full_context_tokens = None
 
     def _get_lowest_reasoning_effort(self):

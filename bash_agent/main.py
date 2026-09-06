@@ -6,6 +6,21 @@ import argparse
 from bash_agent.agent import Agent
 from bash_agent.utils import copy_project_to_clipboard, get_clipboard_content
 
+def _parse_token_budget_arg(value: str) -> str:
+    """argparse receiver: validate a --token-budget spec, return raw string.
+
+    Accepts absolute token counts ("327680", "256K", "1.5M") or a percentage
+    of the model context window ("25%"). Invalid values abort with a clean
+    usage error (SystemExit 2) instead of a traceback later.
+    """
+    from bash_agent.token_budget import parse_token_budget
+    try:
+        parse_token_budget(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+    return value
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Bash Agent")
     parser.add_argument("-m", dest="message", type=str, help="User message to send (instead of reading from stdin)")
@@ -17,6 +32,10 @@ def parse_args():
     parser.add_argument("--model", type=str, default=None, help="OpenRouter model name (overrides OPENROUTER_MODEL env var)")
     parser.add_argument("--reasoning-effort", type=str, choices=['none', 'minimal', 'low', 'medium', 'high', 'default'], default=None, help="Reasoning effort (none, minimal, low, medium, high, or default to use model's built-in default)")
     parser.add_argument("--max-tokens", type=int, default=None, help='Override max output tokens for LLM')
+    parser.add_argument(
+        "--token-budget", type=_parse_token_budget_arg, default=None, metavar="SPEC",
+        help="Context-window token budget: absolute tokens (e.g. 327680, 256K, 1.5M) or a percentage of the model's context window ending in %% (e.g. 25%%). Defaults to 25%% of the model window.",
+    )
     parser.add_argument("-t", "--timeout", type=int, default=None, help="Command timeout in seconds (default: 60)")
     parser.add_argument("--no-sfx", action="store_true", help="Disable subtle sound effects (also BAGENT_SFX=0 / BAGENT_NO_SFX=1)")
     parser.add_argument("-b", "--budget", type=float, default=0.10, help="Total session cost budget in USD (default: 0.10)")
@@ -80,7 +99,7 @@ def main():
     
     if args.no_sfx:
         os.environ["BAGENT_NO_SFX"] = "1"
-    agent = Agent(keep_tmp=args.keep_tmp, debug=args.debug, model=args.model, reasoning_effort=args.reasoning_effort, max_tokens=args.max_tokens, timeout=args.timeout, resume=args.resume, budget=args.budget)
+    agent = Agent(keep_tmp=args.keep_tmp, debug=args.debug, model=args.model, reasoning_effort=args.reasoning_effort, max_tokens=args.max_tokens, token_budget=args.token_budget, timeout=args.timeout, resume=args.resume, budget=args.budget)
     agent.run(initial_task)
 
 if __name__ == "__main__":

@@ -213,6 +213,17 @@ bagent -m "Refactor the entire codebase" --budget 0.50   # $0.50 USD max
 
 When the budget is exhausted, the agent stops gracefully.
 
+### Context-Window Token Budget
+
+By default the agent only uses 25% of the model's reported context window to leave generous headroom. Tune that budget with `--token-budget`, as an exact token count or a percentage of the model's full window:
+
+```bash
+bagent -m "Do a long task" --token-budget 50%        # half the model's context window
+bagent -m "Deep refactor"  --token-budget 256K       # exactly 256,000 tokens
+```
+
+Absolute counts accept an optional `K`/`M` suffix (metric: `256K` = 256,000 tokens). A bare number is a plain token count.
+
 ---
 
 ## CLI Reference
@@ -228,6 +239,7 @@ When the budget is exhausted, the agent stops gracefully.
 | `--model <name>` | Override the default model (e.g., `openai/gpt-4o`) |
 | `--reasoning-effort <level>` | Set reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `default` |
 | `--max-tokens <n>` | Override max output tokens (default: 8192) |
+| `--token-budget <spec>` | Context-window token budget: absolute tokens (e.g. `327680`, `256K`, `1.5M`) or a percentage of the model's context window ending in `%` (e.g. `25%`). Defaults to 25% of the model window. |
 | `-t, --timeout <n>` | Command timeout in seconds (default: 60) |
 | `-b, --budget <n>` | Session cost budget in USD (default: $0.10) |
 | `-r, --resume` | Restore previous session and continue |

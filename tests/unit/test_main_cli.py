@@ -90,6 +90,7 @@ class TestParseArgDefaults(unittest.TestCase):
         self.assertIsNone(args.model)
         self.assertIsNone(args.reasoning_effort)
         self.assertIsNone(args.max_tokens)
+        self.assertIsNone(args.token_budget)
         self.assertIsNone(args.timeout)
         self.assertEqual(args.budget, 0.10)
         self.assertFalse(args.commit)
@@ -104,6 +105,7 @@ class TestParseArgDefaults(unittest.TestCase):
                           "--model", "vendor/model-x",
                           "--reasoning-effort", "high",
                           "--max-tokens", "2048",
+                          "--token-budget", "128K",
                           "-t", "45",
                           "-b", "2.50")
         self.assertEqual(args.message, "do things")
@@ -112,6 +114,7 @@ class TestParseArgDefaults(unittest.TestCase):
         self.assertEqual(args.model, "vendor/model-x")
         self.assertEqual(args.reasoning_effort, "high")
         self.assertEqual(args.max_tokens, 2048)
+        self.assertEqual(args.token_budget, "128K")
         self.assertEqual(args.timeout, 45)
         self.assertEqual(args.budget, 2.50)
 
@@ -130,8 +133,8 @@ class TestPlainRun(unittest.TestCase):
         self.assertIsNone(res["exit"])
         res["agent_cls"].assert_called_once_with(
             keep_tmp=False, debug=False, model=None,
-            reasoning_effort=None, max_tokens=None, timeout=None,
-            resume=False, budget=0.10)
+            reasoning_effort=None, max_tokens=None, token_budget=None,
+            timeout=None, resume=False, budget=0.10)
         res["agent_cls"].return_value.run.assert_called_once_with(
             "list files")
 
@@ -161,6 +164,24 @@ class TestPlainRun(unittest.TestCase):
         _, kwargs = res["agent_cls"].call_args
         self.assertEqual(kwargs["budget"], 1.25)
         self.assertEqual(kwargs["timeout"], 90)
+
+    def test_token_budget_forwarded(self):
+        res = run_cli(["bagent", "-m", "go", "--token-budget", "256K"])
+        _, kwargs = res["agent_cls"].call_args
+        self.assertEqual(kwargs["token_budget"], "256K")
+
+    def test_token_budget_percentage_forwarded(self):
+        res = run_cli(["bagent", "-m", "go", "--token-budget", "50%"])
+        _, kwargs = res["agent_cls"].call_args
+        self.assertEqual(kwargs["token_budget"], "50%")
+
+    def test_invalid_token_budget_rejected(self):
+        # Invalid specs abort before Agent is even constructed (exit code 2).
+        for bad in ["bogus", "0%", "101%", "0K", "1.5"]:
+            result = run_cli(["bagent", "-m", "go", "--token-budget", bad])
+            self.assertIsInstance(result["exit"], SystemExit, f"accepted {bad}")
+            self.assertEqual(result["exit"].code, 2, f"wrong exit for {bad}")
+            result["agent_cls"].assert_not_called()
 
     def test_resume_flag_forwarded(self):
         res = run_cli(["bagent", "-m", "continue", "-r"])

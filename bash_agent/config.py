@@ -32,11 +32,13 @@ DEFAULT_MODEL = "deepseek/deepseek-v4-flash-0731"
 # Limits & Timeouts
 HISTORY_FILE = os.path.abspath(".bash_agent_tmp/history.json")
 # Fallback context ceiling (TOKENS) used when the OpenRouter /models probe for
-# the selected model's context_length fails or is unavailable. The Agent now
-# derives the real per-session ceiling from a quarter of the model's
-# context_length (in tokens), so this is only the safety net that keeps
-# sessions bounded when offline/unknown. 327,680 = ¼ of the DeepSeek
-# deepseek-v4-flash-0731 context_length (1,310,720 tokens).
+# the selected model's context_length fails or is unavailable. The Agent (via
+# bash_agent.token_budget.resolve_budget) derives the real per-session ceiling
+# from the model's context_length — defaulting to a QUARTER of it, overridable
+# with the --token-budget CLI flag (absolute tokens or a % of the window) — so
+# this constant is only the safety net that keeps sessions bounded when
+# offline/unknown. 327,680 = ¼ of the DeepSeek deepseek-v4-flash-0731
+# context_length (1,310,720 tokens).
 CONTEXT_LIMIT = 327680
 CONTEXT_WARN_PERCENT = 99
 SCRATCHPAD_LIMIT = 80000

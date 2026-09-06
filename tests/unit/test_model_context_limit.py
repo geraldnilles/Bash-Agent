@@ -1,16 +1,21 @@
 """
-Model-specific context limit (implements ROADMAP 'Model Specific Context Limit').
+Model-specific context budget (implements ROADMAP 'Model Specific Context Limit').
 
-Replace the fixed character-based ceiling with one that is a fraction of
-the selected model's reported context_length (tokens) from the OpenRouter
-/models catalog:
+Replace the fixed character-based ceiling with one derived from the
+selected model's reported context_length (tokens) from the OpenRouter
+/models catalog. Text is counted with the model's real local tokenizer
+(not a chars/8 heuristic).
 
-    context_limit_tokens = int(context_length_tokens / 4)
+By default the per-session budget is a quarter of the model's usable
+context window:
 
-Text is counted with the model's real local tokenizer (not a chars/8
-heuristic). The /4 keeps the agent comfortably under the model's usable
-window, leaving generous headroom for its own output, tool-call shaping
-and API overhead.
+    default_context_budget = int(context_length_tokens / 4)
+
+That keeps the agent comfortably under the window, leaving headroom for
+its own output, tool-call shaping and API overhead. The fraction (or an
+exact token count) can be overridden with the `token_budget` constructor
+arg / `--token-budget` CLI flag (absolute tokens like "256K", or a
+percentage of the model window like "50%").
 
 Contract pinned here:
 
@@ -22,13 +27,14 @@ Contract pinned here:
       (existing pruning / warning tests stay valid unchanged).
 
   Agent
-    * _fetch_model_context_limit() derives int(ctx_tokens / 4) into
-      model_context_limit_tokens from the catalog entry whose id ==
-      self.model, stores the full window in model_full_context_tokens, or
-      sets both None on catalog failure / model miss (so __init__ always
-      has a safe fallback).
-    * __init__ resolves self.context_limit (None -> config.CONTEXT_LIMIT)
-      and hands it to ContextManager so pruning matches the model.
+    * _fetch_model_context_limit() records ONLY the model's full window in
+      model_full_context_tokens from the catalog entry whose id ==
+      self.model; leaves it None on catalog failure / model miss.
+    * token_budget / parse_token_budget / resolve_budget turn an override
+      (or the default quarter) into self.context_limit, which __init__
+      hands to ContextManager so pruning matches the model.
+    * self.model_context_limit_tokens is retained as the default quarter
+      (None when the window is unknown).
 
 Seams (offline only): ContextManager tests pass the ceiling directly; Agent
 tests stub the three network probes exactly like helpers._make_agent.
@@ -138,7 +144,7 @@ class InstanceLimitCase(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class AgentContextDerivationCase(unittest.TestCase):
-    """_fetch_model_context_limit math and None-fallback."""
+    """_fetch_model_context_limit: records only the FULL window, None-fallback."""
 
     def setUp(self):
         self._chdir_cm = chdir_tmp()
@@ -151,28 +157,25 @@ class AgentContextDerivationCase(unittest.TestCase):
     def _catalog(self, context_length):
         return [{"id": self.agent.model, "context_length": context_length}]
 
-    def test_derives_quarter_model_window(self):
+    def test_records_full_window(self):
         self.agent._get_models_catalog = lambda: self._catalog(4096)
         self.agent._fetch_model_context_limit()
-        self.assertEqual(
-            self.agent.model_context_limit_tokens,
-            int(4096 / 4),   # 1024 tokens
-        )
+        self.assertEqual(self.agent.model_full_context_tokens, 4096)
 
     def test_catalog_miss_sets_none(self):
         self.agent._get_models_catalog = lambda: [{"id": "other/model"}]
         self.agent._fetch_model_context_limit()
-        self.assertIsNone(self.agent.model_context_limit_tokens)
+        self.assertIsNone(self.agent.model_full_context_tokens)
 
     def test_empty_catalog_sets_none(self):
         self.agent._get_models_catalog = lambda: []
         self.agent._fetch_model_context_limit()
-        self.assertIsNone(self.agent.model_context_limit_tokens)
+        self.assertIsNone(self.agent.model_full_context_tokens)
 
     def test_missing_context_length_field_sets_none(self):
         self.agent._get_models_catalog = lambda: [{"id": self.agent.model}]
         self.agent._fetch_model_context_limit()
-        self.assertIsNone(self.agent.model_context_limit_tokens)
+        self.assertIsNone(self.agent.model_full_context_tokens)
 
 
 class AgentConstructorWiringCase(unittest.TestCase):
@@ -191,26 +194,61 @@ class AgentConstructorWiringCase(unittest.TestCase):
         self.assertEqual(agent.context_limit, MODULE_CONTEXT_LIMIT)
         self.assertEqual(agent.context.context_limit, agent.context_limit)
 
-    def test_resolved_limit_is_passed_to_context_manager(self):
-        # Replicate _make_agent scaffolding but with a context stub that
-        # reports a real derived ceiling (e.g. 4096 tokens -> 1024 budget tokens).
+    @staticmethod
+    def _build_agent(token_budget=None, full_window=4096):
+        """Construct an Agent offline with a REAL full-window probe result."""
         from bash_agent.agent import Agent
         from tests.helpers.fakes import FakeSandbox
 
-        def custom_ctx(self):
-            self.model_context_limit_tokens = int(4096 / 4)
-            self.model_full_context_tokens = 4096
+        def full_ctx(self):
+            self.model_full_context_tokens = full_window
 
         with mock.patch.object(Agent, "_check_model_capabilities", return_value=None):
             with mock.patch.object(Agent, "_fetch_model_reasoning_info", _custom_full_reasoning):
-                with mock.patch.object(Agent, "_fetch_model_context_limit", custom_ctx):
+                with mock.patch.object(Agent, "_fetch_model_context_limit", full_ctx):
                     with mock.patch("bash_agent.agent.cleanup_tmp_folder", return_value=None):
-                        agent = Agent()
+                        agent = Agent(token_budget=token_budget)
         agent.sandbox = FakeSandbox()
+        return agent
 
-        self.assertEqual(agent.context_limit, 1024)
-        self.assertEqual(agent.context.context_limit, 1024)
+    def test_default_uses_quarter_of_full_window(self):
+        # 4096-token window -> default quarter is 1024 budget tokens.
+        agent = self._build_agent()
+        self.assertEqual(agent.context_limit, int(4096 / 4))   # 1024
         self.assertEqual(agent.context.context_limit, agent.context_limit)
+
+    def test_percentage_budget_resolved_from_full_window(self):
+        # 4096 * 0.50 -> 2048
+        agent = self._build_agent(token_budget="50%")
+        self.assertEqual(agent.context_limit, 2048)
+        self.assertEqual(agent.context.context_limit, 2048)
+
+        # percentage is strict upper bound: 100% == full window.
+        full = self._build_agent(token_budget="100%", full_window=4096)
+        self.assertEqual(full.context_limit, 4096)
+
+    def test_absolute_budget_independent_of_window(self):
+        agent = self._build_agent(token_budget="256k")
+        self.assertEqual(agent.context_limit, 256_000)
+        # suffix K is decimal (10^3); M likewise.
+        agent_m = self._build_agent(token_budget="1M", full_window=4096)
+        self.assertEqual(agent_m.context_limit, 1_000_000)
+
+    def test_absolute_budget_survives_offline_fallback(self):
+        # Even without a model window, an absolute override still applies.
+        agent = _make_agent(token_budget="512K")
+        self.assertEqual(agent.context_limit, 512_000)
+
+    def test_bare_int_budget_works(self):
+        agent = self._build_agent(token_budget=8192)
+        self.assertEqual(agent.context_limit, 8192)
+
+    def test_invalid_budget_raises_at_construction(self):
+        from bash_agent.token_budget import parse_token_budget
+        with self.assertRaises(ValueError):
+            parse_token_budget("0%")
+        with self.assertRaises(ValueError):
+            parse_token_budget("bogus")
 
 
 def _custom_full_reasoning(self):

@@ -28,6 +28,7 @@ bash_agent/
 ├── search.py        # Semantic code search (embeddings + reranking)
 ├── vision.py        # Image analysis via LLM (native multimodal or fallback)
 ├── transcribe.py    # Audio transcription via LLM (native multimodal or fallback)
+├── token_budget.py  # --token-budget parsing/derivation (absolute tokens or % of model window)
 ├── sfx.py           # Subtle sound FX — programmatic wav synthesis (PipeWire: pw-play/paplay)
 └── memo.py          # Voice memo recording (PipeWire + ffmpeg)
 ```
@@ -61,7 +62,7 @@ This is the heart of the project. The `Agent` class:
 
 | Method | Purpose |
 |--------|---------|
-| `__init__()` | Sets up UUID, model, sandbox, context, budget. Handles `--resume`. Resolves the model's context ceiling and passes it to `ContextManager` (see `_fetch_model_context_limit`). |
+| `__init__()` | Sets up UUID, model, sandbox, context, budget. Handles `--resume`. Resolves the model's context ceiling — by default a quarter of the model's `context_length`, overridable via the `token_budget`/`--token-budget` arg — and passes it to `ContextManager` (see `_fetch_model_context_limit` / `token_budget.py`). |
 | `run(initial_task)` | The main loop. Sends prompts, parses responses, executes commands. |
 | `_run_warmup_exchanges()` | Protocol warmup: on FRESH sessions only (`--resume` skips it), pre-fills history with two scripted assistant turns from the `WARMUP_TURNS` constant (a PYTHON version check plus a listing of all installed 3rd-party PyPI packages, then a BASH `ls -la`). Each template is parsed via the production `_extract_blocks()` (raises if it ever fails to parse) and executed via `_execute_script()`, so the injected transcript is byte-for-byte identical in format to a live exchange. Called from `run()` right after the initial task is committed. |
 | `parse_and_execute(agent_msg)` | Coordination pipeline: extracts blocks via `_extract_blocks()`, dispatches each to `_handle_special_command()` or `_execute_script()`, enforces `MAX_CODE_BLOCKS` limit, and commits results via `_commit_execution_feedback()`. Returns `(executed: bool, feedback: str)`. |
@@ -72,7 +73,7 @@ This is the heart of the project. The `Agent` class:
 | `_get_models_catalog()` | Fetches & caches the OpenRouter `/api/v1/models` catalog for ~1h. Returns a list of model dicts, or `[]` on API failure so callers fall back to safe defaults. Sharing one HTTP request across the multimodal/reasoning/context probes avoids three API calls at startup. |
 | `_check_model_capabilities()` | Queries the OpenRouter models API to determine the model's supported input modalities. Sets `self.multimodal_capabilities` to a list like `["image"]`, or `None` for text-only models (or if the probe fails). |
 | `_fetch_model_reasoning_info()` | Queries the OpenRouter models API for the model's reasoning support and sets `reasoning_supported_efforts`, `reasoning_mandatory`, `reasoning_default_effort`. Falls back to permissive defaults on network failure. |
-| `_fetch_model_context_limit()` | Queries the OpenRouter models API for the model's `context_length` (tokens) and sets `model_context_limit_tokens = int(context_length_tokens / 4)` plus `model_full_context_tokens`. The session budget is a QUARTER of the true model window in TOKENS. Both stay `None` on any failure/model miss so `__init__` falls back to `config.CONTEXT_LIMIT`. |
+| `_fetch_model_context_limit()` | Queries the OpenRouter models API for the model's `context_length` (tokens) and stores it on `model_full_context_tokens`. `__init__` then feeds that full window into `resolve_budget()` (plus the optional `--token-budget` override) to compute `self.context_limit`; with no override the budget defaults to a QUARTER of the window. On any failure/model miss the window stays `None` so `resolve_budget()` falls back to `config.CONTEXT_LIMIT` (or the equivalent percentage of the presumed default window). |
 
 **The fenced-block regex pattern** (used in `_extract_blocks`):
 - Bash: `---START_BASH_COMMAND-{uuid}---\n(.*?)\n---END_BASH_COMMAND-{uuid}---`
@@ -112,7 +113,7 @@ All tunable constants. **Modify this file to change defaults.**
 | Constant | Default | Where Used |
 |----------|---------|------------|
 | `DEFAULT_MODEL` | `"deepseek/deepseek-v4-pro"` | `agent.py` — fallback model |
-| `CONTEXT_LIMIT` | 327,680 tokens (fallback) | `context.py` — *fallback* TOKEN ceiling (¼ of the 1,310,720-token DeepSeek v4 flash window). The runtime ceiling is normally model-derived (`context_length / 4`) by `agent.py`; this constant is only used when the OpenRouter probe fails or the model isn't catalogued. |
+| `CONTEXT_LIMIT` | 327,680 tokens (fallback) | `context.py` / `token_budget.py` — *fallback* TOKEN ceiling (¼ of the 1,310,720-token DeepSeek v4 flash window). The runtime ceiling is normally model-derived by `agent.py` (`resolve_budget()`), optionally overridden via `--token-budget`. This constant (×4, the presumed default full window) is only used when the probe fails or the model isn't catalogued. |
 | `CONTEXT_WARN_PERCENT` | 99% | `context.py` — % of the *instance* `context_limit` at which the one-time SCRATCHPAD-backup warning is injected |
 | `SCRATCHPAD_LIMIT` | 80,000 chars | `context.py` — scratchpad truncation warning |
 | `OUTPUT_LIMIT` | 10,000 chars | `agent.py` — output block truncation |
@@ -372,7 +373,7 @@ Agent.run() loop
 
 Settings resolve independently per key: CLI flag > `.bash_agent_tmp/config.json` > environment variable > hard-coded default.
 
-1. CLI flags (`--model`, `--max-tokens`, `--reasoning-effort`) — always win
+1. CLI flags (`--model`, `--max-tokens`, `--reasoning-effort`, `--token-budget`) — always win
 2. Optional persistent file `.bash_agent_tmp/config.json` (loaded by `config_file.py`; survives tmp-folder cleanup)
 3. `OPENROUTER_MODEL` environment variable (model key only)
 4. Hard-coded defaults in `config.py` (`DEFAULT_MODEL`, `DEFAULT_MAX_TOKENS`; reasoning defaults to off)
