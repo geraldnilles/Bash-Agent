@@ -7,8 +7,6 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
 ## In Progress / High Priority
 
 - **Improved error recovery:** Better handling of API failures, model glitches, and safety filters with more graceful fallback strategies.
-- **Use Tokens for Context Limit:** DONE — conversation accounting now uses real tokens via bash_agent.tokenizer.count_tokens. Marking complete; left as historical marker. 
-
 
 ---
 

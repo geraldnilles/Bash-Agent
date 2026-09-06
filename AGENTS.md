@@ -30,6 +30,7 @@ bash_agent/
 ├── vision.py        # Image analysis via LLM (native multimodal or fallback)
 ├── transcribe.py    # Audio transcription via LLM (native multimodal or fallback)
 ├── token_budget.py  # --token-budget parsing/derivation (absolute tokens or % of model window)
+├── ignore.py        # gitignore-style glob matcher shared by --copy-project/--include/--ignore
 ├── sfx.py           # Subtle sound FX — programmatic wav synthesis (PipeWire: pw-play/paplay)
 └── memo.py          # Voice memo recording (PipeWire + ffmpeg)
 ```
@@ -258,7 +259,7 @@ Generates the massive system prompt that defines the agent's behavior. Key funct
 | Function | Purpose |
 |----------|---------|
 | `cleanup_tmp_folder()` | Removes contents of `.bash_agent_tmp/` except protected files (SCRATCHPAD.md, ROLE.md, vim_prompt.tmp, embeddings.json, search_disabled, history.json, clipboard_blacklist.txt, config.json) |
-| `copy_project_to_clipboard(files, ignore=None)` | Copies project files to system clipboard as XML-like tagged format; `ignore` is a comma-separated list of glob patterns (files/dirs) to exclude |
+| `copy_project_to_clipboard(file_paths=None, ignore=None, include=None)` | Copies project files to system clipboard as XML-like tagged format. `file_paths`/`include` and `ignore` accept **gitignore-syntax globs** (implemented by the shared `bash_agent.ignore.GitIgnoreMatcher`); `.gitignore`, clipboard blacklist, and user ignores are flattened into one last-match-wins rule list. `--files` is a deprecated alias of the `include` param. |
 | `get_clipboard_content()` | Reads from system clipboard (supports xclip, wl-paste, pbpaste) |
 | `get_vim_prompt()` | Reads user input from a temporary vim file |
 | `is_binary_file(file_path)` | Checks if a file is binary (by extension or null byte detection) |

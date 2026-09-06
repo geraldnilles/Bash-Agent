@@ -1,7 +1,6 @@
 import os
 from bash_agent.prompts import COPY_PROJECT_PREFIX, COPY_PROJECT_SUFFIX
 import subprocess
-import fnmatch
 
 def cleanup_tmp_folder():
     """Delete all contents of .bash_agent_tmp/ folder."""
@@ -65,180 +64,185 @@ def is_binary_file(file_path):
         return True
 
 
-def _matches_any_ignore(path, patterns):
-    """Return True if path (or its basename) matches any glob pattern."""
-    return any(fnmatch.fnmatch(path, p) or fnmatch.fnmatch(os.path.basename(path), p) for p in patterns)
+def _parse_glob_list(s):
+    """Split a comma/space separated glob list, trimming empties."""
+    parts = s.replace(",", " ").split()
+    return [p for p in parts if p]
 
-def copy_project_to_clipboard(file_paths=None, ignore=None):
+
+def copy_project_to_clipboard(file_paths=None, ignore=None, include=None):
     """
-    Copies files in the working directory to the clipboard, 
-    respecting .gitignore and excluding .git, .bash_agent_tmp, and
-    any additional user-supplied ignore patterns.
+    Copies project files to the clipboard as XML-like tagged blocks.
+
+    Selection is unified around gitignore-style glob patterns (the same
+    syntax .gitignore uses). include ("--files"/"--include"), ignore,
+    `.gitignore` contents, and the clipboard blacklist all use git's exact
+    matching rules:
+
+      *   matches any characters except '/'
+      **  crosses directory boundaries
+      ?   matches a single non-'/' character
+      [..] character class; [!/^..] negates
+      trailing '/'  -> directory-only
+      leading '/' or pattern containing '/' -> anchored to repo root
+      pattern without '/' -> matches at any depth
+      !pattern      -> negation
+
+    The ignore layers (.gitignore, clipboard blacklist, user --ignore) are
+    MERGED into ONE ordered rule list with the user's patterns LAST and
+    git's last-match-wins applied across all of them. The layers are treated
+    as a single source, NOT as independent precedence tiers: a user
+    `!pattern` (a later rule) can re-include a file that `.gitignore`
+    excluded, just as a later .gitignore rule can re-include an earlier one.
+    This is intentionally simpler than git's per-file-then-per-source
+    hierarchy: with one list, the rule you wrote LAST always decides.
 
     Args:
-        file_paths: Optional comma-separated string of specific file paths to copy.
-                   If None, copies the entire directory.
-        ignore: Optional comma-separated string of glob patterns (files or
-                directories) to exclude from the copy, e.g. "*.log,node_modules".
-                Patterns are matched against the path relative to the working
-                directory and against the basename.
+        file_paths: Glob patterns of files to COPY (gitignore syntax), e.g.
+                    "src/**/*.py,README.md". A file is copied if it matches
+                    ANY pattern. If None, copies the whole project.
+        ignore:     Glob patterns to EXCLUDE, e.g. "*.log,build/". Applied on
+                    top of `.gitignore` and the clipboard blacklist. '!'
+                    re-includes.
+        include:    Alias for file_paths (the --include CLI flag).
     """
-    import subprocess
-    import fnmatch
+    from bash_agent.ignore import GitIgnoreMatcher, patterns_from_file
 
     output = []
 
-    # Load optional clipboard blacklist patterns
-    blacklist_patterns = set()
-    blacklist_path = os.path.abspath(os.path.join(os.getcwd(), ".bash_agent_tmp", "clipboard_blacklist.txt"))
-    if os.path.exists(blacklist_path):
-        with open(blacklist_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    blacklist_patterns.add(line)
+    # --- Internals (never overridable, even by '!') -------------------------
+    always = GitIgnoreMatcher([".git/", ".bash_agent_tmp/"])
 
-    # Parse extra ignore patterns (e.g. "--ignore '*.log,node_modules'")
-    extra_ignore_patterns = set()
-    if ignore:
-        for p in ignore.split(','):
-            p = p.strip()
-            if p:
-                extra_ignore_patterns.add(p)
-    
-    # Parse file_paths if provided
-    specific_files = None
+    # --- Per-layer matchers (kept for diagnostics) --------------------------
+    gitignore_pats = patterns_from_file(".gitignore")
+    blacklist_pats = patterns_from_file(os.path.join(
+        os.getcwd(), ".bash_agent_tmp", "clipboard_blacklist.txt"))
+    user_pats = _parse_glob_list(ignore or "")
+
+    gitignore = GitIgnoreMatcher(gitignore_pats)
+    blacklist = GitIgnoreMatcher(blacklist_pats)
+    usrign = GitIgnoreMatcher(user_pats)
+
+    # --- Merged matcher: last-match-wins across the whole flattening -------
+    # Order: .gitignore, blacklist, then user --ignore (user wins ties, and a
+    # user '!pattern' can re-include a file .gitignore excluded).
+    ignore_rules = GitIgnoreMatcher(gitignore_pats + blacklist_pats + user_pats)
+
+    # --- Optional include masks --------------------------------------------
+    if file_paths is None:
+        file_paths = include
+    inc = None
+    inc_pats = None
     if file_paths:
-        specific_files = [p.strip() for p in file_paths.split(',') if p.strip()]
-        print(f"Copying specific files: {specific_files}")
+        inc_pats = _parse_glob_list(file_paths)
+        inc = GitIgnoreMatcher(inc_pats, include_mode=True)
+        print(f"Copying files matching: {inc_pats}")
 
-    ignore_patterns = {".git", ".bash_agent_tmp"} | extra_ignore_patterns
+    root_dir = os.getcwd()
 
-    # 0. Get directory tree structure using tree --gitignore (only if copying entire project)
-    if specific_files is None:
-        # Build tree args, adding explicit --prune for each extra ignore pattern
+    def ignored_reason(rel, is_dir):
+        """'--ignore' | 'blacklist' | '.gitignore' | 'always' | None.
+
+        Decision comes from the MERGED matcher (last-match-wins); the layer
+        named is the highest-precedence one that alone also excludes it,
+        which is consistent because user patterns are appended LAST.
+        """
+        if always.match(rel, is_dir) is False:
+            return "always"
+        if ignore_rules.match(rel, is_dir) is not False:
+            return None  # not excluded (e.g. user '!' re-included it)
+        for label, m in (("--ignore", usrign),
+                         ("blacklist", blacklist),
+                         (".gitignore", gitignore)):
+            if m.match(rel, is_dir) is False:
+                return label
+        return None
+
+    def emit_file(rel_path, full_path):
+        if is_binary_file(full_path):
+            print(f"Warning: Binary file skipped: {rel_path}")
+            return False
+        try:
+            with open(full_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except UnicodeDecodeError:
+            print(f"Warning: Binary file skipped: {rel_path}")
+            return False
+        except PermissionError:
+            print(f"Warning: Permission denied: {rel_path}")
+            return False
+        output.append(f'<file path="{rel_path}">\n{content}\n</file>')
+        return True
+
+    # --- 0. Directory tree (full-project copies only) -----------------------
+    if inc is None:
         tree_filter_args = ["tree", "--gitignore"]
-        for p in sorted(extra_ignore_patterns):
+        for p in sorted(user_pats):
             tree_filter_args += ["-I", p]
-        if extra_ignore_patterns:
+        if ignore:
             tree_filter_args += ["--prune"]
         try:
-            tree_result = subprocess.run(tree_filter_args, capture_output=True, text=True)
-            if tree_result.returncode == 0:
-                output.append("=== DIRECTORY TREE ===")
-                output.append(tree_result.stdout)
-            else:
-                output.append("=== DIRECTORY TREE ===")
-                output.append("(tree command not available or failed)")
+            tree_result = subprocess.run(tree_filter_args,
+                                         capture_output=True, text=True)
+            output.append("=== DIRECTORY TREE ===")
+            output.append(tree_result.stdout if tree_result.returncode == 0
+                          else "(tree command failed)")
         except FileNotFoundError:
             output.append("=== DIRECTORY TREE ===")
             output.append("(tree command not installed)")
 
-    # 1. Determine ignore patterns from .gitignore
-    gitignore_path = ".gitignore"
-    if os.path.exists(gitignore_path):
-        with open(gitignore_path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    ignore_patterns.add(line)
-
-    root_dir = os.getcwd()
-
-    # 2. Copy files
-    if specific_files:
-        # Copy only the specified files
-        for path in specific_files:
-            full_path = os.path.abspath(os.path.join(root_dir, path))
-            rel_path = os.path.relpath(full_path, root_dir)
-            
-            if not os.path.exists(full_path):
-                print(f"Warning: File not found: {rel_path}")
+    # --- 1. Walk & emit ------------------------------------------------------
+    files_seen = []
+    for root, dirs, files in os.walk(root_dir):
+        kept = []
+        for d in dirs:
+            rel_d = os.path.relpath(os.path.join(root, d), root_dir)
+            if ignored_reason(rel_d, is_dir=True) is not None:
                 continue
-            
-            if not os.path.isfile(full_path):
-                print(f"Warning: Not a file: {rel_path}")
-                continue
-            
-            # Check if file matches any ignore pattern (user --ignore first)
-            if _matches_any_ignore(rel_path, extra_ignore_patterns):
-                print(f"Warning: Ignored by --ignore pattern: {rel_path}")
+            kept.append(d)
+        dirs[:] = kept
+
+        for file in files:
+            rel_path = os.path.relpath(os.path.join(root, file), root_dir)
+            files_seen.append(rel_path)
+
+            if inc is not None and inc.match(rel_path, is_dir=False) is not True:
                 continue
 
-            # Check if file matches any .gitignore/blacklist pattern
-            if _matches_any_ignore(rel_path, ignore_patterns):
-                print(f"Warning: Ignored by .gitignore pattern: {rel_path}")
+            reason = ignored_reason(rel_path, is_dir=False)
+            if reason is None:
+                emit_file(rel_path, os.path.join(root, file))
                 continue
 
-            # Check if file matches any clipboard blacklist pattern
-            if _matches_any_ignore(rel_path, blacklist_patterns):
+            # Diagnostics: blacklist surfaces in BOTH modes; .gitignore and
+            # --ignore only in subset mode (so full-project stays quiet).
+            if reason == "blacklist":
                 print(f"Info: Ignored by clipboard blacklist: {rel_path}")
-                continue
-            
-            # New binary guard check
-            if is_binary_file(full_path):
-                print(f"Warning: Binary file skipped: {rel_path}")
-                continue
-            try:
-                with open(full_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                output.append(f'<file path="{rel_path}">\n{content}\n</file>')
-            except UnicodeDecodeError:
-                print(f"Warning: Binary file skipped: {rel_path}")
-                continue
-            except PermissionError:
-                print(f"Warning: Permission denied: {rel_path}")
-                continue
-    else:
-        # Walk the directory (original behavior)
-        for root, dirs, files in os.walk(root_dir):
-            # Modify dirs in-place to prevent os.walk from descending into
-            # ignored directories (.gitignore + user --ignore patterns)
-            dirs[:] = [d for d in dirs if not any(fnmatch.fnmatch(d, p) for p in ignore_patterns) and not _matches_any_ignore(os.path.relpath(os.path.join(root, d), root_dir), extra_ignore_patterns)]
-            
-            for file in files:
-                full_path = os.path.join(root, file)
-                rel_path = os.path.relpath(full_path, root_dir)
-                
-                # Check if file matches any user --ignore pattern
-                if _matches_any_ignore(rel_path, extra_ignore_patterns):
-                    continue
+            elif inc is not None:
+                if reason == ".gitignore":
+                    print(f"Warning: Ignored by .gitignore pattern: {rel_path}")
+                elif reason == "--ignore":
+                    print(f"Warning: Ignored by --ignore pattern: {rel_path}")
 
-                # Check if file matches any .gitignore pattern
-                if _matches_any_ignore(rel_path, ignore_patterns):
-                    continue
+    # Unmatched include patterns -> "File not found" warning (subset mode).
+    if inc is not None:
+        for pat in inc_pats:
+            m = GitIgnoreMatcher([pat], include_mode=True)
+            if not any(m.match(f, is_dir=False) is True for f in files_seen):
+                print(f"Warning: File not found: {pat}")
 
-                # Check if file matches any clipboard blacklist pattern
-                if _matches_any_ignore(rel_path, blacklist_patterns):
-                    print(f"Info: Ignored by clipboard blacklist: {rel_path}")
-                    continue
-                
-                # New binary guard check
-                if is_binary_file(full_path):
-                    print(f"Warning: Binary file skipped: {rel_path}")
-                    continue
-                try:
-                    with open(full_path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    output.append(f'<file path="{rel_path}">\n{content}\n</file>')
-                except (UnicodeDecodeError, PermissionError):
-                    # Skip binary files or inaccessible files
-                    continue
+    full_text = (COPY_PROJECT_PREFIX + "\n\n" + "\n\n".join(output)
+                 + "\n\n" + COPY_PROJECT_SUFFIX)
 
-    full_text = COPY_PROJECT_PREFIX + "\n\n" + "\n\n".join(output) + "\n\n" + COPY_PROJECT_SUFFIX
-
-    # 3. Copy to clipboard
+    # --- 2. Copy to clipboard ------------------------------------------------
     try:
-        # Try wl-copy first
         subprocess.run(["wl-copy"], input=full_text, text=True, check=True)
     except (FileNotFoundError, subprocess.CalledProcessError):
         try:
-            # Fallback to xclip
-            subprocess.run(["xclip", "-selection", "clipboard"], input=full_text, text=True, check=True)
+            subprocess.run(["xclip", "-selection", "clipboard"],
+                           input=full_text, text=True, check=True)
         except (FileNotFoundError, subprocess.CalledProcessError) as e:
             print(f"Error copying to clipboard: {e}")
-
-
 
 
 def get_vim_prompt(prompt_text: str = "OBJECTIVE:") -> str:

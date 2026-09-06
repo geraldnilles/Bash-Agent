@@ -123,8 +123,8 @@ The following are special commands that are intercepted by the agent harness and
 4. `ask-user <question>`
    - Pauses execution to display a custom question, clarification request, or preference to the human user.
    - Captures and returns their textual response.”
-5. `copy-to-clipboard <file1>, <file2>, ...`
-   - Copies the specified comma-separated file paths to the system clipboard formatted as XML-like tags and immediately exits the session.
+5. `copy-to-clipboard <glob1>, <glob2>, ... [--ignore <glob>...]`
+   - Copies matching project files to the system clipboard formatted as XML-like tags, then immediately exits the session. Patterns use gitignore syntax (e.g. `src/**/*.py,README.md`); without patterns the whole project is copied. `--ignore` excludes more globs on top of `.gitignore` (e.g. `copy-to-clipboard --ignore *.log,build/`).
 
 ================================================================
 ## FILE MODIFICATION & ENVIRONMENT

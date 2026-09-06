@@ -96,7 +96,7 @@ class TestParseArgDefaults(unittest.TestCase):
         self.assertFalse(args.commit)
         self.assertFalse(args.resume)
         self.assertFalse(args.copy_project)
-        self.assertIsNone(args.files)
+        self.assertIsNone(args.include)  # --files is an alias for --include
         self.assertIsNone(args.ignore)
 
     def test_flag_mapping(self):

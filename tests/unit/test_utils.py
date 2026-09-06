@@ -256,9 +256,10 @@ class CopyProjectCase(UtilsCase):
         make_file(".bash_agent_tmp/clipboard_blacklist.txt",
                   "# comment line\nblacklisted.txt\n")
 
-    def run_copy(self, recorder, file_paths=None, ignore=None):
+    def run_copy(self, recorder, file_paths=None, ignore=None, include=None):
         with mock.patch("subprocess.run", recorder):
-            copy_project_to_clipboard(file_paths=file_paths, ignore=ignore)
+            copy_project_to_clipboard(file_paths=file_paths, ignore=ignore,
+                                      include=include)
 
     def expected_block(self, rel_path):
         """The exact <file> element production must emit for rel_path."""
@@ -411,3 +412,82 @@ class TestIgnorePatterns(CopyProjectCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGlobInclude(CopyProjectCase):
+    """--include/--files now accept gitignore-syntax globs, not just literals."""
+
+    def test_glob_include_selects_subtree(self):
+        rec = ClipboardRecorder()
+        self.run_copy(rec, file_paths="nested/**.txt")
+
+        text = rec.clipboard[0]
+        self.assertIn(self.expected_block("nested/deep.txt"), text)
+        self.assertNotIn(self.expected_block("a.txt"), text)
+        self.assertNotIn("=== DIRECTORY TREE ===", text)   # subset -> no tree
+
+    def test_glob_include_any_depth(self):
+        rec = ClipboardRecorder()
+        self.run_copy(rec, file_paths="*.txt")
+
+        text = rec.clipboard[0]
+        # *.txt no slash -> matches basename at any depth
+        self.assertIn(self.expected_block("nested/deep.txt"), text)
+        self.assertIn(self.expected_block("a.txt"), text)
+        self.assertNotIn(self.expected_block("debug.log"), text)
+
+    def test_multiple_globs_union(self):
+        rec = ClipboardRecorder()
+        self.run_copy(rec, file_paths="nested/**,a.txt")
+
+        text = rec.clipboard[0]
+        self.assertIn(self.expected_block("nested/deep.txt"), text)
+        self.assertIn(self.expected_block("a.txt"), text)
+        self.assertNotIn(self.expected_block("secret.txt"), text)  # still gitignored
+
+    def test_unmatched_glob_warns_file_not_found(self):
+        rec = ClipboardRecorder()
+        self.run_copy(rec, file_paths="missing/*.py")
+
+        out = self.stdout_text()
+        self.assertIn("Warning: File not found: missing/*.py", out)
+        # Clipboard still wraps prefix/suffix, but contains no file tags.
+        self.assertTrue(rec.clipboard_text().startswith(COPY_PROJECT_PREFIX))
+        self.assertNotIn("<file path=", rec.clipboard_text())
+
+
+class TestGitignoreStyleIgnore(CopyProjectCase):
+    """--ignore uses gitignore syntax: trailing-slash dirs and '!' negation."""
+
+    def test_trailing_slash_dir_ignore(self):
+        # fnmatch-era bug: "build/" dir pattern never matched. Now it prunes.
+        rec = ClipboardRecorder()
+        make_file("build/app.o", "obj\n")
+        self.run_copy(rec, ignore="build/")
+
+        text = rec.clipboard[0]
+        self.assertNotIn(self.expected_block("build/app.o"), text)
+        self.assertIn(self.expected_block("a.txt"), text)
+
+    def test_negation_reincludes_ignored_file(self):
+        rec = ClipboardRecorder()
+        # .gitignore already excludes *.log; "!important.log" re-includes
+        make_file("important.log", "keep me\n")
+        self.run_copy(rec, ignore="*.log,!important.log")
+
+        text = rec.clipboard[0]
+        self.assertIn(self.expected_block("important.log"), text)
+        self.assertNotIn(self.expected_block("debug.log"), text)
+
+
+class TestIncludeAliasAcrossModes(CopyProjectCase):
+    """include= is the CLI alias wiring; behaves identically to file_paths."""
+
+    def test_include_parameter_equivalent(self):
+        rec1 = ClipboardRecorder()
+        rec2 = ClipboardRecorder()
+        self.run_copy(rec1, file_paths="a.txt")
+        self.run_copy(rec2, include="a.txt")
+
+        self.assertEqual(rec1.clipboard[0], rec2.clipboard[0])
+

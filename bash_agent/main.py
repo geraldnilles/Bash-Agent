@@ -41,9 +41,18 @@ def parse_args():
     parser.add_argument("-b", "--budget", type=float, default=0.10, help="Total session cost budget in USD (default: 0.10)")
     parser.add_argument("--commit", action="store_true", help="Resume the last session and create a git commit message for the changes.")
     parser.add_argument("-r","--resume", action="store_true", help="Restore the history from the last agent conversation and append the new prompt.")
-    parser.add_argument("-c", "--copy-project", action="store_true", help="Copy project to clipboard and exit")
-    parser.add_argument("--files", type=str, default=None, help="Comma-separated list of file paths to copy (use with --copy-project)")
-    parser.add_argument("-i", "--ignore", type=str, default=None, help="Comma-separated glob patterns of files/directories to exclude (use with --copy-project)")
+    parser.add_argument("-c", "--copy-project", action="store_true",
+                        help="Copy project to clipboard and exit")
+    parser.add_argument("--include", "--files", dest="include", type=str,
+                        default=None,
+                        help="Glob patterns of files to copy (gitignore syntax; "
+                             "e.g. 'src/**/*.py,README.md'). Omit to copy the "
+                             "whole project. --files is an alias.")
+    parser.add_argument("-i", "--ignore", type=str, default=None,
+                        help="Glob patterns to exclude from the copy "
+                             "(gitignore syntax; e.g. '*.log,build/'). Applied "
+                             "on top of .gitignore and the clipboard blacklist. "
+                             "'!' negates.")
     return parser.parse_args()
 
 def main():
@@ -56,7 +65,7 @@ def main():
     
     # Check for --copy-project flag first (exits before LLM requests)
     if args.copy_project:
-        copy_project_to_clipboard(args.files, ignore=args.ignore)
+        copy_project_to_clipboard(args.include, ignore=args.ignore)
         print("Project copied to clipboard. Exiting.")
         sys.exit(0)
     

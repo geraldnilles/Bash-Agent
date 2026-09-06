@@ -245,8 +245,23 @@ Absolute counts accept an optional `K`/`M` suffix (metric: `256K` = 256,000 toke
 | `-r, --resume` | Restore previous session and continue |
 | `--commit` | Resume and auto-generate a git commit message |
 | `-c, --copy-project` | Copy project files to clipboard (for sharing with other AIs) |
-| `--files "a.py,b.py"` | Specific files for `--copy-project` |
-| `-i, --ignore "*.log,node_modules"` | Comma-separated glob patterns to exclude when using `--copy-project` |
+| `--include "<glob>,<glob>…"` | Files to copy, as gitignore-style globs (e.g. `src/**/*.py,README.md`). Omit to copy the whole project. `--files` is a deprecated alias. |
+| `-i, --ignore "*.log,build/"` | Glob patterns to exclude, gitignore syntax, applied on top of `.gitignore` and the clipboard blacklist. `!` re-includes. |
+
+`--include`/`--ignore` (and the in-agent `copy-to-clipboard`) share the
+**same gitignore syntax** as `.gitignore` so there's just one thing to learn:
+`*` never crosses `/`, `**` does, `?` matches a single non-`/` char, `[..]`
+character classes, a trailing `/` means directory-only, a leading `/` (or a
+pattern containing `/`) is anchored to the repo root, and a pattern without
+`/` matches at any depth. All ignore layers (`.gitignore`, clipboard
+blacklist, `--ignore`) are merged into one ordered rule list with
+last-match-wins, so a later `!pattern` re-includes whatever an earlier rule
+excluded. The agent command mirrors the CLI exactly:
+
+```
+copy-to-clipboard src/**/*.py,README.md            # glob include
+copy-to-clipboard --ignore *.log,build/            # whole project minus globs
+```
 
 See **[Persistent Project Configuration](#persistent-project-configuration)** below for per-project settings that outrank env vars but lose to these flags.
 

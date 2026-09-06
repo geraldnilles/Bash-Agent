@@ -470,10 +470,24 @@ class Agent:
             self.context._warning_confirmed = False
             return True, self._format_output(0, "Context history has been reset.", cmd_type)
 
-        if script.startswith("copy-to-clipboard "):
-            file_paths = script.split(" ", 1)[1]
-            print(f"\n[System] Agent requested to copy files to clipboard: {file_paths}")
-            copy_project_to_clipboard(file_paths)
+        if script == "copy-to-clipboard" or script.startswith("copy-to-clipboard "):
+            # Syntax: copy-to-clipboard <glob>,<glob>,... [--ignore <glob>,...]
+            #         copy-to-clipboard --ignore <glob>,...   (whole project minus ignores)
+            #         copy-to-clipboard                       (whole project)
+            parts = script.split()
+            spec = parts[1:] if len(parts) > 1 else []
+            ignore = None
+            if "--ignore" in spec:
+                i = spec.index("--ignore")
+                ignore = " ".join(spec[i + 1:])
+                spec = spec[:i]
+            file_paths = " ".join(spec) if spec else None
+            print(f"\n[System] Agent requested to copy files to clipboard: {file_paths or 'whole project'}"
+                  + (f" (ignore: {ignore})" if ignore else ""))
+            if ignore is None:
+                copy_project_to_clipboard(file_paths)
+            else:
+                copy_project_to_clipboard(file_paths, ignore=ignore)
             print("[System] Files copied to clipboard successfully. Exiting session.")
             self._log_debug_history()
             if _SFX_AVAILABLE:
