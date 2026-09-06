@@ -40,7 +40,8 @@ from bash_agent import main as main_module
 from tests.helpers.fakes import chdir_tmp
 
 
-def run_cli(argv, clipboard_value=None, clipboard_error=None):
+def run_cli(argv, clipboard_value=None, clipboard_error=None,
+            copy_return=None):
     """
     Invoke main_module.main() under patched sys.argv / collaborators.
 
@@ -53,6 +54,8 @@ def run_cli(argv, clipboard_value=None, clipboard_error=None):
         else:
             get_clip.return_value = clipboard_value
         with mock.patch.object(main_module, "copy_project_to_clipboard") as cp:
+            if copy_return is not None:
+                cp.return_value = copy_return
             with mock.patch.object(main_module, "Agent") as fake_agent_cls:
                 with mock.patch("sys.argv", argv):
                     with contextlib.redirect_stdout(stdout_buf), \
@@ -310,6 +313,50 @@ class TestCopyProjectFlag(unittest.TestCase):
         self.assertEqual(res["exit"].code, 0)
         res["copy_project"].assert_called_once_with("main.py",
                                                     ignore="tests,*.md")
+
+    def test_token_count_printed_for_copied_text(self):
+        # copy_project_to_clipboard returns the composed string -> the CLI
+        # prints the model-aware token count of that exact text.
+        sentinel = "This is the copied project text."
+        with mock.patch.object(main_module, "count_tokens",
+                               return_value=1234) as ct:
+            res = run_cli(["bagent", "--copy-project"], copy_return=sentinel)
+        self.assertEqual(res["exit"].code, 0)
+        ct.assert_called_once_with(sentinel, model="deepseek/deepseek-v4-flash-0731")
+        # count_tokens -> 1234 -> formatted with thousands sep as "1,234"
+        self.assertIn("1,234 tokens", res["stdout"])
+        self.assertIn("Project copied to clipboard. Exiting.", res["stdout"])
+
+    def test_token_count_uses_cli_model_argument(self):
+        sentinel = "abc"
+        with mock.patch.object(main_module, "count_tokens",
+                               return_value=7) as ct:
+            res = run_cli(["bagent", "--copy-project", "--model",
+                           "some/model-slug"], copy_return=sentinel)
+        self.assertEqual(res["exit"].code, 0)
+        ct.assert_called_once_with(sentinel, model="some/model-slug")
+        self.assertIn("some/model-slug", res["stdout"])
+        self.assertIn("7 tokens", res["stdout"])
+
+    def test_non_string_copy_result_still_exits_cleanly(self):
+        # If a collaborator returns None / non-str (e.g. no clipboard tool),
+        # the copy still exits 0 with the standard line and no token count.
+        with mock.patch.object(main_module, "count_tokens") as ct:
+            res = run_cli(["bagent", "--copy-project"], copy_return=None)
+        self.assertEqual(res["exit"].code, 0)
+        ct.assert_not_called()
+        self.assertIn("Project copied to clipboard. Exiting.", res["stdout"])
+        self.assertNotIn("token count", res["stdout"])
+
+    def test_token_count_graceful_on_counter_failure(self):
+        # A tokenizer failure must not block the copy-exit (exit stays 0).
+        with mock.patch.object(main_module, "count_tokens",
+                               side_effect=RuntimeError("boom")):
+            res = run_cli(["bagent", "--copy-project"], copy_return="text")
+        self.assertEqual(res["exit"].code, 0)
+        self.assertIn("Copied project token count: unavailable",
+                      res["stdout"])
+        self.assertIn("Project copied to clipboard. Exiting.", res["stdout"])
 
 
 if __name__ == "__main__":

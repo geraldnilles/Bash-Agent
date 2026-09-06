@@ -322,6 +322,20 @@ class TestFullProjectCopy(CopyProjectCase):
         self.assertEqual(len(rec.clipboard), 1)
         self.assert_common_wrapping(rec.clipboard[0])
 
+    def test_returns_composed_text(self):
+        # copy_project_to_clipboard returns the full composed string so the
+        # CLI can count its tokens without re-reading the clipboard.
+        rec = ClipboardRecorder()
+        with mock.patch("subprocess.run", rec):
+            text = copy_project_to_clipboard()
+        self.assertTrue(text.startswith(COPY_PROJECT_PREFIX))
+        self.assertTrue(text.endswith(COPY_PROJECT_SUFFIX))
+        self.assertIn(self.expected_block("a.txt"), text)
+        self.assertIn("=== DIRECTORY TREE ===", text)
+        # Clipboard still received it too.
+        self.assertEqual(len(rec.clipboard), 1)
+        self.assertEqual(rec.clipboard[0], text)
+
 
 class TestSubsetCopy(CopyProjectCase):
     """The comma-separated --files mode."""

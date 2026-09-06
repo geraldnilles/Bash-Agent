@@ -4,6 +4,9 @@ import sys
 import os
 import argparse
 from bash_agent.agent import Agent
+from bash_agent.config import DEFAULT_MODEL
+from bash_agent.config_file import load_config
+from bash_agent.tokenizer import count_tokens
 from bash_agent.utils import copy_project_to_clipboard, get_clipboard_content
 
 def _parse_token_budget_arg(value: str) -> str:
@@ -55,6 +58,27 @@ def parse_args():
                              "'!' negates.")
     return parser.parse_args()
 
+def _resolve_model(cli_model):
+    """Resolve the model to count tokens against for --copy-project.
+
+    Mirrors Agent.__init__'s precedence exactly:
+        CLI --model > .bash_agent_tmp/config.json > OPENROUTER_MODEL > DEFAULT_MODEL
+    Returns the model slug string (never None).
+    """
+    if cli_model:
+        return cli_model
+    try:
+        cfg = load_config()
+        if "model" in cfg:
+            return cfg["model"]
+    except Exception:
+        pass
+    env_model = os.environ.get("OPENROUTER_MODEL")
+    if env_model:
+        return env_model
+    return DEFAULT_MODEL
+
+
 def main():
     args = parse_args()
 
@@ -65,7 +89,19 @@ def main():
     
     # Check for --copy-project flag first (exits before LLM requests)
     if args.copy_project:
-        copy_project_to_clipboard(args.include, ignore=args.ignore)
+        text = copy_project_to_clipboard(args.include, ignore=args.ignore)
+        # Print the token count of the entire copied string as the selected
+        # model's tokenizer would see it (CLI > config.json > env > default).
+        if isinstance(text, str):
+            model = _resolve_model(args.model)
+            try:
+                n = count_tokens(text, model=model)
+            except Exception:
+                n = None
+            if n is not None:
+                print(f"Copied project token count ({model}): {n:,} tokens")
+            else:
+                print("Copied project token count: unavailable")
         print("Project copied to clipboard. Exiting.")
         sys.exit(0)
     

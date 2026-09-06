@@ -105,6 +105,11 @@ def copy_project_to_clipboard(file_paths=None, ignore=None, include=None):
                     top of `.gitignore` and the clipboard blacklist. '!'
                     re-includes.
         include:    Alias for file_paths (the --include CLI flag).
+
+    Returns:
+        str: The full composed clipboard text (prefix + file blocks +
+        directory tree + suffix), regardless of whether the clipboard write
+        succeeded.
     """
     from bash_agent.ignore import GitIgnoreMatcher, patterns_from_file
 
@@ -243,6 +248,8 @@ def copy_project_to_clipboard(file_paths=None, ignore=None, include=None):
                            input=full_text, text=True, check=True)
         except (FileNotFoundError, subprocess.CalledProcessError) as e:
             print(f"Error copying to clipboard: {e}")
+
+    return full_text
 
 
 def get_vim_prompt(prompt_text: str = "OBJECTIVE:") -> str:

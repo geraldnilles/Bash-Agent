@@ -37,7 +37,7 @@ bash_agent/
 
 ### Entry Point: `main.py`
 
-Parses all CLI flags (`-m`, `-p`, `--resume`, `--commit`, etc.), resolves the initial task (from args, clipboard, or stdin), instantiates `Agent`, and calls `agent.run(initial_task)`.
+Parses all CLI flags (`-m`, `-p`, `--resume`, `--commit`, etc.), resolves the initial task (from args, clipboard, or stdin), instantiates `Agent`, and calls `agent.run(initial_task)`. The `--copy-project` path short-circuits: it copies the project to the clipboard (via `copy_project_to_clipboard`), then prints the token count of the copied text as counted by the selected model's tokenizer (`bash_agent.tokenizer.count_tokens`, which the `_resolve_model` helper derives with the same CLI > config.json > `OPENROUTER_MODEL` > `DEFAULT_MODEL` precedence as `Agent.__init__`) before exiting 0.
 
 **Key responsibility:** Translate CLI flags into `Agent` constructor kwargs. Does NOT contain agent logic.
 
@@ -259,7 +259,7 @@ Generates the massive system prompt that defines the agent's behavior. Key funct
 | Function | Purpose |
 |----------|---------|
 | `cleanup_tmp_folder()` | Removes contents of `.bash_agent_tmp/` except protected files (SCRATCHPAD.md, ROLE.md, vim_prompt.tmp, embeddings.json, search_disabled, history.json, clipboard_blacklist.txt, config.json) |
-| `copy_project_to_clipboard(file_paths=None, ignore=None, include=None)` | Copies project files to system clipboard as XML-like tagged format. `file_paths`/`include` and `ignore` accept **gitignore-syntax globs** (implemented by the shared `bash_agent.ignore.GitIgnoreMatcher`); `.gitignore`, clipboard blacklist, and user ignores are flattened into one last-match-wins rule list. `--files` is a deprecated alias of the `include` param. |
+| `copy_project_to_clipboard(file_paths=None, ignore=None, include=None)` | Copies project files to system clipboard as XML-like tagged format. `file_paths`/`include` and `ignore` accept **gitignore-syntax globs** (implemented by the shared `bash_agent.ignore.GitIgnoreMatcher`); `.gitignore`, clipboard blacklist, and user ignores are flattened into one last-match-wins rule list. `--files` is a deprecated alias of the `include` param. Returns the full composed clipboard text (prefix + file blocks + directory tree + suffix) whether or not the clipboard write succeeded, so callers can count its tokens without re-reading the clipboard. |
 | `get_clipboard_content()` | Reads from system clipboard (supports xclip, wl-paste, pbpaste) |
 | `get_vim_prompt()` | Reads user input from a temporary vim file |
 | `is_binary_file(file_path)` | Checks if a file is binary (by extension or null byte detection) |
