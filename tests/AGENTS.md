@@ -17,8 +17,9 @@ installed or which model slug is selected.
 - `unit/` — fast pure-logic tests (e.g. `test_agent_blocks.py` for Group 1,
   `test_agent_special_commands.py` for Group 2, `test_agent_pipeline.py` for Group 3,
   `test_llm_adapter.py` for Group 5; `test_config_file.py` for Group 42 (persistent config.json); supporting-module groups live in
-  `test_transcribe.py` (T-39), `test_memo.py` (T-40), and
-  `test_search_helpers.py` (T-41))
+  `test_transcribe.py` (T-39), `test_memo.py` (T-40),
+  `test_search_helpers.py` (T-41), and `test_tokenizer_routing.py` —
+  model-aware token estimation (`count_tokens` family routing))
 - `integration/` — real processes, still offline (systemd-run, fake-LLM loop)
 
 ## Non-negotiable rules

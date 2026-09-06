@@ -20,7 +20,7 @@ bash_agent/
 ├── agent.py         # Core Agent class — the main run loop
 ├── config.py        # All constants, defaults, env var names
 ├── config_file.py   # Optional .bash_agent_tmp/config.json loader (model/max_tokens/reasoning_effort)
-├── tokenizer.py     # Vendor-neutral local token counting (LiteLLM token_counter, tiktoken cl100k fallback, ~3.5 chars/token last resort)
+├── tokenizer.py     # Model-aware local token counting (DeepSeek BPE, tiktoken o200k family for OpenAI, LiteLLM, ~3.5 chars/token last resort)
 ├── context.py       # ContextManager — conversation history, pruning
 ├── sandbox.py       # Sandbox — systemd-run execution wrapper
 ├── llm.py           # LLM provider adapter layer (OpenRouter)
@@ -164,30 +164,48 @@ warning thresholds and the per-turn token stats share the same code path.
 ### Tokenizer: `tokenizer.py` → `count_tokens`
 
 Provides the **fast LOCAL** token estimate the ContextManager needs *before* any
-provider round-trip returns a real `usage.prompt_tokens` count. It is
-vendor-neutral: it goes through the **LiteLLM** `token_counter` API, which
-understands OpenRouter/model slugs and falls back to a bundled tiktoken BPE
-(`cl100k_base` / `o200k_base`) for arbitrary/unknown slugs.
+provider round-trip returns a real `usage.prompt_tokens` count. Estimation is
+**model-aware**: it tries the most accurate OFFLINE tokenizer for the model's
+family first, then falls back through a provider-neutral path to a character
+heuristic:
+
+1. **Known family tokenizers** (offline, exact):
+   * `deepseek/...` → the bundled **`deepseek_tokenizer`** BPE (same tokenizer
+     files shipped with the model) so DeepSeek contexts are measured exactly.
+   * OpenAI-family slugs (bare `gpt-4o`, `openai/gpt-4o`, `gpt-oss-120b`,
+     `o1`, `gpt-5`, …) → **tiktoken `encoding_for_model`** (e.g. `gpt-4o` →
+     `o200k_base`, `gpt-oss-120b` → `o200k_harmony`). A leading `openai/`
+     provider prefix is stripped *before* the lookup because LiteLLM's own
+     `open_ai_chat_completion_models` catalog contains only bare names — it
+     would otherwise remap `openai/gpt-4o` to `gpt-3.5-turbo`/`cl100k_base`,
+     silently losing the 4o family's encoding.
+2. **Provider-neutral LiteLLM path** (`litellm.token_counter`) for any other
+   slug — understands OpenRouter slugs and degrades to a bundled tiktoken BPE
+   for unregistered ones.
+3. **Measured chars/token heuristic** (~3.5 chars/token) as a last resort when
+   no tokenizer library is available, so the system never hard-fails or
+   requires a network round-trip just to estimate.
 
 - **`count_tokens(text, model=None) -> int`** — `model` (an OpenRouter slug)
-  is passed to LiteLLM so known models get their real tokenizer; `None` falls
-  back to `config.DEFAULT_MODEL`. Empty text returns 0; results are cached by
-  `(model, text)` in a bounded dict so hysteresis pruning (which re-measures
-  the same strings repeatedly) does not re-encode each pass.
-- **Lazy LiteLLM import** — `import litellm` alone pulls in many optional
-  packages, so it is imported only on the first counting attempt. Immediately
-  after a successful import the module forces
-  `litellm.disable_hf_tokenizer_download = True` so estimation stays
+  selects the tokenizer; `None` falls back to `config.DEFAULT_MODEL`. Empty
+  text returns 0; results are cached by `(model, text)` in a bounded dict so
+  hysteresis pruning (which re-measures the same strings repeatedly) does not
+  re-encode each pass.
+- **Lazy imports** — `litellm`, `tiktoken`, and `deepseek_tokenizer` are each
+  imported lazily (never at module import) so merely importing this module
+  stays light and works offline when extra deps are absent. Immediately after
+  a successful `litellm` import the module forces
+  `litellm.disable_hf_tokenizer_download = True` so the LiteLLM path stays
   deterministic/offline (bundled tiktoken, never a Hugging Face download).
-- **Graceful degradation** — when LiteLLM is unavailable or `token_counter`
-  raises, `count_tokens` falls back to a measured ~3.5 chars/token estimate
-  (`round(len(text) / 3.5)`). The system never hard-fails or requires a
-  network round-trip just to estimate.
+- **Graceful degradation** — any step that is unavailable or raises falls
+  through to the next; the last resort never hard-fails.
 
 **Historical note:** earlier code divided character counts by a nominal 8
 (undercounting real BPE token pressure > 2×), then pinned to the DeepSeek-only
-`deepseek-tokenizer`. The current implementation is model-agnostic and works
-with any OpenRouter slug.
+`deepseek-tokenizer`, then went model-agnostic through LiteLLM (which collapses
+almost every non-bare slug onto the generic `cl100k_base`). The current
+implementation restores true model-family fidelity offline while remaining
+vendor-neutral for everything else.
 
 ### Sandbox Execution: `sandbox.py` → `class Sandbox`
 
