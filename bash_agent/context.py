@@ -5,17 +5,18 @@ import base64
 from typing import List, Dict
 import json
 import sys
-from bash_agent.config import CONTEXT_LIMIT, CONTEXT_WARN_PERCENT, SCRATCHPAD_LIMIT, HISTORY_FILE
+from bash_agent.config import CONTEXT_LIMIT, CONTEXT_WARN_PERCENT, SCRATCHPAD_LIMIT, HISTORY_FILE, DEFAULT_MODEL
 from bash_agent.tokenizer import count_tokens
 
 # Context accounting is measured in TOKENS (what the provider bills in text).
 #
 # Historical code counted raw characters and divided by a nominal 8 chars/token.
-# Real DeepSeek BPE text averages only ~3.5 chars/token, so the /8 shortcut
-# undercounted token pressure by >2x: the "Context %" readout looked ~2.3x too
-# small AND trim/warning thresholds fired ~2.3x too late in real tokens, letting
-# a session fill far past the intended safety quarter. Text is now tokenized
-# with the model's real local tokenizer (bash_agent.tokenizer.count_tokens).
+# Real BPE text (e.g. the ~3.5 chars/token of the DeepSeek family) shows the /8
+# shortcut undercounted token pressure by >2x: the "Context %" readout looked
+# ~2.3x too small AND trim/warning thresholds fired ~2.3x too late in real
+# tokens, letting a session fill far past the intended safety quarter. Text is
+# now tokenized through bash_agent.tokenizer.count_tokens (LiteLLM token_counter
+# for the selected model, generic tiktoken BPE fallback for unknown slugs).
 # Image/audio parts were always specified in TRUE tokens (1000/MP, 400/min) and
 # their historical "x8" character inflation is removed here.
 
@@ -47,13 +48,18 @@ _MISSING = object()
 
 
 class ContextManager:
-    def __init__(self, uuid_str: str, context_limit: int | None = None):
+    def __init__(self, uuid_str: str, context_limit: int | None = None, model: str | None = None):
         self.history: List[Dict[str, str]] = []
         self.uuid = uuid_str
         # Per-session context ceiling in TOKENS. An explicitly provided value
         # (Agent resolves it from the OpenRouter model's context_length as
         # ctx_tokens/4) wins over the module-level fallback CONTEXT_LIMIT.
         self.context_limit = context_limit if context_limit is not None else CONTEXT_LIMIT
+        # Model whose tokenizer is used for content accounting. `None`
+        # (the default, when the caller doesn't know its model) falls back
+        # to the configured DEFAULT_MODEL. Passed to count_tokens so
+        # LiteLLM picks the right tokenizer for known slugs.
+        self.model = model if model is not None else DEFAULT_MODEL
 
         # Create the new temp directory and set the scratchpad path inside it
         tmp_dir = os.path.abspath(".bash_agent_tmp")
@@ -76,18 +82,19 @@ class ContextManager:
                 f.write("# Project Scratchpad\n\n")
 
     @staticmethod
-    def _content_tokens(msg_content):
+    def _content_tokens(msg_content, model: str | None = None):
         """TOKEN length of content -- supports string and list (multimodal).
 
         Plain strings / text parts are tokenized with the model's real local
-        tokenizer (count_tokens). image_url parts are charged
+        tokenizer (count_tokens, optionally ``model`` to pick the tokenizer
+        for a specific slug). image_url parts are charged
         IMAGE_TOKENS_PER_MEGAPIXEL (1000 tokens/MP) and input_audio parts
         AUDIO_TOKENS_PER_MINUTE (400 tokens/min); undecodable payloads fall
         back to their flat token estimates. Junk items contribute 0; anything
         that is neither str nor list measures 0 (never raises).
         """
         if isinstance(msg_content, str):
-            return count_tokens(msg_content)
+            return count_tokens(msg_content, model=model)
         elif isinstance(msg_content, list):
             total = 0
             for item in msg_content:
@@ -95,7 +102,7 @@ class ContextManager:
                     t = item.get("type")
                     # Text type items
                     if t == "text":
-                        total += count_tokens(item.get("text", ""))
+                        total += count_tokens(item.get("text", ""), model=model)
                     # Images are charged by resolution: 1000 tokens per megapixel.
                     elif t == "image_url":
                         total += ContextManager._image_tokens(item)
@@ -103,9 +110,25 @@ class ContextManager:
                     elif t == "input_audio":
                         total += ContextManager._audio_tokens(item)
                 elif isinstance(item, str):
-                    total += count_tokens(item)
+                    total += count_tokens(item, model=model)
             return total
         return 0
+
+    def _history_tokens(self) -> int:
+        """Total token count of the entire conversation history.
+
+        Uses this ContextManager's ``self.model`` so every content message
+        is estimated with the configured/desired model's tokenizer. This is
+        the instance-aware analogue of calling the static
+        ``ContextManager._content_tokens`` with an explicit model; it is the
+        preferred call path for production wiring (agent.py passes its model
+        at construction, so pruning and per-turn stats share the same
+        counting code path).
+        """
+        return sum(
+            ContextManager._content_tokens(m.get("content", ""), model=self.model)
+            for m in self.history
+        )
 
     @staticmethod
     def _image_tokens(item) -> int:
@@ -284,9 +307,7 @@ class ContextManager:
         """
         self.history.append({"role": role, "content": content})
 
-        total_tokens = sum(
-            ContextManager._content_tokens(m.get("content", "")) for m in self.history
-        )
+        total_tokens = self._history_tokens()
         warn_threshold = int(self.context_limit * (CONTEXT_WARN_PERCENT / 100.0))
 
         if not self._warning_sent and total_tokens > warn_threshold:
@@ -323,7 +344,7 @@ class ContextManager:
         )
 
     def _trim_context_if_needed(self):
-        total_tokens = sum(ContextManager._content_tokens(m.get("content", "")) for m in self.history)
+        total_tokens = self._history_tokens()
 
         # Guard: Do not trigger cleanup until the strict context_limit is reached/exceeded
         if total_tokens <= self.context_limit:
@@ -335,7 +356,7 @@ class ContextManager:
 
         # Incrementally trim the oldest messages until under the hysteresis target limit
         while True:
-            total_tokens = sum(ContextManager._content_tokens(m.get("content", "")) for m in self.history)
+            total_tokens = self._history_tokens()
             if total_tokens <= target_limit:
                 break
 

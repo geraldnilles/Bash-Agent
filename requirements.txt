@@ -2,4 +2,4 @@ openai
 numpy
 Pillow
 requests
-deepseek-tokenizer
+litellm

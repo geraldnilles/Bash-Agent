@@ -24,6 +24,93 @@ from typing import Any, Dict, List, Tuple, Optional
 from unittest import mock
 
 # ---------------------------------------------------------------------------
+# Deterministic token counting for context-wiring unit fixtures
+# ---------------------------------------------------------------------------
+# The ContextManager fixture modules (T-18/T-19 context pruning/warning,
+# instance model-context-limit) must build histories to EXACT token
+# ceilings. Counting is environment-dependent in production (LiteLLM when
+# installed; ~3.5 chars/token offline fallback), which would make fixture
+# arithmetic flaky.  These tests validate *wiring* (trim ladder, warning
+# injection, hysteresis) against a deterministic local tokenizer, so they
+# install a fake `count_tokens` backed by the bundled offline tiktoken
+# cl100k_base encoding (the same generic BPE LiteLLM falls back to for
+# arbitrary/unknown OpenRouter slugs).  Under that encoding repeated ASCII
+# runs ('u'*2n) tokenize EXACTLY n-for-n, which preserves the fixtures'
+# linear arithmetic while remaining deterministic and offline.
+
+_ENCODING_CACHE = {}
+
+
+def _deterministic_encoding():
+    """Return a cached tiktoken cl100k_base encoder (offline, deterministic)."""
+    enc = _ENCODING_CACHE.get("cl100k_base")
+    if enc is None:
+        import tiktoken  # bundled with openai / litellm; offline
+        enc = tiktoken.get_encoding("cl100k_base")
+        _ENCODING_CACHE["cl100k_base"] = enc
+    return enc
+
+
+def deterministic_count_tokens(text, *args, **kwargs):
+    """Deterministic offline token count used to pin ContextManager fixtures.
+
+    Mirrors the production signature ``count_tokens(text, model=None)`` but
+    ignores the model: it always returns the generic cl100k_base score which
+    is what LiteLLM yields for an unknown/arbitrary OpenRouter model slug.
+    Repeated ASCII chars are linear (``'u'*2n == n`` tokens) so the fixtures
+    can dial exact ceilings.
+    """
+    if not text:
+        return 0
+    return len(_deterministic_encoding().encode(text))
+
+
+class DeterministicTokenCounts:
+    """Context-manager that routes production & fixture token accounting
+    through the deterministic cl100k fake.
+
+    Because ``bash_agent/context.py`` does
+    ``from bash_agent.tokenizer import count_tokens`` (binding the name into
+    its own namespace), patching ``bash_agent.tokenizer.count_tokens`` alone
+    does NOT affect ``ContextManager._content_tokens``.  We therefore patch
+    BOTH the tokenizer module attribute and the bound alias inside
+    ``bash_agent.context``.  The optional ``fixture_module`` receives the
+    same deterministic function as its module-level ``count_tokens`` alias so
+    direct calls in the fixture (e.g. ``sys_tokens``) agree with
+    ``_content_tokens``.
+    """
+
+    def __init__(self, fixture_module=None):
+        self.fixture_module = fixture_module
+        self._patchers = []
+
+    def start(self):
+        self._patchers = [
+            mock.patch("bash_agent.tokenizer.count_tokens",
+                       deterministic_count_tokens),
+            mock.patch("bash_agent.context.count_tokens",
+                       deterministic_count_tokens),
+        ]
+        for p in self._patchers:
+            p.start()
+        if self.fixture_module is not None:
+            self.fixture_module.count_tokens = deterministic_count_tokens
+        return self
+
+    def stop(self):
+        for p in reversed(self._patchers):
+            p.stop()
+        self._patchers = []
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.stop()
+        return False
+
+
+# ---------------------------------------------------------------------------
 # T-00a — chdir_tmp
 # ---------------------------------------------------------------------------
 
@@ -567,6 +654,8 @@ make_agent = _make_agent
 
 
 __all__ = [
+    "deterministic_count_tokens",
+    "DeterministicTokenCounts",
     "chdir_tmp",
     "ChdirTmp",
     "bash_block",

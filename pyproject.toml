@@ -22,7 +22,7 @@ dependencies = [
     "numpy",
     "Pillow",
     "requests",
-    "deepseek-tokenizer",
+    "litellm",
 ]
 
 [project.scripts]

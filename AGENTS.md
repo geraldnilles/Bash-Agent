@@ -20,6 +20,7 @@ bash_agent/
 ├── agent.py         # Core Agent class — the main run loop
 ├── config.py        # All constants, defaults, env var names
 ├── config_file.py   # Optional .bash_agent_tmp/config.json loader (model/max_tokens/reasoning_effort)
+├── tokenizer.py     # Vendor-neutral local token counting (LiteLLM token_counter, tiktoken cl100k fallback, ~3.5 chars/token last resort)
 ├── context.py       # ContextManager — conversation history, pruning
 ├── sandbox.py       # Sandbox — systemd-run execution wrapper
 ├── llm.py           # LLM provider adapter layer (OpenRouter)
@@ -62,7 +63,7 @@ This is the heart of the project. The `Agent` class:
 
 | Method | Purpose |
 |--------|---------|
-| `__init__()` | Sets up UUID, model, sandbox, context, budget. Handles `--resume`. Resolves the model's context ceiling — by default a quarter of the model's `context_length`, overridable via the `token_budget`/`--token-budget` arg — and passes it to `ContextManager` (see `_fetch_model_context_limit` / `token_budget.py`). |
+| `__init__()` | Sets up UUID, model, sandbox, context, budget. Handles `--resume`. Resolves the model's context ceiling — by default a quarter of the model's `context_length`, overridable via the `token_budget`/`--token-budget` arg — and passes it to `ContextManager`, threading the model slug as well so content accounting uses that model's tokenizer (see `_fetch_model_context_limit` / `token_budget.py`). |
 | `run(initial_task)` | The main loop. Sends prompts, parses responses, executes commands. |
 | `_run_warmup_exchanges()` | Protocol warmup: on FRESH sessions only (`--resume` skips it), pre-fills history with two scripted assistant turns from the `WARMUP_TURNS` constant (a PYTHON version check plus a listing of all installed 3rd-party PyPI packages, then a BASH `ls -la`). Each template is parsed via the production `_extract_blocks()` (raises if it ever fails to parse) and executed via `_execute_script()`, so the injected transcript is byte-for-byte identical in format to a live exchange. Called from `run()` right after the initial task is committed. |
 | `parse_and_execute(agent_msg)` | Coordination pipeline: extracts blocks via `_extract_blocks()`, dispatches each to `_handle_special_command()` or `_execute_script()`, enforces `MAX_CODE_BLOCKS` limit, and commits results via `_commit_execution_feedback()`. Returns `(executed: bool, feedback: str)`. |
@@ -136,11 +137,17 @@ All tunable constants. **Modify this file to change defaults.**
 
 Manages the message list (`self.history: List[Dict[str, str]]`), context pruning, scratchpad one-shot injection, and session persistence.
 
+Constructor: `ContextManager(uuid_str, context_limit=None, model=None)` — `model`
+(an OpenRouter slug, e.g. `"deepseek/deepseek-v4-flash-0731"`) selects which
+tokenizer `count_tokens` estimates against; when `None` it falls back to
+`config.DEFAULT_MODEL`. `Agent` always passes its resolved model so pruning /
+warning thresholds and the per-turn token stats share the same code path.
+
 **Key responsibilities:**
 
 1. **Message storage:** `add_message(role, content)` appends. The effective ceiling comes from the instance attribute `self.context_limit` (set by `Agent` from the model's `context_length`; defaults to the module constant `CONTEXT_LIMIT` when constructed bare).
    - **Context-limit warning:** once the conversation crosses `CONTEXT_WARN_PERCENT`% of the instance `context_limit` (99%), a one-time user-role message is injected telling the LLM to back up important notes to the SCRATCHPAD before the oldest ~20% of history is trimmed. Trimming is DEFERRED until the warning is confirmed — an ASSISTANT message must be added afterward (proving the model read the warning and issued its backup commands). It is acceptable to briefly exceed the ceiling to deliver the warning. `reset` re-arms the flags.
-2. **Context pruning** (`_trim_context_if_needed()`): When TOTAL TOKENS (measured by `bash_agent.tokenizer.count_tokens`) exceed the instance `context_limit`, incrementally trims the oldest messages down to 80% of that limit:
+2. **Context pruning** (`_trim_context_if_needed()`): When TOTAL TOKENS (measured via `_history_tokens()`, which runs `bash_agent.tokenizer.count_tokens` per message with `self.model`) exceed the instance `context_limit`, incrementally trims the oldest messages down to 80% of that limit:
    - Multimodal messages (list content, e.g. `image_url` blocks) cannot be block-trimmed because the regex operations require strings (a list would raise `TypeError`). They are dropped entirely with no breadcrumb marker; surrounding context makes it obvious what happened.
    - Step 1: Delete the content of old `BASH_OUTPUT`/`PYTHON_OUTPUT` blocks entirely (replaced with `[BASH_OUTPUT DELETED TO SAVE CONTEXT]`)
    - Step 2: Truncate old `BASH_COMMAND`/`PYTHON_COMMAND` blocks to 80 chars
@@ -149,9 +156,37 @@ Manages the message list (`self.history: List[Dict[str, str]]`), context pruning
 3. **Scratchpad one-shot injection** (`get_scratchpad_block()`): Reads `SCRATCHPAD.md` and returns a fenced block with a `VISIBLE_{pct}%` header (truncated at `SCRATCHPAD_LIMIT` with an `[ERROR]` suffix when oversized). `Agent.run()` calls it once for a fresh session's first user message — NOT re-injected on later changes.
 4. **Persistence** (`save_history()` / `load_history()`): Serializes `{uuid, history}` to `.bash_agent_tmp/history.json`. Called after every message. Loaded on `--resume`.
 
-**Content TOKEN calculation** (`ContextManager._content_tokens()`): Text (strings and `{"type": "text"}` parts) is tokenized with the model's real tokenizer (`bash_agent.tokenizer.count_tokens` — no character heuristics). `image_url` parts are charged 1000 tokens/MEGAPIXEL from the decoded data URL; `input_audio` parts 400 tokens/MINUTE from parsed MP3 frames (both cached). Undecodable payloads fall back to flat TOKEN estimates (800 image / 6000 audio). NEVER scales with the raw base64 payload size.
+**Content TOKEN calculation** (`ContextManager._content_tokens(content, model=None)`): Text (strings and `{"type": "text"}` parts) is tokenized with the model's vendor-neutral local tokenizer (`bash_agent.tokenizer.count_tokens(text, model=model)` — no character heuristics). The `_history_tokens()` instance method sums every message through that same static helper using `self.model`, and `add_message` / `_trim_context_if_needed` / the per-turn stats all call `_history_tokens()` so a single code path does the measurement. `image_url` parts are charged 1000 tokens/MEGAPIXEL from the decoded data URL; `input_audio` parts 400 tokens/MINUTE from parsed MP3 frames (both cached). Undecodable payloads fall back to flat TOKEN estimates (800 image / 6000 audio). NEVER scales with the raw base64 payload size.
 
 ---
+
+### Tokenizer: `tokenizer.py` → `count_tokens`
+
+Provides the **fast LOCAL** token estimate the ContextManager needs *before* any
+provider round-trip returns a real `usage.prompt_tokens` count. It is
+vendor-neutral: it goes through the **LiteLLM** `token_counter` API, which
+understands OpenRouter/model slugs and falls back to a bundled tiktoken BPE
+(`cl100k_base` / `o200k_base`) for arbitrary/unknown slugs.
+
+- **`count_tokens(text, model=None) -> int`** — `model` (an OpenRouter slug)
+  is passed to LiteLLM so known models get their real tokenizer; `None` falls
+  back to `config.DEFAULT_MODEL`. Empty text returns 0; results are cached by
+  `(model, text)` in a bounded dict so hysteresis pruning (which re-measures
+  the same strings repeatedly) does not re-encode each pass.
+- **Lazy LiteLLM import** — `import litellm` alone pulls in many optional
+  packages, so it is imported only on the first counting attempt. Immediately
+  after a successful import the module forces
+  `litellm.disable_hf_tokenizer_download = True` so estimation stays
+  deterministic/offline (bundled tiktoken, never a Hugging Face download).
+- **Graceful degradation** — when LiteLLM is unavailable or `token_counter`
+  raises, `count_tokens` falls back to a measured ~3.5 chars/token estimate
+  (`round(len(text) / 3.5)`). The system never hard-fails or requires a
+  network round-trip just to estimate.
+
+**Historical note:** earlier code divided character counts by a nominal 8
+(undercounting real BPE token pressure > 2×), then pinned to the DeepSeek-only
+`deepseek-tokenizer`. The current implementation is model-agnostic and works
+with any OpenRouter slug.
 
 ### Sandbox Execution: `sandbox.py` → `class Sandbox`
 
@@ -354,6 +389,7 @@ Agent.run() loop
 
 ### 4. Context Pruning
 - Uses 80% hysteresis: only prunes when over the instance `context_limit` (model-derived; falls back to the `CONTEXT_LIMIT` constant), prunes down to 80% of that ceiling
+- Token pressure is measured by `ContextManager._history_tokens()`, which runs `count_tokens(content, model=self.model)` over every message, so local accounting stays consistent with the selected model's tokenizer
 - System prompt (index 0) is NEVER pruned
 - Old OUTPUT blocks are deleted first (biggest savings), then COMMAND blocks are truncated, then entire messages are dropped
 
@@ -403,6 +439,12 @@ To add a new tool (like `vision` or `search`):
 - **`systemd-run` permissions**: Adding `--property=` flags can break isolation. Always test with a command that tries to write to `/etc` to confirm sandboxing.
 - **Context pruning off-by-one**: The system prompt is at index 0. Pruning iterates from index 1. Don't change this without understanding the trimming loop.
 - **Scratchpad one-shot injection**: `Agent.run()` calls `ContextManager.get_scratchpad_block()` once at the start of a FRESH session (skipped on `--resume` since history already carries it). The block is prepended to the first user message. It is NOT re-injected on later changes — the LLM re-reads via `cat` when it needs a refresh. `get_scratchpad_block()` applies the `SCRATCHPAD_LIMIT` truncation (80k chars) with an honest `VISIBLE_%` header.
+- **ContextManager uses a BOUND `count_tokens`**: `bash_agent/context.py` does
+  `from bash_agent.tokenizer import count_tokens`, binding the name into its own
+  module namespace. To fake/patch token counting for ContextManager tests it is
+  NOT enough to patch `bash_agent.tokenizer.count_tokens` — you must patch
+  `bash_agent.context.count_tokens` too. (`tests/helpers/fakes.py` exposes the
+  reusable `DeterministicTokenCounts` patcher that covers both seams.)
 - **Multimodal content format**: When `multimodal_capabilities` includes `"image"` and/or `"audio"`, images/audio attached via `vision.py`/`transcribe.py` cause the agent to construct content as a list of content blocks `[{"type": "text", ...}, {"type": "image_url", ...}, {"type": "input_audio", ...}]` instead of a plain string. The `ContextManager._content_tokens()` method and pruning logic must handle both formats.
 
 ---
@@ -411,12 +453,16 @@ To add a new tool (like `vision` or `search`):
 
 ```
 openai           # LLM client (OpenRouter)
+litellm          # Vendor-neutral token counting (token_counter; lazy import)
 numpy            # Embedding similarity calculations
 Pillow           # Image resizing for vision
 requests         # HTTP calls (search reranking via OpenRouter API)
 ```
 
-All are declared in `pyproject.toml`. The project uses `setuptools` as the build backend.
+All are declared in `pyproject.toml`. Note: `litellm` is imported lazily by
+`tokenizer.py` so merely importing the tokenizer module stays light and works
+offline when litellm is absent. The project uses `setuptools` as the build
+backend.
 
 ---
 

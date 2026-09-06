@@ -215,7 +215,7 @@ When the budget is exhausted, the agent stops gracefully.
 
 ### Context-Window Token Budget
 
-By default the agent only uses 25% of the model's reported context window to leave generous headroom. Tune that budget with `--token-budget`, as an exact token count or a percentage of the model's full window:
+By default the agent only uses 25% of the model's reported context window to leave generous headroom. Conversation accounting is done in real tokens using a vendor-neutral local estimate (`litellm.token_counter`, falling back to a bundled tiktoken BPE for arbitrary OpenRouter slugs, then a ~3.5 chars/token heuristic), so pruning / warnings are accurate regardless of which model you run. Tune that budget with `--token-budget`, as an exact token count or a percentage of the model's full window:
 
 ```bash
 bagent -m "Do a long task" --token-budget 50%        # half the model's context window

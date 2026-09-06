@@ -281,25 +281,38 @@ in the header. Direct-call test on a pure method.
 
 - [x] **Implemented** (`tests/unit/test_context_pruning.py`)
 
-`_content_tokens` on: plain string (counted in TRUE provider tokens via
-`bash_agent.tokenizer.count_tokens`); list with text parts; list with N
-`image_url` parts (charged at 1000 tokens/MEGAPIXEL — resolution decoded
-from the data URL in tokens, NO historical ×8 inflation); list with
-`input_audio` parts (charged at 400 tokens/MINUTE — MP3 frame-header
-duration parse with a per-payload cache); mixed; non-str/non-list → 0.
-Undecodable image URLs and unparseable audio payloads use flat TOKEN
-fallbacks (800 tokens / 6000 tokens) and never scale with the raw base64
-payload length. Text fixtures use `tokfill(n)` (`'u'*2n`, verified 1:1
-token) so all arithmetic is exact in tokens. Static-method test, zero setup.
+`_content_tokens` on: plain string (counted through the module's configured
+token counter via `bash_agent.tokenizer.count_tokens`); list with text parts;
+list with N `image_url` parts (charged at 1000 tokens/MEGAPIXEL — resolution
+decoded from the data URL in tokens, NO historical ×8 inflation); list with
+`input_audio` parts (charged at 400 tokens/MINUTE — MP3 frame-header duration
+parse with a per-payload cache); mixed; non-str/non-list → 0.  Undecodable
+image URLs and unparseable audio payloads use flat TOKEN fallbacks (800
+tokens / 6000 tokens) and never scale with the raw base64 payload length.
+
+Counting itself is environment-dependent in production (LiteLLM when
+installed; ~3.5 chars/token offline fallback), but fixture arithmetic must be
+EXACT, so the pruning/warning/model-limit context fixtures install a fixed
+deterministic meter via `setUpModule`/`tearDownModule`
+(`tests.helpers.fakes.DeterministicTokenCounts`, backed by offline tiktoken
+`cl100k_base` — the same generic BPE LiteLLM uses for arbitrary OpenRouter
+slugs). Because `bash_agent/context.py` does `from bash_agent.tokenizer import
+count_tokens` (binding the name into its own namespace), the patcher redirects
+*both* `bash_agent.tokenizer.count_tokens` and
+`bash_agent.context.count_tokens`, and also swaps each fixture's module-level
+`count_tokens` alias. Static-method tests are zero-setup; the fixture modules
+that build exact token histories use the deterministic meter.
 
 ### T-19 — Hysteresis pruning ladder (P0)
 
 - [x] **Implemented** (`tests/unit/test_context_pruning.py`)
 
-Constructs `ContextManager(uid, context_limit=N)` (per-instance TOKEN ceiling
-— mirrors the Agent-resolved model-window path, no global patch) with a small
-N, containing system prompt, old BASH_OUTPUT blocks, command blocks, and
-plain messages built with exact `tokfill` token counts. Asserts: no action
+Constructs `ContextManager(uuid, context_limit=N, model=...)` (per-instance
+TOKEN ceiling — mirrors the Agent-resolved model-window path, no global
+patch) with a small N, containing system prompt, old BASH_OUTPUT blocks,
+command blocks, and plain messages built with exact `tokfill` token counts
+under the deterministic cl100k meter installed by this module's
+`setUpModule`. Asserts: no action
 below / exactly at the ceiling; strictly over it → trim until total tokens
 ≤ 80% of N; oldest output bodies replaced with
 `[BASH_OUTPUT DELETED TO SAVE CONTEXT]` while fences survive; commands
@@ -352,8 +365,10 @@ guard for the fixed `import sys`: a malformed `history.json` must print
 `add_message()` must warn the LLM to back up findings to the SCRATCHPAD once
 the conversation crosses `CONTEXT_WARN_PERCENT`% (99%) of the per-instance
 token ceiling, then DEFER hard pruning until the warning has been seen by the
-model, so the latest backup commands/outputs survive. Construct with
-`ContextManager(uuid, context_limit=300)` (CONTEXT_WARN_PERCENT stays 99); assert:
+model, so the latest backup commands/outputs survive. Builds exact token
+histories under the deterministic cl100k meter installed via this module's
+`setUpModule`, constructing with `ContextManager(uuid, context_limit=300,
+model=...)` (CONTEXT_WARN_PERCENT stays 99); assert:
 below threshold → no warning; exactly at threshold → no warning (guard is
 strictly `>`); crossing threshold → exactly ONE user-role warning injected,
 no trim yet; subsequent user traffic (backup-command commits) still triggers
@@ -649,11 +664,15 @@ the caller. Seam: same as T-43.
 
 - [x] **Implemented** (`tests/unit/test_model_context_limit.py::InstanceLimitCase`)
 
-`ContextManager(uuid, context_limit=N)` now uses `self.context_limit` for the
-SCRATCHPAD warning threshold (`N * CONTEXT_WARN_PERCENT / 100`) and the 80%
-hysteresis trim target instead of the module constant `CONTEXT_LIMIT`. Tests
-construct a manager with a deliberately tiny TOKEN ceiling (1000) even though
-the real module fallback is 327,680 tokens, then prove:
+`ContextManager(uuid, context_limit=N, model=...)` now uses
+`self.context_limit` for the SCRATCHPAD warning threshold
+(`N * CONTEXT_WARN_PERCENT / 100`) and the 80% hysteresis trim target instead
+of the module constant `CONTEXT_LIMIT`, and threads its `model` into
+`count_tokens` so accounting uses that model's tokenizer.  The context
+fixtures install the deterministic cl100k meter (`setUpModule`) so the exact
+token boundaries are stable offline. Tests construct a manager with a
+deliberately tiny TOKEN ceiling (1000) even though the real module fallback
+is 327,680 tokens, then prove:
 warning fires when history crosses `N*99%`;
 once the warning is confirmed, pruning drives history ≤ `N`;
 and a manager built with no explicit `context_limit` still equals the module
@@ -677,13 +696,14 @@ the cached catalog, or the entry lacks a usable `context_length`, so
 - [x] **Implemented** (`tests/unit/test_model_context_limit.py::AgentConstructorWiringCase`)
 
 `__init__` resolves `context_limit = model_context_limit_tokens or
-config.CONTEXT_LIMIT` and passes that value into `ContextManager(...,
-context_limit=...)`, and the budget-reporting percentage divides by
-`self.context.context_limit`. With the shared offline stub (which mirrors the
-production API-failure path and yields both token attrs `None`) the agent
-falls back to `config.CONTEXT_LIMIT`; with a stub that simulates a successful
-probe (e.g. 4096 ctx tokens → 1024 budget tokens) both `agent.context_limit`
-and `agent.context.context_limit` equal that derived ceiling.
+config.CONTEXT_LIMIT` and passes that value plus the model slug into
+`ContextManager(..., context_limit=..., model=self.model)`, and the
+budget-reporting percentage divides by `self.context.context_limit`. With the
+shared offline stub (which mirrors the production API-failure path and yields
+both token attrs `None`) the agent falls back to `config.CONTEXT_LIMIT`; with
+a stub that simulates a successful probe (e.g. 4096 ctx tokens → 1024 budget
+tokens) both `agent.context_limit` and `agent.context.context_limit` equal
+that derived ceiling.
 `self._get_models_catalog()` caches the /models payload for ~1h so the three
 startup probes (multimodal, reasoning, context) issue a single HTTP GET.
 

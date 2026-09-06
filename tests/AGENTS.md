@@ -11,7 +11,12 @@ the authoritative inventory in `TEST_PLAN.md` (T-00 … T-41):
 - `TEST_PLAN.md` — the authoritative test inventory, each entry with rationale
   and the mocking/seam strategy; its Progress Summary tracks implementation state
 - `helpers/fakes.py` — shared offline fakes (T-00a–d): `chdir_tmp`,
-  fenced-block builders, `FakeLLMClient`, `FakeSandbox`, `_make_agent()`
+  fenced-block builders, `FakeLLMClient`, `FakeSandbox`, `_make_agent()`,
+  plus `deterministic_count_tokens` / `DeterministicTokenCounts` — an
+offline, deterministic tiktoken cl100k_base meter the context fixture
+modules (pruning, warning, model-context-limit) install via setUpModule so
+their exact-token histories are stable regardless of whether litellm is
+installed or which model slug is selected.
 - `unit/` — fast pure-logic tests (e.g. `test_agent_blocks.py` for Group 1,
   `test_agent_special_commands.py` for Group 2, `test_agent_pipeline.py` for Group 3,
   `test_llm_adapter.py` for Group 5; `test_config_file.py` for Group 42 (persistent config.json); supporting-module groups live in

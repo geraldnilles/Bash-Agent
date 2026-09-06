@@ -47,7 +47,13 @@ from unittest import mock
 
 from bash_agent.context import ContextManager
 from bash_agent.config import CONTEXT_LIMIT as MODULE_CONTEXT_LIMIT
-from tests.helpers.fakes import chdir_tmp, _make_agent, _stub_model_context_info
+from tests.helpers.fakes import (
+    chdir_tmp,
+    _make_agent,
+    _stub_model_context_info,
+    DeterministicTokenCounts,
+)
+from tests.helpers.fakes import deterministic_count_tokens as count_tokens
 
 
 # ---------------------------------------------------------------------------
@@ -61,8 +67,9 @@ def _total_length(history):
 class InstanceLimitCase(unittest.TestCase):
     """ContextManager(..., context_limit=N) honours N instead of CONTEXT_LIMIT.
 
-    Accounting is measured in TOKENS. ``u`` encodes linearly in the DeepSeek
-    tokenizer (2 chars = 1 token), so ``tokfill`` provides EXACT token counts.
+    Accounting is measured in TOKENS.  ``u`` encodes linearly in the module's
+    deterministic meter (the same offline cl100k BPE LiteLLM uses for unknown
+    model slugs; 2 chars = 1 token), so ``_fill_tokens`` provides EXACT token counts.
     """
 
     INSTANCE_LIMIT = 1000
@@ -256,6 +263,20 @@ def _custom_full_reasoning(self):
     self.reasoning_supported_efforts = ["high", "medium", "low", "minimal", "none"]
     self.reasoning_mandatory = False
     self.reasoning_default_effort = "medium"
+
+
+# ---------------------------------------------------------------------------
+# Deterministic local token meter for these instance-limit fixtures.
+# ---------------------------------------------------------------------------
+_local_token_counts = DeterministicTokenCounts(fixture_module=__import__(__name__))
+
+
+def setUpModule():
+    _local_token_counts.start()
+
+
+def tearDownModule():
+    _local_token_counts.stop()
 
 
 if __name__ == "__main__":

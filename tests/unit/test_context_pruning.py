@@ -6,16 +6,19 @@ T-19  Hysteresis pruning ladder (P0)
 T-20  Multimodal wholesale drop (P0)
 
 The ContextManager accounts *ALL* conversational pressure in provider
-TOKENS (see bash_agent/tokenizer.py).  Plain text is tokenized with the
-model's real local tokenizer; multimodal parts are priced by stated rates
-(1000 tokens/MP image, 400 tokens/min audio).  There is NO character
-arithmetic left in these tests.
+TOKENS (see bash_agent/tokenizer.py).  Multimodal parts are priced by stated
+rates (1000 tokens/MP image, 400 tokens/min audio); plain text is charged
+through the configured token counter.  There is NO character arithmetic left
+in these tests.
 
-To stay deterministic in token-space every text fixture is built with
-``tokfill(n)``: a pure ``'u'*n`` string that the DeepSeek tokenizer encodes
-to EXACTLY ``n`` tokens (verified: 2 characters -> 1 token, no context
-sensitivity).  This lets us dial an exact conversation weight without
-guessing.
+Counting itself is environment-dependent in production (LiteLLM when
+installed; ~3.5 chars/token offline fallback), but these tests validate the
+*pruning wiring*, not a specific tokenizer.  They therefore install a fixed,
+deterministic token meter (offline tiktoken cl100k_base - the same generic
+BPE LiteLLM uses for arbitrary OpenRouter slugs) via ``setUpModule`` below.
+Text fixtures are built with ``tokfill(n)``: a pure ``'u'`` string that this
+deterministic meter encodes EXACTLY linearly (2 chars -> 1 token), letting us
+dial an exact conversation weight without guessing.
 
 The pruning tests assert the *behavioural contract*:
 
@@ -45,7 +48,7 @@ from unittest import mock
 from PIL import Image
 
 from bash_agent.context import ContextManager
-from bash_agent.tokenizer import count_tokens
+from tests.helpers.fakes import DeterministicTokenCounts, deterministic_count_tokens
 from tests.helpers.fakes import bash_block, chdir_tmp, output_block
 
 # ---------------------------------------------------------------------------
@@ -56,10 +59,10 @@ from tests.helpers.fakes import bash_block, chdir_tmp, output_block
 def tokfill(n: int) -> str:
     """Return a plain string tokenized to EXACTLY ``n`` tokens.
 
-    ``u`` is a 1-byte token in the DeepSeek tokenizer; each pair of
-    characters encodes as exactly one token (2 chars per token), verified
-    empirically.  All text fixtures stack ``u`` so the number of tokens is
-    dialed directly without any external rate.
+    ``u`` is a 1-byte token in the *deterministic* cl100k token meter
+    installed by this module (2 chars per token, no multi-char context), so
+    stacking ``u`` lets each fixture dial an exact token count directly
+    without any external rate.
     """
     if n < 0:
         raise ValueError(n)
@@ -246,9 +249,9 @@ class TestMixedContent(unittest.TestCase):
             {"type": "image_url",
              "image_url": {"url": png_data_url(1000, 1000)}},  # 1000
             "bare string!",                                     #  3
-            {"type": "text", "text": "!?"},                     #  2
+            {"type": "text", "text": "!?"},                     #  1
         ]
-        self.assertEqual(clen(content), 1 + 1000 + 3 + 2)
+        self.assertEqual(clen(content), 1 + 1000 + 3 + 1)
 
     def test_empty_list_is_zero(self):
         self.assertEqual(clen([]), 0)
@@ -354,7 +357,7 @@ class PruningCase(unittest.TestCase):
                 "content": output_block(self.uid, 0, tokfill(body_tokens))}
 
     def command_msg(self, role, script_tokens):
-        # c is 4 chars / token.  Keep it readable and use 'u' for exact.
+        # Command body is plain 'u' text; fence overhead applies.
         return {"role": role,
                 "content": bash_block(self.uid, tokfill(script_tokens))}
 
@@ -377,7 +380,7 @@ class TestHysteresisGuard(PruningCase):
     """Guards: no action until TOTAL strictly exceeds the per-instance ceiling."""
 
     def test_no_trim_below_limit(self):
-        # sys (56) + plain user (400 tokens) comfortably below ceiling.
+        # sys (57) + plain user (400 tokens) comfortably below ceiling.
         self.cm.history = [
             {"role": "system", "content": self.system_prompt()},
             self.plain_msg("user", 400),
@@ -390,11 +393,16 @@ class TestHysteresisGuard(PruningCase):
         self.assertEqual(len(self.cm.history), 2)
 
     def test_exactly_at_limit_no_trim(self):
-        # sys=56; pad the user message so total == 1000 exactly.  The guard
-        # is `total <= limit -> return`, so AT the limit nothing runs.
+        # Pad the user message by whatever the current system prompt costs,
+        # so the total sits EXACTLY at the ceiling.  The guard is
+        # `total <= limit -> return`, so AT the limit nothing runs.  (The
+        # system-prompt token cost used to be hard-coded as 56 for the old
+        # DeepSeek tokenizer; counting dynamically keeps this boundary test
+        # correct under the deterministic cl100k fake and future meters.)
+        sys_tok = count_tokens(self.system_prompt())
         self.cm.history = [
             {"role": "system", "content": self.system_prompt()},
-            self.plain_msg("user", self.limit - 56),
+            self.plain_msg("user", self.limit - sys_tok),
         ]
         self.assertEqual(total_tokens(self.cm.history), self.limit)
         before = [dict(m) for m in self.cm.history]
@@ -403,10 +411,14 @@ class TestHysteresisGuard(PruningCase):
         self.assertEqual(self.banners(), 0)
 
     def test_one_token_over_limit_triggers_trim(self):
-        # push sys + user to exactly 1001 => crosses the strict guard.
+        # Push sys + user to exactly (limit + 1), crossing the strict guard.
+        # The user portion is computed from the actual system-prompt cost so
+        # this stays exact regardless of which deterministic tokenizer is in
+        # use (previously assumed a 56-token DeepSeek system prompt).
+        sys_tok = count_tokens(self.system_prompt())
         self.cm.history = [
             {"role": "system", "content": self.system_prompt()},
-            self.plain_msg("user", self.limit - 55),   # 56+945=1001
+            self.plain_msg("user", self.limit - sys_tok + 1),
         ]
         self.assertEqual(total_tokens(self.cm.history), self.limit + 1)
         self.cm._trim_context_if_needed()
@@ -448,13 +460,14 @@ class TestOutputDeletionLadder(PruningCase):
     """
     Ladder rung 1: hollow oldest OUTPUT blocks first.
 
-    Token fixture (limit=1000, target=800):
-      [system(56), user output body 200t (~271), user output body 200t (~271),
-       assistant output body 300t (~371), plain tail 100t]
+    Token fixture (limit=1000, target=800) — deterministic cl100k meter
+      (the offline generic BPE LiteLLM uses for arbitrary model slugs):
+      [system(57), user output body 200t (~272), user output body 200t (~272),
+       assistant output body 300t (~372), plain tail 100t]
 
-      initial total = 56 + 271+271+371+100   = 1069 > 1000
-      pass 1: hollow idx1 (full 271 -> marker ~85) : total ~ 883 > 800
-      pass 2: hollow idx2 (full 271 -> marker ~85) : total ~ 697 <= 800 STOP
+      initial total = 57 + 272+272+372+100   = 1073 > 1000
+      pass 1: hollow idx1 (full 272 -> marker 80)  : total = 881 > 800
+      pass 2: hollow idx2 (full 272 -> marker 80)  : total = 689 <= 800 STOP
       => exactly two OLDEST user outputs get hollowed; assistant body & tail intact.
     """
 
@@ -464,7 +477,7 @@ class TestOutputDeletionLadder(PruningCase):
         self.body_new = 300
         self.tail_tokens = 100
         self.cm.history = [
-            {"role": "system", "content": self.system_prompt()},   # 56
+            {"role": "system", "content": self.system_prompt()},   # 57
             self.output_msg("user", self.body_old),                # idx1
             self.output_msg("user", self.body_old),                # idx2
             self.output_msg("assistant", self.body_new),           # idx3
@@ -520,20 +533,20 @@ class TestCommandTruncationLadder(PruningCase):
     Ladder rung 2: with NO outputs present, command scripts are truncated
     to 80 chars (plus the marker), oldest first, without dropping any message.
 
-    Token arithmetic (limit=1000, target=800):
-      sys (56) + cmd script(550 tok, full cost ~612) twice:
-        start  = 56 + 612 + 612             = 1280 > 1000
-        pass 1 (hollow oldest cmd to ~147): = 815  > 800  -> continue
-        pass 2 (hollow second cmd to ~147): = 350  <= 800 -> stop
+    Token arithmetic (limit=1000, target=800) — deterministic cl100k meter:
+      sys (57) + cmd script(600 tok body, full cost behind fence ~663) twice:
+        start  = 57 + 663 + 663              = 1383 > 1000
+        pass 1 (trunc 600-tok cmd to 80+marker ~108): = 828 > 800 -> continue
+        pass 2 (trunc second cmd to 80+marker ~108):  = 273 <= 800 -> stop
     """
 
     def setUp(self):
         super().setUp()
         self.script_tokens = 600          # 600 "u"-pairs => body 1200 chars
         self.cm.history = [
-            {"role": "system", "content": self.system_prompt()},  # 56
-            self.command_msg("user", self.script_tokens),          # full ~612
-            self.command_msg("assistant", self.script_tokens),     # full ~612
+            {"role": "system", "content": self.system_prompt()},  # 57
+            self.command_msg("user", self.script_tokens),          # full ~663
+            self.command_msg("assistant", self.script_tokens),     # full ~663
         ]
         self.assertTrue(total_tokens(self.cm.history) > self.limit,
                         "fixture must start over the strict limit")
@@ -757,6 +770,27 @@ class TestMultimodalEdgeCases(MultimodalPruningCase):
         self.assertEqual(self.cm.history[0]["role"], "system")
         self.assertEqual(self.cm.history[1]["content"], tail["content"])
         self.assertIn(IMAGE_DROP_BANNER, self.stdout_text())
+
+
+# ---------------------------------------------------------------------------
+# Deterministic local token meter for these context-wiring fixtures.
+#
+# ``DeterministicTokenCounts`` redirects BOTH the
+# production accounting entry point (``bash_agent.context.count_tokens``,
+# which ``ContextManager._content_tokens`` calls) and the module-local alias
+# used above to the same deterministic cl100k-backed fake, so every fixture
+# that dials exact token ceilings sees one consistent tokenizer.
+# ---------------------------------------------------------------------------
+_local_token_counts = DeterministicTokenCounts(fixture_module=__import__(__name__))
+count_tokens = deterministic_count_tokens
+
+
+def setUpModule():
+    _local_token_counts.start()
+
+
+def tearDownModule():
+    _local_token_counts.stop()
 
 
 if __name__ == "__main__":

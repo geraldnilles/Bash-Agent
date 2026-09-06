@@ -189,7 +189,7 @@ class Agent:
         # ContextManager's pruning/warning logic uses self.context_limit for
         # every comparison, so no code in context.py reads config.CONTEXT_LIMIT
         # anymore at runtime (that constant is only the module-level fallback).
-        self.context = ContextManager(self.uuid, context_limit=self.context_limit)
+        self.context = ContextManager(self.uuid, context_limit=self.context_limit, model=self.model)
 
         # Handle Resume: attempt to restore previous session
         history_loaded = False
@@ -840,7 +840,7 @@ class Agent:
         """Report context/cost stats after a turn and enforce the session budget.
         Returns True if the session should continue, False if the budget was exceeded."""
         # Calculate current context size in real tokens (local tokenizer).
-        current_tokens = sum(ContextManager._content_tokens(m.get("content", "")) for m in self.context.history)
+        current_tokens = self.context._history_tokens()
         # Percentage relative to THIS session's model-derived ceiling (falls
         # back to config.CONTEXT_LIMIT if the OpenRouter probe failed).
         context_percent = (current_tokens / self.context.context_limit) * 100

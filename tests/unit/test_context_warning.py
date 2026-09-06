@@ -14,11 +14,14 @@ New behavior (ROADMAP 'Context limit warning'):
     the trim).
   * It is acceptable to briefly exceed CONTEXT_LIMIT to deliver the warning.
 
-Context accounting is measured in TOKENS (the model's real tokenizer, via
-bash_agent.tokenizer.count_tokens), NOT characters.  Text fixtures therefore
-use a repeat of the letter ``u`` which the DeepSeek tokenizer encodes
-EXACTLY linearly: 2 chars = 1 token (verified empirically).  This keeps the
-arithmetic exact and immune to tokenizer quirks around multi-char runs.
+Context accounting is measured in TOKENS (via
+``bash_agent.context._content_tokens``), NOT characters.  Because counting is
+environment-dependent in production (LiteLLM when installed; heuristic
+offline), these wiring tests install a fixed deterministic meter (offline
+tiktoken cl100k_base - the generic BPE LiteLLM falls back to for arbitrary
+OpenRouter slugs) via ``setUpModule`` below.  Text fixtures use a repeat of
+the letter ``u`` which that meter encodes EXACTLY linearly (2 chars = 1
+token), keeping arithmetic exact and immune to tokenizer quirks.
 
 Contract pinned here:
   * below the warn threshold: no warning, no trim;
@@ -42,7 +45,7 @@ import unittest
 import uuid as uuid_module
 
 from bash_agent.context import ContextManager
-from bash_agent.tokenizer import count_tokens
+from tests.helpers.fakes import DeterministicTokenCounts, deterministic_count_tokens
 
 # ---------------------------------------------------------------------------
 # Shared harness — reuse the same conventions as test_context_pruning.py
@@ -123,7 +126,7 @@ class TestWarningInjection(WarningCase):
 
     def test_no_warning_below_threshold(self):
         sys_msg = self.plain_msg("system", self.system_prompt())
-        # sys (~56 t) + 200-token filler = ~256 t < 297.
+        # sys (~57 t) + 200-token filler = ~257 t < 297.
         self.cm.history = [sys_msg, self.plain_msg("user", tokfill(200))]
         before_len = len(self.cm.history)
 
@@ -268,6 +271,26 @@ class TestResetReArmsWarning(WarningCase):
         self.cm.add_message("user", tokfill(250))  # cross threshold again
         self.assertTrue(self.cm._warning_sent)
         self.assertEqual(len(self.warning_messages()), 1)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic local token meter for these warning fixtures.
+# The production accounting now goes through LiteLLM/generic tokenizers whose
+# exact ratios differ from the old hard-coded DeepSeek ones.  These tests
+# exercise the *warning / deferred-trim wiring* against a fixed, deterministic
+# tokenizer (offline tiktoken cl100k_base), so their exact token arithmetic
+# stays valid no matter which backend is installed.
+# ---------------------------------------------------------------------------
+_local_token_counts = DeterministicTokenCounts(fixture_module=__import__(__name__))
+count_tokens = deterministic_count_tokens
+
+
+def setUpModule():
+    _local_token_counts.start()
+
+
+def tearDownModule():
+    _local_token_counts.stop()
 
 
 if __name__ == "__main__":
