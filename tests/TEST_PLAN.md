@@ -277,47 +277,47 @@ in the header. Direct-call test on a pure method.
 
 ## 4. Context Management — `context.ContextManager`
 
-### T-18 — Multimodal content length accounting (P1)
+### T-18 — Multimodal content TOKEN accounting (P1)
 
 - [x] **Implemented** (`tests/unit/test_context_pruning.py`)
 
-`_content_length` on: plain string; list with text parts; list with N
-`image_url` parts (charged at 1000 tokens/megapixel — resolution decoded
-from the data URL, ×8 chars/token); list with `input_audio` parts (charged
-at 400 tokens/minute — MP3 frame-header duration parse with a per-payload
-cache); mixed; non-str/non-list → 0. Undecodable image URLs and unparseable
-audio payloads fall back to the legacy flat estimates (≈6400 / ≈50000
-chars) and never scale with the raw base64 payload size. The audio branch
-is CORE accounting: the full base64 MP3 lands in history verbatim, so
-pruning would crash/mis-account without it. These numbers feed pruning
-decisions, so drift here silently changes when trimming kicks in.
-Static-method test, zero setup.
+`_content_tokens` on: plain string (counted in TRUE provider tokens via
+`bash_agent.tokenizer.count_tokens`); list with text parts; list with N
+`image_url` parts (charged at 1000 tokens/MEGAPIXEL — resolution decoded
+from the data URL in tokens, NO historical ×8 inflation); list with
+`input_audio` parts (charged at 400 tokens/MINUTE — MP3 frame-header
+duration parse with a per-payload cache); mixed; non-str/non-list → 0.
+Undecodable image URLs and unparseable audio payloads use flat TOKEN
+fallbacks (800 tokens / 6000 tokens) and never scale with the raw base64
+payload length. Text fixtures use `tokfill(n)` (`'u'*2n`, verified 1:1
+token) so all arithmetic is exact in tokens. Static-method test, zero setup.
 
 ### T-19 — Hysteresis pruning ladder (P0)
 
 - [x] **Implemented** (`tests/unit/test_context_pruning.py`)
 
-Builds a history over `CONTEXT_LIMIT` (patch `bash_agent.config.CONTEXT_LIMIT`
-to something tiny like 2,000 for speed) containing: system prompt, old
-BASH_OUTPUT blocks, old command blocks, and plain messages. Asserts the
-documented ladder: oldest outputs replaced with
-`[BASH_OUTPUT DELETED TO SAVE CONTEXT]` first; commands truncated to 80 chars
-with `...[TRUNCATED]`; index 0 never touched; loop terminates with total ≤
-target (80%). This is the most intricate logic in the package and currently
-has zero coverage.
+Constructs `ContextManager(uid, context_limit=N)` (per-instance TOKEN ceiling
+— mirrors the Agent-resolved model-window path, no global patch) with a small
+N, containing system prompt, old BASH_OUTPUT blocks, command blocks, and
+plain messages built with exact `tokfill` token counts. Asserts: no action
+below / exactly at the ceiling; strictly over it → trim until total tokens
+≤ 80% of N; oldest output bodies replaced with
+`[BASH_OUTPUT DELETED TO SAVE CONTEXT]` while fences survive; commands
+truncated to 80 chars plus `...[TRUNCATED]`; index 0 never touched; repeated
+trims are stable; degenerate oversized lone system messages never loop.
 
 ### T-20 — Image- and audio-bearing messages dropped wholesale (P0)
 
 - [x] **Implemented** (`tests/unit/test_context_pruning.py`)
 
-Under pruning pressure, a message whose content is a list (multimodal) must be
+Under token pressure, a message whose content is a list (multimodal) must be
 removed entirely rather than regex-trimmed (which would raise TypeError).
-Constructs a tiny-limit history mixing list-content and string messages and
-asserts the list message is popped while string messages get the normal
-ladder treatment. An explicit audio-bearing fixture (text + `input_audio`
-parts) pins the same wholesale-drop behavior for transcribe-attached turns;
-the audio drop uses the same `IMAGE_DROP_BANNER` banner as images. Regression
-guard for the fix in commit 78773ca.
+Using flat token costs (image ~800, audio ~6000) the fixture is over the
+per-instance ceiling; asserts the list message is popped whole while string
+messages get normal ladder treatment and the system prompt survives. The
+audio-bearing fixture (text + `input_audio` parts) pins the same behavior for
+transcribe-attached turns; audio uses the same `IMAGE_DROP_BANNER` as images.
+Regression guard for the fix in commit 78773ca.
 
 ### T-21 — Scratchpad one-shot injection and VISIBLE math (P1)
 
@@ -350,10 +350,10 @@ guard for the fixed `import sys`: a malformed `history.json` must print
 - [x] **Implemented** (`tests/unit/test_context_warning.py`)
 
 `add_message()` must warn the LLM to back up findings to the SCRATCHPAD once
-the conversation crosses `CONTEXT_WARN_PERCENT`% (99%) of `CONTEXT_LIMIT`,
-then DEFER hard pruning until the warning has been seen by the model, so the
-latest backup commands/outputs survive. Patch
-`bash_agent.context.CONTEXT_LIMIT` tiny (CONTEXT_WARN_PERCENT stays 99); assert:
+the conversation crosses `CONTEXT_WARN_PERCENT`% (99%) of the per-instance
+token ceiling, then DEFER hard pruning until the warning has been seen by the
+model, so the latest backup commands/outputs survive. Construct with
+`ContextManager(uuid, context_limit=300)` (CONTEXT_WARN_PERCENT stays 99); assert:
 below threshold → no warning; exactly at threshold → no warning (guard is
 strictly `>`); crossing threshold → exactly ONE user-role warning injected,
 no trim yet; subsequent user traffic (backup-command commits) still triggers
@@ -652,8 +652,8 @@ the caller. Seam: same as T-43.
 `ContextManager(uuid, context_limit=N)` now uses `self.context_limit` for the
 SCRATCHPAD warning threshold (`N * CONTEXT_WARN_PERCENT / 100`) and the 80%
 hysteresis trim target instead of the module constant `CONTEXT_LIMIT`. Tests
-construct a manager with a deliberately tiny ceiling (1000 chars) even though
-the real module constant is ~512k, then prove:
+construct a manager with a deliberately tiny TOKEN ceiling (1000) even though
+the real module fallback is 327,680 tokens, then prove:
 warning fires when history crosses `N*99%`;
 once the warning is confirmed, pruning drives history ≤ `N`;
 and a manager built with no explicit `context_limit` still equals the module
@@ -664,28 +664,28 @@ and a manager built with no explicit `context_limit` still equals the module
 - [x] **Implemented** (`tests/unit/test_model_context_limit.py::AgentContextDerivationCase`)
 
 `_fetch_model_context_limit()` reads the selected model's `context_length`
-(in tokens) from the OpenRouter catalog and sets
-`model_context_limit_chars = int(context_length * CHARS_PER_TOKEN / 4)` where
-CHARS_PER_TOKEN=8 — i.e. a quarter of the token window expressed in characters,
-so the agent keeps ~75% headroom inside the real window. The method returns/leaves
-`None` whenever the network fails, the model id is absent from the cached
-catalog, or the entry lacks a usable `context_length`, so `__init__` always
-has a safe fallback.
+(in tokens) from the OpenRouter catalog and sets `model_context_limit_tokens
+= int(context_length / 4)` plus `model_full_context_tokens = context_length`
+— i.e. a quarter of the token window (in tokens, not characters), so the
+agent keeps ~75% headroom inside the real window. The method leaves both
+attributes `None` whenever the network fails, the model id is absent from
+the cached catalog, or the entry lacks a usable `context_length`, so
+`__init__` always falls back to the config token ceiling.
 
 ### T-47 — `Agent.__init__` wires the model ceiling into ContextManager (P0)
 
 - [x] **Implemented** (`tests/unit/test_model_context_limit.py::AgentConstructorWiringCase`)
 
-`__init__` resolves `context_limit = model_context_limit_chars or
+`__init__` resolves `context_limit = model_context_limit_tokens or
 config.CONTEXT_LIMIT` and passes that value into `ContextManager(...,
 context_limit=...)`, and the budget-reporting percentage divides by
 `self.context.context_limit`. With the shared offline stub (which mirrors the
-production API-failure path and yields `None`) the agent falls back to
-`config.CONTEXT_LIMIT`; with a stub that simulates a successful probe (e.g.
-4096 ctx tokens → 8192 chars) both `agent.context_limit` and
-`agent.context.context_limit` equal that derived ceiling. `self._get_models_catalog()`
-caches the /models payload for ~1h so the three startup probes (multimodal,
-reasoning, context) issue a single HTTP GET.
+production API-failure path and yields both token attrs `None`) the agent
+falls back to `config.CONTEXT_LIMIT`; with a stub that simulates a successful
+probe (e.g. 4096 ctx tokens → 1024 budget tokens) both `agent.context_limit`
+and `agent.context.context_limit` equal that derived ceiling.
+`self._get_models_catalog()` caches the /models payload for ~1h so the three
+startup probes (multimodal, reasoning, context) issue a single HTTP GET.
 
 ## Suggested Implementation Order
 

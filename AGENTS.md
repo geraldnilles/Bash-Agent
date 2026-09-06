@@ -72,7 +72,7 @@ This is the heart of the project. The `Agent` class:
 | `_get_models_catalog()` | Fetches & caches the OpenRouter `/api/v1/models` catalog for ~1h. Returns a list of model dicts, or `[]` on API failure so callers fall back to safe defaults. Sharing one HTTP request across the multimodal/reasoning/context probes avoids three API calls at startup. |
 | `_check_model_capabilities()` | Queries the OpenRouter models API to determine the model's supported input modalities. Sets `self.multimodal_capabilities` to a list like `["image"]`, or `None` for text-only models (or if the probe fails). |
 | `_fetch_model_reasoning_info()` | Queries the OpenRouter models API for the model's reasoning support and sets `reasoning_supported_efforts`, `reasoning_mandatory`, `reasoning_default_effort`. Falls back to permissive defaults on network failure. |
-| `_fetch_model_context_limit()` | Queries the OpenRouter models API for the model's `context_length` (tokens) and sets `model_context_limit_chars = int(context_length_tokens * CHARS_PER_TOKEN / 4)`, i.e. a quarter of the model window converted to characters at 8 chars/token. Sets `None` on any failure/model miss so `__init__` falls back to `config.CONTEXT_LIMIT`. |
+| `_fetch_model_context_limit()` | Queries the OpenRouter models API for the model's `context_length` (tokens) and sets `model_context_limit_tokens = int(context_length_tokens / 4)` plus `model_full_context_tokens`. The session budget is a QUARTER of the true model window in TOKENS. Both stay `None` on any failure/model miss so `__init__` falls back to `config.CONTEXT_LIMIT`. |
 
 **The fenced-block regex pattern** (used in `_extract_blocks`):
 - Bash: `---START_BASH_COMMAND-{uuid}---\n(.*?)\n---END_BASH_COMMAND-{uuid}---`
@@ -112,7 +112,7 @@ All tunable constants. **Modify this file to change defaults.**
 | Constant | Default | Where Used |
 |----------|---------|------------|
 | `DEFAULT_MODEL` | `"deepseek/deepseek-v4-pro"` | `agent.py` — fallback model |
-| `CONTEXT_LIMIT` | 512,000 chars (fallback) | `context.py` — *fallback* context ceiling. The runtime ceiling is normally model-derived (`context_length` × 8 chars/token ÷ 2) by `agent.py`; this constant is only used when the OpenRouter probe fails or the model isn't catalogued. |
+| `CONTEXT_LIMIT` | 327,680 tokens (fallback) | `context.py` — *fallback* TOKEN ceiling (¼ of the 1,310,720-token DeepSeek v4 flash window). The runtime ceiling is normally model-derived (`context_length / 4`) by `agent.py`; this constant is only used when the OpenRouter probe fails or the model isn't catalogued. |
 | `CONTEXT_WARN_PERCENT` | 99% | `context.py` — % of the *instance* `context_limit` at which the one-time SCRATCHPAD-backup warning is injected |
 | `SCRATCHPAD_LIMIT` | 80,000 chars | `context.py` — scratchpad truncation warning |
 | `OUTPUT_LIMIT` | 10,000 chars | `agent.py` — output block truncation |
@@ -139,7 +139,7 @@ Manages the message list (`self.history: List[Dict[str, str]]`), context pruning
 
 1. **Message storage:** `add_message(role, content)` appends. The effective ceiling comes from the instance attribute `self.context_limit` (set by `Agent` from the model's `context_length`; defaults to the module constant `CONTEXT_LIMIT` when constructed bare).
    - **Context-limit warning:** once the conversation crosses `CONTEXT_WARN_PERCENT`% of the instance `context_limit` (99%), a one-time user-role message is injected telling the LLM to back up important notes to the SCRATCHPAD before the oldest ~20% of history is trimmed. Trimming is DEFERRED until the warning is confirmed — an ASSISTANT message must be added afterward (proving the model read the warning and issued its backup commands). It is acceptable to briefly exceed the ceiling to deliver the warning. `reset` re-arms the flags.
-2. **Context pruning** (`_trim_context_if_needed()`): When total characters exceed the instance `context_limit`, incrementally trims the oldest messages down to 80% of that limit:
+2. **Context pruning** (`_trim_context_if_needed()`): When TOTAL TOKENS (measured by `bash_agent.tokenizer.count_tokens`) exceed the instance `context_limit`, incrementally trims the oldest messages down to 80% of that limit:
    - Multimodal messages (list content, e.g. `image_url` blocks) cannot be block-trimmed because the regex operations require strings (a list would raise `TypeError`). They are dropped entirely with no breadcrumb marker; surrounding context makes it obvious what happened.
    - Step 1: Delete the content of old `BASH_OUTPUT`/`PYTHON_OUTPUT` blocks entirely (replaced with `[BASH_OUTPUT DELETED TO SAVE CONTEXT]`)
    - Step 2: Truncate old `BASH_COMMAND`/`PYTHON_COMMAND` blocks to 80 chars
@@ -148,7 +148,7 @@ Manages the message list (`self.history: List[Dict[str, str]]`), context pruning
 3. **Scratchpad one-shot injection** (`get_scratchpad_block()`): Reads `SCRATCHPAD.md` and returns a fenced block with a `VISIBLE_{pct}%` header (truncated at `SCRATCHPAD_LIMIT` with an `[ERROR]` suffix when oversized). `Agent.run()` calls it once for a fresh session's first user message — NOT re-injected on later changes.
 4. **Persistence** (`save_history()` / `load_history()`): Serializes `{uuid, history}` to `.bash_agent_tmp/history.json`. Called after every message. Loaded on `--resume`.
 
-**Content length calculation** (`_content_length()`): Handles both string content (legacy) and list-of-dicts content (multimodal format). Image blocks are charged by resolution at 1000 tokens/megapixel (×8 chars/token), derived by decoding the data URL; audio (`input_audio` parts) is charged by clip length at 400 tokens/minute, derived by parsing the MP3 frame headers (cached per payload). Undecodable/unparseable payloads fall back to the legacy flat rates (~800 tokens/6400 chars for images, ~6000 tokens/50000 chars for audio). Never scales with the raw base64 payload size.
+**Content TOKEN calculation** (`ContextManager._content_tokens()`): Text (strings and `{"type": "text"}` parts) is tokenized with the model's real tokenizer (`bash_agent.tokenizer.count_tokens` — no character heuristics). `image_url` parts are charged 1000 tokens/MEGAPIXEL from the decoded data URL; `input_audio` parts 400 tokens/MINUTE from parsed MP3 frames (both cached). Undecodable payloads fall back to flat TOKEN estimates (800 image / 6000 audio). NEVER scales with the raw base64 payload size.
 
 ---
 
@@ -402,7 +402,7 @@ To add a new tool (like `vision` or `search`):
 - **`systemd-run` permissions**: Adding `--property=` flags can break isolation. Always test with a command that tries to write to `/etc` to confirm sandboxing.
 - **Context pruning off-by-one**: The system prompt is at index 0. Pruning iterates from index 1. Don't change this without understanding the trimming loop.
 - **Scratchpad one-shot injection**: `Agent.run()` calls `ContextManager.get_scratchpad_block()` once at the start of a FRESH session (skipped on `--resume` since history already carries it). The block is prepended to the first user message. It is NOT re-injected on later changes — the LLM re-reads via `cat` when it needs a refresh. `get_scratchpad_block()` applies the `SCRATCHPAD_LIMIT` truncation (80k chars) with an honest `VISIBLE_%` header.
-- **Multimodal content format**: When `multimodal_capabilities` includes `"image"` and/or `"audio"`, images/audio attached via `vision.py`/`transcribe.py` cause the agent to construct content as a list of content blocks `[{"type": "text", ...}, {"type": "image_url", ...}, {"type": "input_audio", ...}]` instead of a plain string. The `_content_length()` method and pruning logic must handle both formats.
+- **Multimodal content format**: When `multimodal_capabilities` includes `"image"` and/or `"audio"`, images/audio attached via `vision.py`/`transcribe.py` cause the agent to construct content as a list of content blocks `[{"type": "text", ...}, {"type": "image_url", ...}, {"type": "input_audio", ...}]` instead of a plain string. The `ContextManager._content_tokens()` method and pruning logic must handle both formats.
 
 ---
 

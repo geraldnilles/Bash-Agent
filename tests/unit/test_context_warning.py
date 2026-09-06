@@ -14,6 +14,12 @@ New behavior (ROADMAP 'Context limit warning'):
     the trim).
   * It is acceptable to briefly exceed CONTEXT_LIMIT to deliver the warning.
 
+Context accounting is measured in TOKENS (the model's real tokenizer, via
+bash_agent.tokenizer.count_tokens), NOT characters.  Text fixtures therefore
+use a repeat of the letter ``u`` which the DeepSeek tokenizer encodes
+EXACTLY linearly: 2 chars = 1 token (verified empirically).  This keeps the
+arithmetic exact and immune to tokenizer quirks around multi-char runs.
+
 Contract pinned here:
   * below the warn threshold: no warning, no trim;
   * crossing the threshold: exactly one warning injected, NO trim yet;
@@ -22,10 +28,11 @@ Contract pinned here:
   * the warning text mentions backing up to the SCRATCHPAD;
   * `reset` (via agent._handle_special_command) re-arms the flags.
 
-Seam notes: context.py binds CONTEXT_LIMIT and CONTEXT_WARN_PERCENT via
-`from bash_agent.config import`, so tests patch
-bash_agent.context.CONTEXT_LIMIT (CONTEXT_WARN_PERCENT stays at production
-99).
+Seam notes: each ContextManager is constructed with an explicit
+per-instance ``context_limit=LIMIT`` (the same instance-ceiling pathway the
+Agent uses after resolving the model's token window).  No module-global
+constant is patched here, so these tests are immune to cross-file pollution.
+CONTEXT_WARN_PERCENT stays at the production value (99).
 """
 
 import contextlib
@@ -33,26 +40,36 @@ import io
 import re
 import unittest
 import uuid as uuid_module
-from unittest import mock
 
 from bash_agent.context import ContextManager
+from bash_agent.tokenizer import count_tokens
 
 # ---------------------------------------------------------------------------
 # Shared harness — reuse the same conventions as test_context_pruning.py
 # ---------------------------------------------------------------------------
 
-LIMIT = 2000                              # patched CONTEXT_LIMIT
+# Token budget for the trimmed ContextManager.
+LIMIT = 300                               # per-instance ContextManager ceiling (TOKENS)
 WARN_PERCENT = 99                          # production config value
-WARN_THRESHOLD = int(LIMIT * (WARN_PERCENT / 100.0))  # 1980
-TARGET = int(LIMIT * 0.8)                  # 1600 hysteresis target
+WARN_THRESHOLD = int(LIMIT * (WARN_PERCENT / 100.0))  # 297
+TARGET = int(LIMIT * 0.8)                  # 240 hysteresis target
 
 HYSTERESIS_BANNER = "Initiating hysteresis cleanup"
 WARNING_MARKER = "back up any important findings"
 
 
 def _total_length(history):
-    """Mirror of the production accounting."""
-    return sum(ContextManager._content_length(m.get("content", "")) for m in history)
+    """Mirror of the production accounting: sum of _content_tokens."""
+    return sum(ContextManager._content_tokens(m.get("content", "")) for m in history)
+
+
+def tokfill(tokens):
+    """Return a plain string that the tokenizer encodes to EXACTLY `tokens`.
+
+    ``u`` encodes linearly as 2 chars per 1 token, verified empirically.
+    """
+    assert tokens >= 0
+    return "u" * (2 * tokens)
 
 
 class WarningCase(unittest.TestCase):
@@ -66,16 +83,20 @@ class WarningCase(unittest.TestCase):
         self._stdout_cm = contextlib.redirect_stdout(self.stdout_buf)
         self._stdout_cm.__enter__()
         self.uid = str(uuid_module.uuid4())
-        self._limit_patch = mock.patch("bash_agent.context.CONTEXT_LIMIT", LIMIT)
-        self._limit_patch.start()
-        self.cm = ContextManager(self.uid)
+        # Explicit per-instance token ceiling (mirrors Agent wiring) — no
+        # module-global constant is patched, eliminating any risk of a
+        # leaked patch leaking into other test modules.
+        self.cm = ContextManager(self.uid, context_limit=LIMIT)
 
     def tearDown(self):
-        self._limit_patch.stop()
         self._stdout_cm.__exit__(None, None, None)
         self._chdir_cm.__exit__(None, None, None)
 
     # -- helpers ------------------------------------------------------------
+
+    def sys_tokens(self):
+        """Token cost of the standard system-prompt fixture."""
+        return count_tokens(self.system_prompt())
 
     def system_prompt(self, pad=100):
         return "You are the system prompt. " + "S" * pad
@@ -102,10 +123,11 @@ class TestWarningInjection(WarningCase):
 
     def test_no_warning_below_threshold(self):
         sys_msg = self.plain_msg("system", self.system_prompt())
-        self.cm.history = [sys_msg, self.plain_msg("user", "a" * 1700)]
+        # sys (~56 t) + 200-token filler = ~256 t < 297.
+        self.cm.history = [sys_msg, self.plain_msg("user", tokfill(200))]
         before_len = len(self.cm.history)
 
-        self.cm.add_message("user", "z" * 50)  # 127+1700+50 = 1877 < 1980
+        self.cm.add_message("user", "zz")  # still comfortably below 297
 
         self.assertEqual(len(self.cm.history), before_len + 1)
         self.assertFalse(self.cm._warning_sent)
@@ -115,11 +137,11 @@ class TestWarningInjection(WarningCase):
 
     def test_exactly_at_threshold_no_warning(self):
         # Boundary: guard is `total > warn_threshold` -> inject, so a history
-        # sitting EXACTLY on the threshold must NOT inject (mirrors the
-        # CONTEXT_LIMIT `<=` boundary in the trim guard).
+        # sitting EXACTLY on the threshold must NOT inject.
+        sys_tokens = self.sys_tokens()
+        filler_len = WARN_THRESHOLD - sys_tokens          # exact fill to threshold
         sys_msg = self.plain_msg("system", self.system_prompt())
-        filler_len = WARN_THRESHOLD - _total_length([sys_msg])
-        self.cm.history = [sys_msg, self.plain_msg("user", "f" * filler_len)]
+        self.cm.history = [sys_msg, self.plain_msg("user", tokfill(filler_len))]
         self.assertEqual(_total_length(self.cm.history), WARN_THRESHOLD)
 
         # Appending a zero-length message leaves total exactly at the
@@ -135,14 +157,13 @@ class TestWarningInjection(WarningCase):
         self.assertEqual(len(self.warning_messages()), 1)
 
     def test_crossing_threshold_injects_once_and_defers_trim(self):
-        # Build a history just under the threshold, then cross it with a single
-        # add_message. The warning must be injected as a user message and NO
-        # pruning may happen yet (the LLM has not seen it / not responded).
+        # Build a history just under the threshold, then cross it.  The
+        # warning must be injected as a user message and NO pruning may
+        # happen yet (the LLM has not confirmed it).
         sys_msg = self.plain_msg("system", self.system_prompt())
-        self.cm.history = [sys_msg, self.plain_msg("user", "a" * 1700)]
-        before = _total_length(self.cm.history)  # 1827 < 1980
+        self.cm.history = [sys_msg, self.plain_msg("user", tokfill(200))]
 
-        self.cm.add_message("user", "x" * 200)  # 2027 > 1980
+        self.cm.add_message("user", tokfill(60))  # 200 + 60 = crosses 297
 
         self.assertTrue(self.cm._warning_sent)
         self.assertFalse(self.cm._warning_confirmed)
@@ -156,7 +177,8 @@ class TestWarningInjection(WarningCase):
 
     def test_warning_fires_only_once(self):
         sys_msg = self.plain_msg("system", self.system_prompt())
-        self.cm.history = [sys_msg, self.plain_msg("user", "a" * 2000)]  # > threshold
+        # Directly seeded OVER the threshold so the first add_message warns.
+        self.cm.history = [sys_msg, self.plain_msg("user", tokfill(250))]  # >297
 
         # Two crossing adds: only the FIRST should inject the warning.
         self.cm.add_message("user", "u1")
@@ -182,9 +204,9 @@ class TestDeferredTrimUntilConfirmed(WarningCase):
     def setUp(self):
         super().setUp()
         sys_msg = self.plain_msg("system", self.system_prompt())
-        self.cm.history = [sys_msg, self.plain_msg("user", "a" * 1700)]
+        self.cm.history = [sys_msg, self.plain_msg("user", tokfill(200))]
         # Cross the threshold -> warning injected, trim deferred.
-        self.cm.add_message("user", "x" * 200)  # 1827 + 200 = 2027 > 1980
+        self.cm.add_message("user", tokfill(60))
         self.assertTrue(self.cm._warning_sent)
         self.assertFalse(self.cm._warning_confirmed)
 
@@ -200,7 +222,7 @@ class TestDeferredTrimUntilConfirmed(WarningCase):
         # The model's next assistant turn proves it read the warning; pruning
         # then runs, removing OLDEST messages while the warning itself and the
         # model's fresh (backup-command) content near the end survive.
-        self.cm.add_message("assistant", "y")
+        self.cm.add_message("assistant", "ack")
         self.assertTrue(self.cm._warning_confirmed)
         self.assertEqual(self.banners(), 1)
         self.assertLessEqual(_total_length(self.cm.history), TARGET)
@@ -230,8 +252,8 @@ class TestResetReArmsWarning(WarningCase):
 
     def test_reset_clears_both_flags(self):
         sys_msg = self.plain_msg("system", self.system_prompt())
-        self.cm.history = [sys_msg, self.plain_msg("user", "a" * 2000)]
-        self.cm.add_message("user", "u1")
+        self.cm.history = [sys_msg, self.plain_msg("user", tokfill(250))]  # >297
+        self.cm.add_message("user", "u1")   # crosses -> warning fires
         self.assertTrue(self.cm._warning_sent)
 
         # Simulate the agent-side `reset` handler: keep only the system prompt
@@ -243,7 +265,7 @@ class TestResetReArmsWarning(WarningCase):
         # The fresh session can now warn again as it regrows.
         self.assertFalse(self.cm._warning_sent)
         self.assertFalse(self.cm._warning_confirmed)
-        self.cm.add_message("user", "b" * 2000)  # cross threshold again
+        self.cm.add_message("user", tokfill(250))  # cross threshold again
         self.assertTrue(self.cm._warning_sent)
         self.assertEqual(len(self.warning_messages()), 1)
 

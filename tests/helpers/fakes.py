@@ -506,11 +506,12 @@ def _stub_model_reasoning_info(self):
 def _stub_model_context_info(self):
     """Offline stand-in for Agent._fetch_model_context_limit.
 
-    Mirrors the production method's API-failure fallback (sets
-    model_context_limit_chars = None) so __init__ resolves the config
-    default ceiling without any network access.
+    Mirrors the production method's API-failure fallback (sets both token
+    attributes to None) so __init__ resolves the config default ceiling
+    without any network access.
     """
-    self.model_context_limit_chars = None
+    self.model_context_limit_tokens = None
+    self.model_full_context_tokens = None
 
 
 def _make_agent(uuid_str: Optional[str] = None, **agent_kwargs) -> Any:

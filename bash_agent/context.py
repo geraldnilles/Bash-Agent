@@ -2,15 +2,22 @@ import os
 import re
 import io
 import base64
-from typing import List, Dict, Union
+from typing import List, Dict
 import json
 import sys
 from bash_agent.config import CONTEXT_LIMIT, CONTEXT_WARN_PERCENT, SCRATCHPAD_LIMIT, HISTORY_FILE
+from bash_agent.tokenizer import count_tokens
 
-# Token → character conversion rate used throughout the context-accounting
-# code. Tokens are converted to characters at 8 chars/token (the historically
-# documented exchange rate).
-CHARS_PER_TOKEN = 8
+# Context accounting is measured in TOKENS (what the provider bills in text).
+#
+# Historical code counted raw characters and divided by a nominal 8 chars/token.
+# Real DeepSeek BPE text averages only ~3.5 chars/token, so the /8 shortcut
+# undercounted token pressure by >2x: the "Context %" readout looked ~2.3x too
+# small AND trim/warning thresholds fired ~2.3x too late in real tokens, letting
+# a session fill far past the intended safety quarter. Text is now tokenized
+# with the model's real local tokenizer (bash_agent.tokenizer.count_tokens).
+# Image/audio parts were always specified in TRUE tokens (1000/MP, 400/min) and
+# their historical "x8" character inflation is removed here.
 
 # Multimodal content accounting rates (in tokens per unit):
 IMAGE_TOKENS_PER_MEGAPIXEL = 1000
@@ -20,20 +27,19 @@ AUDIO_TOKENS_PER_MINUTE = 400
 # for the payload-size fallback estimate of clip length.
 _MP3_FALLBACK_KBPS = 128
 
-# Fallback flat estimates (in characters) used when a payload cannot be
-# decoded / parsed to derive the true size. Mirrors the legacy flat rates.
-IMAGE_FALLBACK_CHARS = 800 * CHARS_PER_TOKEN      # 6400
-AUDIO_FALLBACK_CHARS = 50000
+# Fallback flat estimates (in TOKENS) when a multimodal payload cannot be
+# decoded / parsed to derive the true size. Mirrors the legacy flat rates
+# expressed as the true token counts they represented.
+IMAGE_FALLBACK_TOKENS = 800
+AUDIO_FALLBACK_TOKENS = 6000
 
 # Bounded cache: payload string -> estimated MP3 duration (or None).
-# _content_length() re-measures the same history over and over during the
-# hysteresis pruning loop; decoding a multi-megabyte base64 payload each
-# time would dominate that loop. The payload strings are held by the
-# history anyway, so the cache only stores references + a float.
+# The same history is re-measured over and over during the hysteresis pruning
+# loop; decoding a multi-megabyte base64 payload each time would dominate that
+# loop, so the payload strings are cached. (count_tokens caches text counts.)
 _MP3_DURATION_CACHE: Dict[str, float] = {}
 _MP3_DURATION_CACHE_MAX = 128
-# Bounded cache: data-URL -> megapixels (None when undecodable). Same
-# rationale as the audio cache below.
+# Bounded cache: data-URL -> megapixels (None when undecodable).
 _IMAGE_MP_CACHE: Dict[str, float] = {}
 _IMAGE_MP_CACHE_MAX = 128
 # Sentinel distinguishing "not cached" from "cached as None (unparseable)".
@@ -44,12 +50,11 @@ class ContextManager:
     def __init__(self, uuid_str: str, context_limit: int | None = None):
         self.history: List[Dict[str, str]] = []
         self.uuid = uuid_str
-        # Per-session context ceiling in characters. An explicitly provided
-        # value (Agent resolves it from the OpenRouter model's context_length
-        # so the agent never pushes past ~a quarter of what the model can hold)
-        # wins over the module-level fallback CONTEXT_LIMIT.
+        # Per-session context ceiling in TOKENS. An explicitly provided value
+        # (Agent resolves it from the OpenRouter model's context_length as
+        # ctx_tokens/4) wins over the module-level fallback CONTEXT_LIMIT.
         self.context_limit = context_limit if context_limit is not None else CONTEXT_LIMIT
-        
+
         # Create the new temp directory and set the scratchpad path inside it
         tmp_dir = os.path.abspath(".bash_agent_tmp")
         os.makedirs(tmp_dir, exist_ok=True)
@@ -71,34 +76,43 @@ class ContextManager:
                 f.write("# Project Scratchpad\n\n")
 
     @staticmethod
-    def _content_length(msg_content):
-        """Calculate character length of content, supporting both string and list (multimodal) formats."""
+    def _content_tokens(msg_content):
+        """TOKEN length of content -- supports string and list (multimodal).
+
+        Plain strings / text parts are tokenized with the model's real local
+        tokenizer (count_tokens). image_url parts are charged
+        IMAGE_TOKENS_PER_MEGAPIXEL (1000 tokens/MP) and input_audio parts
+        AUDIO_TOKENS_PER_MINUTE (400 tokens/min); undecodable payloads fall
+        back to their flat token estimates. Junk items contribute 0; anything
+        that is neither str nor list measures 0 (never raises).
+        """
         if isinstance(msg_content, str):
-            return len(msg_content)
+            return count_tokens(msg_content)
         elif isinstance(msg_content, list):
             total = 0
             for item in msg_content:
                 if isinstance(item, dict):
+                    t = item.get("type")
                     # Text type items
-                    if item.get("type") == "text":
-                        total += len(item.get("text", ""))
+                    if t == "text":
+                        total += count_tokens(item.get("text", ""))
                     # Images are charged by resolution: 1000 tokens per megapixel.
-                    elif item.get("type") == "image_url":
-                        total += ContextManager._image_content_length(item)
+                    elif t == "image_url":
+                        total += ContextManager._image_tokens(item)
                     # Audio is charged by clip length: 400 tokens per minute.
-                    elif item.get("type") == "input_audio":
-                        total += ContextManager._audio_content_length(item)
+                    elif t == "input_audio":
+                        total += ContextManager._audio_tokens(item)
                 elif isinstance(item, str):
-                    total += len(item)
+                    total += count_tokens(item)
             return total
         return 0
 
     @staticmethod
-    def _image_content_length(item) -> int:
-        """Character cost of one image_url part, scaled by resolution.
+    def _image_tokens(item) -> int:
+        """Token cost of one image_url part, scaled by resolution.
 
-        Uses 1000 tokens per megapixel (converted at CHARS_PER_TOKEN).  Falls
-        back to the legacy flat estimate (≈800 tokens) when the resolution
+        Uses 1000 tokens per megapixel.  Falls back to the legacy flat
+        estimate (IMAGE_FALLBACK_TOKENS = 800 tokens) when the resolution
         cannot be determined (non-data URL, undecodable payload, etc.).
         """
         # Normalize the part: {"image_url": {"url": ...}} is the shape
@@ -107,7 +121,7 @@ class ContextManager:
         if isinstance(url, dict):
             url = url.get("url", "")
         if not isinstance(url, str) or not url.startswith("data:"):
-            return IMAGE_FALLBACK_CHARS
+            return IMAGE_FALLBACK_TOKENS
         mp = _IMAGE_MP_CACHE.get(url, _MISSING)
         if mp is _MISSING:
             b64 = url.split(",", 1)[1] if "," in url else ""
@@ -123,16 +137,16 @@ class ContextManager:
                 _IMAGE_MP_CACHE.clear()
             _IMAGE_MP_CACHE[url] = mp
         if mp is None:
-            return IMAGE_FALLBACK_CHARS
-        return round(mp * IMAGE_TOKENS_PER_MEGAPIXEL * CHARS_PER_TOKEN)
+            return IMAGE_FALLBACK_TOKENS
+        return round(mp * IMAGE_TOKENS_PER_MEGAPIXEL)
 
     @staticmethod
-    def _audio_content_length(item) -> int:
-        """Character cost of one input_audio part, scaled by clip length.
+    def _audio_tokens(item) -> int:
+        """Token cost of one input_audio part, scaled by clip length.
 
-        Uses 400 tokens per minute (converted at CHARS_PER_TOKEN).  Falls
-        back to the legacy flat estimate (≈6k tokens) when the duration
-        cannot be determined.
+        Uses 400 tokens per minute.  Falls back to the legacy flat estimate
+        (AUDIO_FALLBACK_TOKENS = 6000 tokens) when the duration cannot be
+        determined.
         """
         audio = item.get("input_audio")
         # Tolerate the legacy bare-string shape; dict shape is what
@@ -141,7 +155,7 @@ class ContextManager:
         # Anything but a non-empty base64 string is unparseable junk; use
         # the flat historical estimate rather than a misleading 0.
         if not isinstance(data, str) or not data:
-            return AUDIO_FALLBACK_CHARS
+            return AUDIO_FALLBACK_TOKENS
         # Cache hit avoids re-decoding the (often multi-megabyte) base64
         # payload on every pruning pass over the same history.
         duration = _MP3_DURATION_CACHE.get(data, _MISSING)
@@ -170,9 +184,9 @@ class ContextManager:
                 _MP3_DURATION_CACHE.clear()
             _MP3_DURATION_CACHE[data] = duration
         if duration is None:
-            return AUDIO_FALLBACK_CHARS
+            return AUDIO_FALLBACK_TOKENS
         tokens = duration * (AUDIO_TOKENS_PER_MINUTE / 60.0)
-        return round(tokens * CHARS_PER_TOKEN)
+        return round(tokens)
 
     @staticmethod
     def _estimate_mp3_duration(raw: bytes):
@@ -270,12 +284,12 @@ class ContextManager:
         """
         self.history.append({"role": role, "content": content})
 
-        total_chars = sum(
-            ContextManager._content_length(m.get("content", "")) for m in self.history
+        total_tokens = sum(
+            ContextManager._content_tokens(m.get("content", "")) for m in self.history
         )
         warn_threshold = int(self.context_limit * (CONTEXT_WARN_PERCENT / 100.0))
 
-        if not self._warning_sent and total_chars > warn_threshold:
+        if not self._warning_sent and total_tokens > warn_threshold:
             self._warning_sent = True
             # Defer trimming: the LLM must see this warning first so it can
             # write its findings to the SCRATCHPAD before history is pruned.
@@ -309,20 +323,20 @@ class ContextManager:
         )
 
     def _trim_context_if_needed(self):
-        total_chars = sum(ContextManager._content_length(m.get("content", "")) for m in self.history)
+        total_tokens = sum(ContextManager._content_tokens(m.get("content", "")) for m in self.history)
 
         # Guard: Do not trigger cleanup until the strict context_limit is reached/exceeded
-        if total_chars <= self.context_limit:
+        if total_tokens <= self.context_limit:
             return
 
         # Calculate the 80% hysteresis target limit
         target_limit = int(self.context_limit * 0.8)
-        print(f"[System] Context limit exceeded ({total_chars} chars, ceiling {self.context_limit}). Initiating hysteresis cleanup down to 80% ({target_limit} chars)...")
+        print(f"[System] Context limit exceeded ({total_tokens} tokens, ceiling {self.context_limit}). Initiating hysteresis cleanup down to 80% ({target_limit} tokens)...")
 
         # Incrementally trim the oldest messages until under the hysteresis target limit
         while True:
-            total_chars = sum(ContextManager._content_length(m.get("content", "")) for m in self.history)
-            if total_chars <= target_limit:
+            total_tokens = sum(ContextManager._content_tokens(m.get("content", "")) for m in self.history)
+            if total_tokens <= target_limit:
                 break
 
             trimmed_something = False

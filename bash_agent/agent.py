@@ -15,7 +15,7 @@ from bash_agent.config import DEFAULT_MODEL, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLO
 from bash_agent.utils import cleanup_tmp_folder, copy_project_to_clipboard, get_clipboard_content, get_vim_prompt
 from bash_agent.config_file import load_config
 from bash_agent import llm
-from bash_agent.context import ContextManager, CHARS_PER_TOKEN
+from bash_agent.context import ContextManager
 from bash_agent.sandbox import Sandbox
 try:
     from bash_agent import sfx as _sfx
@@ -163,14 +163,14 @@ class Agent:
         
         # Fetch the model's context window so the per-session context ceiling
         # can be a fraction of what the model can actually handle, instead of a
-        # fixed char count that may be far too small (wasted capacity) or far
-        # too large (pushing the model past its limits). See
-        # _fetch_model_context_limit() for how the char ceiling is derived.
+        # fixed count that may be far too small (wasted capacity) or far too
+        # large (pushing the model past its limits). See
+        # _fetch_model_context_limit() for how the TOKEN ceiling is derived.
         # Falls back to config.CONTEXT_LIMIT on API failure.
         self._fetch_model_context_limit()
         self.context_limit = (
-            self.model_context_limit_chars
-            if self.model_context_limit_chars
+            self.model_context_limit_tokens
+            if self.model_context_limit_tokens
             else CONTEXT_LIMIT
         )
 
@@ -240,7 +240,7 @@ class Agent:
                 f"[Debug]   reasoning supported={self.reasoning_supported_efforts}, "
                 f"mandatory={self.reasoning_mandatory}, default={self.reasoning_default_effort}, selected={_selected}\n"
                 f"[Debug]   multimodal={self.multimodal_capabilities}\n"
-                f"[Debug]   context_limit={self.context_limit:,} chars"
+                f"[Debug]   context_limit={self.context_limit:,} tokens"
             )
             print(_blob)
 
@@ -335,31 +335,35 @@ class Agent:
 
     def _fetch_model_context_limit(self):
         """Query OpenRouter API for the selected model's context_length and
-        derive a session-safe character ceiling.
+        derive a session-safe TOKEN ceiling.
 
-        OpenRouter reports context_length in TOKENS. Historical accounting
-        converts tokens to characters at ~8 chars/token; we then quarter that
-        so the agent never tries to fill more than ~a quarter of the model's
-        actual context window (giving the model room for its own output,
-        tool-call shaping, and API overhead).
+        OpenRouter reports context_length in TOKENS. We quarter it so the
+        agent never tries to fill more than ~a quarter of the model's actual
+        context window (reserving room for the model's own output, tool-call
+        shaping, and API overhead). The full window (tokens) is saved so the
+        stats line can show % of the FULL model window too.
 
         On any problem (offline, catalog missing the model, or no
-        context_length), self.model_context_limit_chars stays None so
-        __init__ falls back to the config.CONTEXT_LIMIT default.
+        context_length), self.model_context_limit_tokens and
+        self.model_full_context_tokens stay None so __init__ falls back to the
+        config.CONTEXT_LIMIT token default.
         """
         try:
+            self.model_context_limit_tokens = None
+            self.model_full_context_tokens = None
             for m in self._get_models_catalog():
                 if m.get("id") != self.model:
                     continue
                 ctx_tokens = m.get("context_length")
                 if isinstance(ctx_tokens, int) and ctx_tokens > 0:
-                    chars = int(ctx_tokens * CHARS_PER_TOKEN / 4)
-                    self.model_context_limit_chars = chars
+                    self.model_full_context_tokens = ctx_tokens
+                    self.model_context_limit_tokens = int(ctx_tokens / 4)
                     return
             # Model found but had no usable context_length.
         except Exception:
             pass
-        self.model_context_limit_chars = None
+        self.model_context_limit_tokens = None
+        self.model_full_context_tokens = None
 
     def _get_lowest_reasoning_effort(self):
         """Get the lowest supported reasoning effort for the current model."""
@@ -826,11 +830,11 @@ class Agent:
     def _handle_turn_budget_and_stats(self) -> bool:
         """Report context/cost stats after a turn and enforce the session budget.
         Returns True if the session should continue, False if the budget was exceeded."""
-        # Calculate current context size
-        current_context_chars = sum(ContextManager._content_length(m.get("content", "")) for m in self.context.history)
+        # Calculate current context size in real tokens (local tokenizer).
+        current_tokens = sum(ContextManager._content_tokens(m.get("content", "")) for m in self.context.history)
         # Percentage relative to THIS session's model-derived ceiling (falls
         # back to config.CONTEXT_LIMIT if the OpenRouter probe failed).
-        context_percent = (current_context_chars / self.context.context_limit) * 100
+        context_percent = (current_tokens / self.context.context_limit) * 100
 
         if self.last_step_cost > 0.0:
             step_info = f"This request: ${self.last_step_cost:.3f} ({self.last_step_input_tokens} tokens)"
@@ -840,7 +844,17 @@ class Agent:
             step_info = f"This request: {self.last_step_input_tokens} tokens"
             total_info = "Total: free"
 
-        print(f"{COLOR_COST}[Session Stats] Context: {context_percent:.1f}% | {step_info} | {total_info} | Provider: {self.last_step_provider or 'N/A'}{COLOR_RESET}")
+        context_readout = f"Context: {context_percent:.1f}%"
+        if getattr(self, "model_full_context_tokens", None) is not None:
+            # Also show how much of the FULL model window this occupies.
+            full_pct = (current_tokens / self.model_full_context_tokens) * 100
+            context_readout += (
+                f" ({current_tokens:,}/{self.context.context_limit:,} budget tokens) "
+                f"= {full_pct:.1f}% of {self.model_full_context_tokens:,}-token window"
+            )
+        else:
+            context_readout += f" ({current_tokens:,}/{self.context.context_limit:,} tokens)"
+        print(f"{COLOR_COST}[Session Stats] {context_readout} | {step_info} | {total_info} | Provider: {self.last_step_provider or 'N/A'}{COLOR_RESET}")
 
         if self.budget > 0 and self.session_cost >= self.budget:
             print(f"\n[Budget] Session cost ${self.session_cost:.2f} has reached the budget of ${self.budget:.2f}. Ending session.")

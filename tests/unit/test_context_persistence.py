@@ -15,7 +15,7 @@ session UUID and the full conversation history survive a process restart via
     a resumed session emits depends on this,
   * both content shapes survive the JSON round trip exactly: plain strings
     AND list-form multimodal content ([{"type": "text", ...},
-    {"type": "image_url", ...}]) — pruning and _content_length depend on
+    {"type": "image_url", ...}]) — pruning and _content_tokens depend on
     the list shape still being a list after reload,
   * a missing file returns False and leaves state untouched (fresh session),
   * a corrupt or keyless file returns False, prints
@@ -49,7 +49,7 @@ LOAD_ERROR_BANNER = "[System Error] Failed to load history:"
 
 # Realistic multimodal content part pair (same shape agent.py builds for
 # image-bearing turns; image parts are charged by decoded resolution —
-# this undecodable stub falls back to the flat ~6400 chars).
+# this undecodable stub falls back to the flat 800 tokens).
 IMAGE_PARTS = [
     {"type": "text", "text": "What does this screenshot show?"},
     {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
@@ -57,7 +57,7 @@ IMAGE_PARTS = [
 
 # Realistic audio-bearing content (same shape agent.py builds for
 # transcribe-attached turns; this unparseable stub falls back to the flat
-# ~50000 chars in _content_length).
+# ~6000 tokens when measured by _content_tokens).
 AUDIO_PARTS = [
     {"type": "text", "text": "Transcribe this meeting."},
     {"type": "input_audio",
@@ -183,7 +183,7 @@ class TestRoundTrip(PersistenceCase):
 
     def test_input_audio_parts_round_trip_exactly(self):
         """A message carrying an input_audio part survives the JSON round
-        trip byte-for-byte (pruning/_content_length depend on the shape)."""
+        trip byte-for-byte (pruning/_content_tokens depend on the shape)."""
         self.patch_history_file()
         uid = new_uid()
         cm_a = ContextManager(uid)
