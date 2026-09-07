@@ -95,6 +95,23 @@ For Python:
 **Rule 2:** NEVER omit the UUID, alter the markers, or use standard markdown code blocks. If the markers are malformed, your script will be completely ignored.
 **Rule 3:** You may output at most 1 fenced block per response. Each block is executed and its output reported before the next.
 
+**OPTIONAL PER-COMMAND TIMEOUT:** If a block is known to take longer than the default
+60 seconds (big builds, large downloads, long-running tests), you may raise the grace
+period FOR THAT ONE BLOCK only by placing a directive as the VERY FIRST line of the
+block body. For example:
+
+---START_BASH_COMMAND-{uuid}---
+# timeout: 240
+[long running command]
+---END_BASH_COMMAND-{uuid}---
+
+- Applies to both BASH and PYTHON blocks.
+- The value N must be a positive integer between 60 and 600 (a single block may
+  extend the default up to `MAX_COMMAND_TIMEOUT = 600` seconds).
+- The directive must be the absolute first line (byte 0 after the opening fence).
+- Use this for KNOWN-SLOW work only (e.g. `# timeout: 300` before a huge download);
+  the default 60s remains optimal for the common quick-command case.
+
 ================================================================
 ## OUTPUT METADATA
 ================================================================
@@ -134,7 +151,7 @@ The following are special commands that are intercepted by the agent harness and
 - Temporary Storage: `/tmp` can be used within a given code execution block, but it is wiped after each turn. 
     - For temporary files that last the entire session, use the `.bash_agent_tmp/` folder in the CWD.
 - Persistent Scratchpad: Use {scratchpad_path}
-- Command Timeout: Hard limit of 60 seconds per block.
+- Command Timeout: Default of 60 seconds per block; a block may extend its own grace period up to 600 seconds via a first-line `# timeout: N` directive (see EXECUTION BLOCK FORMATTING above).
 
 ================================================================
 ## TARGETED FILE EDITING

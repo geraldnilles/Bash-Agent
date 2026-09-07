@@ -18,12 +18,6 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
   - The subagent will operate in the same sandbox
   - The main benefit is that context can be controlled and kept in check
 
-- **Dynamic Command Timeout:**
-  - Currently, all commands have a fixed timeout
-  - Sometimes, an agent might need a longer timeout (i.e. downloading a big file from a server)
-  - Globally increasing the timeout might slow the agent down a lot
-  - Let the Agent dynamically bump up the timeout for the bash command. Add a new field in the BASH_COMMAND block
-
 ---
 
 ## Low Priority / Nice-to-Have
@@ -32,6 +26,16 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
 ---
 
 ## ✅ Completed
+- **Dynamic Command Timeout:** a single BASH/PYTHON block can now raise its own
+  grace period up to 600s via an optional first-line directive `# timeout: N`
+  (N in [60, 600]). The default remains 60s (CLI `-t` or `config.BASH_TIMEOUT`),
+  and malformed/misplaced directives degrade safely to the default with a
+  teaching note — never a silent change. Implemented across `config.py`
+  (`MAX_COMMAND_TIMEOUT = 600`), `agent.py` (`extract_timeout_directive` pure
+  helper + `_execute_script` wiring), and `sandbox.py` (optional per-call
+  `timeout=` kwarg; TimeoutExpired banner reports the ACTUAL applied seconds).
+  Covered by `tests/unit/test_timeout_directive.py` (T-46/T-47), new sandbox
+  cases, and shared `FakeSandbox.timeouts_used`.
 - **Vendor-Neutral Token Counting:** `bash_agent.tokenizer.count_tokens`
   now estimates through **LiteLLM's** `token_counter` (lazy import, forcing
   `disable_hf_tokenizer_download = True` so the bundled tiktoken BPE —

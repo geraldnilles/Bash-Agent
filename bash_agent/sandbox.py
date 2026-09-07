@@ -35,6 +35,13 @@ class Sandbox:
         except Exception:
             pass
 
+    def _resolve_timeout(self, timeout=None):
+        """Resolve per-call timeout to a valid positive int (>=1),
+        falling back to self.timeout for non-int / <1 / bool."""
+        if isinstance(timeout, int) and not isinstance(timeout, bool) and timeout >= 1:
+            return timeout
+        return self.timeout
+
     def request_write(self, path: str) -> bool:
         abs_path = os.path.abspath(path)
         print(f"\n[AGENT REQUEST] The agent is requesting write access to: {abs_path}")
@@ -47,7 +54,8 @@ class Sandbox:
         else:
             return False, f"Write access denied. User message: {ans}"
 
-    def execute(self, script_content: str) -> tuple[int, str]:
+    def execute(self, script_content: str, timeout: int = None) -> tuple[int, str]:
+        effective_timeout = self._resolve_timeout(timeout)
         # Create a local temp directory that the sandbox can see
         local_tmp = os.path.abspath(".bash_agent_tmp")
         os.makedirs(local_tmp, exist_ok=True)
@@ -92,7 +100,7 @@ class Sandbox:
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.STDOUT, 
                 text=True, 
-                timeout=self.timeout
+                timeout=effective_timeout
             )
             output = result.stdout
             exit_code = result.returncode
@@ -107,7 +115,7 @@ class Sandbox:
             self._reap_unit(unit_name)
             # Because we routed stderr to stdout, all partial output is in e.stdout
             partial_out = e.stdout if e.stdout else ""
-            output = f"[SYSTEM ERROR] Command timed out after {self.timeout} seconds.\nPartial Output:\n{partial_out}"
+            output = f"[SYSTEM ERROR] Command timed out after {effective_timeout} seconds.\nPartial Output:\n{partial_out}"
             exit_code = 124 # Standard timeout exit code
 
         except Exception as e:
@@ -120,7 +128,8 @@ class Sandbox:
 
         return exit_code, output
 
-    def execute_python(self, script_content: str) -> tuple[int, str]:
+    def execute_python(self, script_content: str, timeout: int = None) -> tuple[int, str]:
+        effective_timeout = self._resolve_timeout(timeout)
         local_tmp = os.path.abspath(".bash_agent_tmp")
         os.makedirs(local_tmp, exist_ok=True)
         
@@ -167,7 +176,7 @@ class Sandbox:
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.STDOUT, 
                 text=True, 
-                timeout=self.timeout
+                timeout=effective_timeout
             )
             output = result.stdout
             exit_code = result.returncode
@@ -176,7 +185,7 @@ class Sandbox:
             # Stop the orphaned transient service (see _reap_unit).
             self._reap_unit(unit_name)
             partial_out = e.stdout if e.stdout else ""
-            output = f"[SYSTEM ERROR] Python command timed out after {self.timeout} seconds.\nPartial Output:\n{partial_out}"
+            output = f"[SYSTEM ERROR] Python command timed out after {effective_timeout} seconds.\nPartial Output:\n{partial_out}"
             exit_code = 124
 
         except Exception as e:

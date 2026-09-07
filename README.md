@@ -240,7 +240,7 @@ Absolute counts accept an optional `K`/`M` suffix (metric: `256K` = 256,000 toke
 | `--reasoning-effort <level>` | Set reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `default` |
 | `--max-tokens <n>` | Override max output tokens (default: 8192) |
 | `--token-budget <spec>` | Context-window token budget: absolute tokens (e.g. `327680`, `256K`, `1.5M`) or a percentage of the model's context window ending in `%` (e.g. `25%`). Defaults to 25% of the model window. |
-| `-t, --timeout <n>` | Command timeout in seconds (default: 60) |
+| `-t, --timeout <n>` | Session default command timeout in seconds (default: 60). A single BASH/PYTHON block may override this up to 600s via a first-line `# timeout: N` directive. |
 | `-b, --budget <n>` | Session cost budget in USD (default: $0.10) |
 | `-r, --resume` | Restore previous session and continue |
 | `--commit` | Resume and auto-generate a git commit message |

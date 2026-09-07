@@ -11,7 +11,7 @@ import select
 from typing import List, Dict
 
 from bash_agent.prompts import get_system_prompt
-from bash_agent.config import DEFAULT_MODEL, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, DEFAULT_BUDGET
+from bash_agent.config import DEFAULT_MODEL, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, DEFAULT_BUDGET, BASH_TIMEOUT, MAX_COMMAND_TIMEOUT
 from bash_agent.token_budget import parse_token_budget, resolve_budget
 from bash_agent.utils import cleanup_tmp_folder, copy_project_to_clipboard, get_clipboard_content, get_vim_prompt
 from bash_agent.config_file import load_config
@@ -116,6 +116,150 @@ def _build_tmp_file_warning(exit_code: int, output: str) -> str | None:
         "If you need a temporary file that lasts the whole session, write it into the "
         ".bash_agent_tmp/ folder in the project directory instead."
     )
+
+
+_TIMEOUT_DIRECTIVE_RE = re.compile(
+    r"""^[ \t]*#[ \t]*timeout:[ \t]*(?P<value>[0-9]+)[ \t]*(?:\r?\n|$)""",
+    re.IGNORECASE,
+)
+
+
+def _malformed_timeout_note(first_line: str) -> "str | None":
+    """
+    Return a teaching note when the first line of a code block looks like a
+    (malformed) per-command timeout directive, else None.
+
+    This never alters execution: the caller returns the ORIGINAL script
+    unchanged and falls back to the default timeout whenever a note is
+    produced here.
+    """
+    if not first_line:
+        return None
+
+    stripped = first_line.strip()
+    lowered = stripped.lower()
+
+    # Must look like a full-line comment mentioning `timeout`, or a bare
+    # `timeout:` key with no leading `#` (both are user mistakes worth
+    # teaching about rather than silently running).
+    is_comment_attempt = lowered.startswith("#") and "timeout" in lowered
+    is_bare_key_attempt = lowered.startswith("timeout") and ":" in lowered
+    if not (is_comment_attempt or is_bare_key_attempt):
+        return None
+
+    # Explicit "space before colon" mistake.
+    if "# timeout :" in lowered or "#timeout :" in lowered:
+        return (
+            "# timeout: N directive must have NO space before the colon, "
+            "e.g. `# timeout: 240`. Malformed directives are ignored; this "
+            "block used the default timeout."
+        )
+
+    # Pull out whatever non-numeric value was supplied after a colon.
+    m = re.search(r":\s*([^\s#]+)", first_line)
+    bad_value = m.group(1) if m else None
+    if bad_value is not None and not bad_value.isdigit():
+        return (
+            "# timeout: N directive must use a positive base-10 integer "
+            f"(`# timeout: {bad_value}` is not valid). Malformed directives "
+            "are ignored; this block used the default timeout."
+        )
+
+    return (
+        "# timeout: N directive must be the VERY FIRST line, formatted exactly "
+        "as `# timeout: 240` (a positive integer between 60 and 600). "
+        "Malformed or misplaced directives are ignored; this block used the "
+        "default timeout."
+    )
+
+
+def extract_timeout_directive(script: str) -> tuple[str, "int | None", str | None]:
+    """
+    Parse an optional per-command timeout directive from a code block body.
+
+    A VALID directive is the FIRST non-blank line of the body:
+
+        # timeout: 240
+
+    Returns a 3-tuple (scrubbed_script, effective_seconds_or_None, note):
+      * scrubbed_script        - script with a *valid* directive line removed;
+                                 everything else is returned UNCHANGED.
+      * effective_seconds      - an int in [BASH_TIMEOUT, MAX_COMMAND_TIMEOUT]
+                                 when a valid directive was found, else None.
+      * note                   - an advisory string explaining clamping or a
+                                 malformed directive, or None.
+
+    Rules (see ROADMAP / AGENTS.md protocol):
+      - A valid directive MUST be the first line of the body. A directive on
+        line 2+ is NOT treated as a directive (script is never mutated there).
+      - Format is case-insensitive key `timeout`, colon, whitespace, positive
+        base-10 integer: ``# timeout: 240``.
+      - Values below BASH_TIMEOUT are clamped up to BASH_TIMEOUT.
+      - Values above MAX_COMMAND_TIMEOUT are clamped down to that ceiling.
+      - Any other line that merely *looks* like a directive (wrong key spacing,
+        non-integer value, extra text, etc.) is NOT a directive: the script
+        runs verbatim and a teaching note is returned instead.
+    """
+    if not script:
+        return script, None, None
+
+    first_line = script.split("\n", 1)[0]
+
+    m = _TIMEOUT_DIRECTIVE_RE.match(first_line)
+    if not m:
+        # Not a valid directive on line 1. Detect malformed near-miss
+        # attempts (wrong spacing, non-integer value, directive on line 2+,
+        # etc.) so we can teach the exact grammar. The ORIGINAL script always
+        # runs verbatim (we never mutate it here) and the default timeout
+        # applies.
+        note = _malformed_timeout_note(first_line)
+        if note is None:
+            # Directive may be misplaced on line 2+. Scan the rest of the
+            # body for a line that *would* be a valid directive if line 1
+            # were blank, and emit a "must be first line" note.
+            for other_line in script.split("\n")[1:]:
+                if _TIMEOUT_DIRECTIVE_RE.match(other_line):
+                    note = (
+                        "# timeout: N directive must be the VERY FIRST line "
+                        "of the block, e.g. `# timeout: 240`. A directive on "
+                        "line 2+ is ignored; this block used the default "
+                        "timeout."
+                    )
+                    break
+        return script, None, note
+    value_str = m.group("value")
+    try:
+        requested = int(value_str)
+    except ValueError:
+        note = (
+            "# timeout: N directive must use a positive base-10 integer "
+            f"(`# timeout: {value_str}` is not valid). Malformed directives are "
+            "ignored; this block used the default timeout."
+        )
+        return script, None, note
+
+    # Valid directive: strip it from the body.
+    remaining = script[len(m.group(0)):]
+
+    # Remove any leading blank lines that may have followed the directive.
+    scrubbed = remaining.lstrip("\r\n")
+
+    note = None
+    effective = requested
+    if requested < BASH_TIMEOUT:
+        effective = BASH_TIMEOUT
+        note = (
+            "# timeout: N is clamped to the minimum of "
+            f"{BASH_TIMEOUT}s (requested {requested}s)."
+        )
+    elif requested > MAX_COMMAND_TIMEOUT:
+        effective = MAX_COMMAND_TIMEOUT
+        note = (
+            "# timeout: N is clamped to the maximum of "
+            f"{MAX_COMMAND_TIMEOUT}s (requested {requested}s)."
+        )
+
+    return scrubbed, effective, note
 
 
 TRUNCATION_BANNER = "\n\n---⚠️⛔⚠️-OUTPUT_TRUNCATED_HERE-{uuid}-⚠️⛔⚠️---\n\n"
@@ -504,10 +648,26 @@ class Agent:
         Executes a bash or python script inside the sandbox, captures attached images,
         and returns formatted output.
         """
+        # Optional first-line `# timeout: N` directive (N in [BASH_TIMEOUT,
+        # MAX_COMMAND_TIMEOUT]) raises THIS block's grace period. Malformed /
+        # misplaced directives never alter execution: the script runs verbatim
+        # and an advisory note is appended to the output instead.
+        clean_script, block_timeout, timeout_note = extract_timeout_directive(script)
+
         if cmd_type == "BASH":
-            exit_code, raw_output = self.sandbox.execute(script)
+            if block_timeout is not None:
+                exit_code, raw_output = self.sandbox.execute(
+                    clean_script, timeout=block_timeout
+                )
+            else:
+                exit_code, raw_output = self.sandbox.execute(clean_script)
         else:
-            exit_code, raw_output = self.sandbox.execute_python(script)
+            if block_timeout is not None:
+                exit_code, raw_output = self.sandbox.execute_python(
+                    clean_script, timeout=block_timeout
+                )
+            else:
+                exit_code, raw_output = self.sandbox.execute_python(clean_script)
 
         # Process and strip any attached image payloads
         img_pattern = rf"---START_ATTACHED_IMAGE-{self.uuid}---\s*(.*?)\s*---END_ATTACHED_IMAGE-{self.uuid}---"
@@ -526,6 +686,11 @@ class Agent:
         if audio_matches:
             clean_output = f"{clean_output}\n[Audio attached to conversation context.]".strip()
         formatted_output = self._format_output(exit_code, clean_output, cmd_type)
+
+        # Surface the effective per-command timeout to the LLM so the outcome
+        # is never ambiguous (mirrors the existing /tmp-file warning pattern).
+        if timeout_note:
+            formatted_output = f"{formatted_output}\n\n⚠️ [SYSTEM WARNING] {timeout_note}"
 
         # Remind the model that /tmp/ is wiped every turn when a failed command
         # references a missing file under /tmp/ (see ROADMAP 'Add /tmp/ warning').

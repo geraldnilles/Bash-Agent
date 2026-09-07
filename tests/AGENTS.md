@@ -68,6 +68,11 @@ a narrow seam (`llm._CLIENT_CACHE`, `urllib.request.urlopen`,
   under the 60s harness timeout.
 - The venv interpreter is `./venv/bin/python` (3.14). Run the suite with it,
   not the system python.
+- `FakeSandbox.execute` / `execute_python` accept the optional per-call
+  `timeout` kwarg (mirroring the real `Sandbox`) and record it in
+  `timeouts_used` as tuples like `("BASH", 240)` / `("PYTHON", None)` — useful
+  for asserting that a `# timeout: N` directive was actually forwarded to the
+  sandbox and scrubbed from the script body.
 - **systemd-run + PrivateTmp vs /tmp CWDs**: `--working-directory=` or
   `ReadWritePaths=` pointing under `/tmp` fails namespace setup (exit 226/200)
   because `PrivateTmp=yes` mounts a fresh tmpfs over `/tmp` inside the

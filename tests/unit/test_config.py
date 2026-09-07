@@ -10,6 +10,7 @@ While mostly declarative, regressions here cascade silently:
   * HISTORY_FILE path resolution -> resume loses session or writes to /tmp
   * CONTEXT_LIMIT -> pruning fires at wrong boundaries
   * MAX_PIXELS -> vision tool accepts oversized images
+  * BASH_TIMEOUT / MAX_COMMAND_TIMEOUT -> per-command timeout directive semantics
   * OPENROUTER_API_KEY -> auth failures with cryptic errors
 
 These tests pin the import-time bindings and env-var fallbacks so a future
@@ -64,6 +65,8 @@ class TestConfigConstants(unittest.TestCase):
         self.assertGreater(config.MAX_CODE_BLOCKS, 0)
         self.assertIsInstance(config.BASH_TIMEOUT, int)
         self.assertGreater(config.BASH_TIMEOUT, 0)
+        self.assertIsInstance(config.MAX_COMMAND_TIMEOUT, int)
+        self.assertGreater(config.MAX_COMMAND_TIMEOUT, 0)
 
     def test_default_budget_is_float(self):
         config = self._import_config_with_empty_env()
@@ -159,7 +162,7 @@ class TestConfigExportedSymbols(unittest.TestCase):
             "DEFAULT_MODEL",
             "HISTORY_FILE", "CONTEXT_LIMIT",
             "OUTPUT_LIMIT", "MAX_PIXELS", "MAX_CODE_BLOCKS",
-            "BASH_TIMEOUT", "DEFAULT_BUDGET",
+            "BASH_TIMEOUT", "MAX_COMMAND_TIMEOUT", "DEFAULT_BUDGET",
             "COLOR_CMD", "COLOR_OUT", "COLOR_PY_CMD", "COLOR_COST", "COLOR_RESET",
             "DEFAULT_REASONING_EFFORT", "DEFAULT_MAX_TOKENS",
             "MODEL_PROVIDERS",

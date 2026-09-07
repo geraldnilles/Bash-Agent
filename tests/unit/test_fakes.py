@@ -452,6 +452,57 @@ class TestFakeSandbox(unittest.TestCase):
         self.assertEqual(sb.execute("x"), (2, "queued"))
         self.assertEqual(sb.execute_python("y"), (3, "py queued"))
 
+    def test_execute_records_timeout_values(self):
+        """FakeSandbox records the per-call timeout kwarg (AGENT-C)."""
+        sb = FakeSandbox(execute_result=(0, "ok"))
+        sb.execute("echo one")
+        sb.execute("echo two", timeout=240)
+        self.assertEqual(sb.timeouts_used, [
+            ("BASH", None),
+            ("BASH", 240),
+        ])
+        # script recording unchanged
+        self.assertEqual(sb.executed_scripts, ["echo one", "echo two"])
+
+    def test_execute_python_records_timeout_values(self):
+        """FakeSandbox records per-call timeout kwarg on execute_python too."""
+        sb = FakeSandbox(execute_python_result=(0, "py ok"))
+        sb.execute_python("print(1)")
+        sb.execute_python("print(2)", timeout=300)
+        self.assertEqual(sb.timeouts_used, [
+            ("PYTHON", None),
+            ("PYTHON", 300),
+        ])
+        self.assertEqual(sb.executed_python_scripts, ["print(1)", "print(2)"])
+
+    def test_execute_with_timeout_still_produces_canned_result(self):
+        """With / without a per-call timeout, canned & callable results still work."""
+        sb = FakeSandbox(execute_result=(0, "hello"))
+        code, out = sb.execute("echo hi", timeout=600)
+        self.assertEqual((code, out), (0, "hello"))
+        self.assertEqual(sb.timeouts_used, [("BASH", 600)])
+
+    def test_callable_result_signature_still_only_gets_script(self):
+        """execute_result callables accept only (script); timeout not injected."""
+        def handler(script):
+            return (0, f"ran:{script}")
+        sb = FakeSandbox(execute_result=handler)
+        code, out = sb.execute("echo hi", timeout=120)
+        self.assertEqual(out, "ran:echo hi")
+        self.assertEqual(sb.timeouts_used, [("BASH", 120)])
+
+    def test_queue_helpers_with_timeout(self):
+        """queue_execute queue works even when timeout kwarg is passed."""
+        sb = FakeSandbox()
+        sb.queue_execute(2, "queued")
+        sb.queue_execute_python(3, "py queued")
+        self.assertEqual(sb.execute("x", timeout=200), (2, "queued"))
+        self.assertEqual(sb.execute_python("y", timeout=300), (3, "py queued"))
+        self.assertEqual(sb.timeouts_used, [
+            ("BASH", 200),
+            ("PYTHON", 300),
+        ])
+
     def test_non_special_script_falls_through_to_sandbox(self):
         """Non-special scripts must return handled=False and be routed to sandbox."""
         uid = str(uuid.uuid4())

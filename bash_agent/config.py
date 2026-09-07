@@ -45,7 +45,13 @@ SCRATCHPAD_LIMIT = 80000
 OUTPUT_LIMIT = 10000
 MAX_PIXELS = 2_000_000  # Maximum image resolution (2MP) for vision/multimodal features
 MAX_CODE_BLOCKS = 1      # Maximum number of code blocks executed per LLM response
+# Default per-block timeout (seconds) when the LLM does not specify a
+# per-command directive. A single BASH/PYTHON block may extend this up to
+# MAX_COMMAND_TIMEOUT via a first-line `# timeout: N` directive.
 BASH_TIMEOUT = 60 # seconds
+# Hard ceiling (seconds) for the optional per-command `# timeout: N`
+# directive. Values above this are clamped down (with an advisory note).
+MAX_COMMAND_TIMEOUT = 600
 
 # Session Budget
 DEFAULT_BUDGET = 0.10 # USD

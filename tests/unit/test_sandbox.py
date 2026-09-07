@@ -311,6 +311,64 @@ class TestExecuteBash(SandboxTestCase):
             timeout=10,
         )
 
+    def test_per_call_timeout_flows_into_subprocess_run(self):
+        """A valid per-call timeout is forwarded to subprocess.run."""
+        self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
+        self._setup_success_run("output")
+
+        self.sb.execute("echo hello", timeout=300)
+
+        self.assertEqual(self.mock_run.call_args.kwargs["timeout"], 300)
+
+    def test_omitted_timeout_uses_sandbox_default(self):
+        """Without a per-call timeout, self.timeout is used."""
+        self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
+        self._setup_success_run("output")
+
+        self.sb.execute("echo hello")
+
+        self.assertEqual(self.mock_run.call_args.kwargs["timeout"], 60)
+
+    def test_non_int_timeout_falls_back_to_default(self):
+        """Non-integer timeout falls back to self.timeout."""
+        self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
+        self._setup_success_run("output")
+
+        self.sb.execute("echo hello", timeout="300")
+
+        self.assertEqual(self.mock_run.call_args.kwargs["timeout"], 60)
+
+    def test_zero_timeout_falls_back_to_default(self):
+        """timeout < 1 falls back to self.timeout."""
+        self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
+        self._setup_success_run("output")
+
+        self.sb.execute("echo hello", timeout=0)
+
+        self.assertEqual(self.mock_run.call_args.kwargs["timeout"], 60)
+
+    def test_bool_timeout_falls_back_to_default(self):
+        """bool is not a valid timeout; falls back to self.timeout."""
+        self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
+        self._setup_success_run("output")
+
+        self.sb.execute("echo hello", timeout=True)
+
+        self.assertEqual(self.mock_run.call_args.kwargs["timeout"], 60)
+
+    def test_timeout_banner_reflects_per_call_value(self):
+        """On TimeoutExpired the banner shows the effective per-call value."""
+        self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
+        exc = subprocess.TimeoutExpired(cmd=["systemd-run"], timeout=300)
+        exc.stdout = "partial output before timeout"
+        self.mock_run.side_effect = exc
+
+        code, out = self.sb.execute("sleep 999", timeout=300)
+
+        self.assertEqual(code, 124)
+        self.assertIn("[SYSTEM ERROR] Command timed out after 300 seconds.", out)
+        self.assertIn("partial output before timeout", out)
+
     def test_exception_returns_exit_1(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
         self.mock_run.side_effect = OSError("systemd-run not found")
@@ -386,6 +444,45 @@ class TestExecutePython(SandboxTestCase):
         self.assertIn("[SYSTEM ERROR] Python command timed out after 60 seconds.", out)
         self.assertIn("partial py output", out)
 
+    def test_per_call_timeout_flows_into_subprocess_run(self):
+        """A valid per-call timeout is forwarded to subprocess.run."""
+        self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")
+        self._setup_success_run("py output")
+
+        self.sb.execute_python("print('hello')", timeout=240)
+
+        self.assertEqual(self.mock_run.call_args.kwargs["timeout"], 240)
+
+    def test_omitted_timeout_uses_sandbox_default_for_python(self):
+        """Without a per-call timeout, self.timeout is used."""
+        self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")
+        self._setup_success_run("py output")
+
+        self.sb.execute_python("print('hello')")
+
+        self.assertEqual(self.mock_run.call_args.kwargs["timeout"], 60)
+
+    def test_non_int_timeout_falls_back_to_default_for_python(self):
+        """Non-integer timeout falls back to self.timeout."""
+        self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")
+        self._setup_success_run("py output")
+
+        self.sb.execute_python("print('hello')", timeout="240")
+
+        self.assertEqual(self.mock_run.call_args.kwargs["timeout"], 60)
+
+    def test_timeout_banner_reflects_per_call_value_for_python(self):
+        """On TimeoutExpired the banner shows the effective per-call value."""
+        self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")
+        exc = subprocess.TimeoutExpired(cmd=["systemd-run"], timeout=240)
+        exc.stdout = "partial py output"
+        self.mock_run.side_effect = exc
+
+        code, out = self.sb.execute_python("print('hi')", timeout=240)
+
+        self.assertEqual(code, 124)
+        self.assertIn("[SYSTEM ERROR] Python command timed out after 240 seconds.", out)
+        self.assertIn("partial py output", out)
 
     def test_includes_approved_write_paths(self):
         self.sb.approved_write_paths.append("/home/user/extra")

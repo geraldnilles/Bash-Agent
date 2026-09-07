@@ -495,6 +495,11 @@ class FakeSandbox:
         agent.sandbox = FakeSandbox(execute_result=my_exec)
 
     Records every script passed to execute / execute_python for assertions.
+    Also records per-call timeout values in ``timeouts_used`` as tuples
+    ``("BASH", timeout_or_None)`` / ``("PYTHON", timeout_or_None)`` so
+    callers can assert the optional per-command timeout directive was
+    forwarded (analogous to bash_agent.sandbox.Sandbox's per-call
+    ``timeout`` kwarg).
     """
 
     def __init__(
@@ -524,6 +529,11 @@ class FakeSandbox:
         # Unified alias expected by some tests: `scripts` / `calls`
         self.scripts: List[str] = self.executed_scripts
         self.calls: List[str] = self.executed_scripts
+        # Per-call timeout values observed at execute / execute_python time:
+        #   ("BASH",    timeout_or_None)
+        #   ("PYTHON",  timeout_or_None)
+        # Mirrors the per-command timeout directive wiring (Group 11).
+        self.timeouts_used: List[Tuple[str, Optional[int]]] = []
         self.approved_write_paths: List[str] = approved_write_paths if approved_write_paths is not None else [os.path.abspath(".")]
 
         # For request_write simulation
@@ -542,12 +552,14 @@ class FakeSandbox:
             return result(script)
         return result
 
-    def execute(self, script: str) -> Tuple[int, str]:
+    def execute(self, script: str, timeout: int = None) -> Tuple[int, str]:
         self.executed_scripts.append(script)
+        self.timeouts_used.append(("BASH", timeout))
         return self._resolve_result(self._execute_result, self._execute_queue, script)
 
-    def execute_python(self, code: str) -> Tuple[int, str]:
+    def execute_python(self, code: str, timeout: int = None) -> Tuple[int, str]:
         self.executed_python_scripts.append(code)
+        self.timeouts_used.append(("PYTHON", timeout))
         return self._resolve_result(self._execute_python_result, self._execute_python_queue, code)
 
     def request_write(self, path: str) -> Tuple[bool, str]:

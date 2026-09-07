@@ -39,7 +39,7 @@ def parse_args():
         "--token-budget", type=_parse_token_budget_arg, default=None, metavar="SPEC",
         help="Context-window token budget: absolute tokens (e.g. 327680, 256K, 1.5M) or a percentage of the model's context window ending in %% (e.g. 25%%). Defaults to 25%% of the model window.",
     )
-    parser.add_argument("-t", "--timeout", type=int, default=None, help="Command timeout in seconds (default: 60)")
+    parser.add_argument("-t", "--timeout", type=int, default=None, help="Session default command timeout in seconds (default: 60). A single BASH/PYTHON block may override this up to 600s via a first-line `# timeout: N` directive.")
     parser.add_argument("--no-sfx", action="store_true", help="Disable subtle sound effects (also BAGENT_SFX=0 / BAGENT_NO_SFX=1)")
     parser.add_argument("-b", "--budget", type=float, default=0.10, help="Total session cost budget in USD (default: 0.10)")
     parser.add_argument("--commit", action="store_true", help="Resume the last session and create a git commit message for the changes.")

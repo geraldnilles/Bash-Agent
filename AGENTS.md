@@ -70,7 +70,8 @@ This is the heart of the project. The `Agent` class:
 | `parse_and_execute(agent_msg)` | Coordination pipeline: extracts blocks via `_extract_blocks()`, dispatches each to `_handle_special_command()` or `_execute_script()`, enforces `MAX_CODE_BLOCKS` limit, and commits results via `_commit_execution_feedback()`. Returns `(executed: bool, feedback: str)`. |
 | `_extract_blocks(response_text)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Returns `(blocks, None)` on success, or `([], warning_message)` when no blocks or malformed UUID fences are found. |
 | `_handle_special_command(cmd_type, script)` | Intercepts built-in agent commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Returns `(handled: bool, formatted_output: str)`. Commands that terminate the session (`exit`, `copy-to-clipboard`) call `sys.exit()` in-process. |
-| `_execute_script(cmd_type, script)` | Executes a bash or python script via `Sandbox.execute()` / `Sandbox.execute_python()`. Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` and `---START_ATTACHED_AUDIO-{uuid}---` fences, strips base64 payloads, collects them in `self._pending_multimodal_images` / `self._pending_multimodal_audio`, and returns formatted output. On non-zero exit whose output references a `/tmp/` file with a file-not-found style error, appends a reminder that `/tmp/` is wiped each turn and `.bash_agent_tmp/` should be used instead (see `_build_tmp_file_warning()`). |
+| `_execute_script(cmd_type, script)` | Executes a bash or python script via `Sandbox.execute()` / `Sandbox.execute_python()`. First calls the pure helper `extract_timeout_directive(script)` which parses an optional first-line `# timeout: N` directive (N in [60, 600]) — a valid directive is scrubbed from the script and forwarded as the per-call `timeout=` kwarg; malformed/misplaced directives leave the original script intact (no data loss) and append a teaching note via the trailing-warning pattern. Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` and `---START_ATTACHED_AUDIO-{uuid}---` fences, strips base64 payloads, collects them in `self._pending_multimodal_images` / `self._pending_multimodal_audio`, and returns formatted output. On non-zero exit whose output references a `/tmp/` file with a file-not-found style error, appends a reminder that `/tmp/` is wiped each turn and `.bash_agent_tmp/` should be used instead (see `_build_tmp_file_warning()`). |
+| `extract_timeout_directive(script)` | Pure string helper (no Agent/sandbox needed): parses an optional first-line `# timeout: N` directive from a BASH/PYTHON block body. Returns `(scrubbed_script, effective_seconds_or_None, note)`. Valid directives (case-insensitive key, positive base-10 int, first-line-only) are scrubbed; values are clamped to [BASH_TIMEOUT=60, MAX_COMMAND_TIMEOUT=600] with an advisory note when clamped. Malformed/misplaced directives return the ORIGINAL script (no data loss) plus a teaching note. Absent directives return `(script, None, None)`. |
 | `_commit_execution_feedback(outputs)` | Bundles output blocks into a user message and appends to context. Builds structured multimodal content when `self._pending_multimodal_images` or `self._pending_multimodal_audio` is non-empty. |
 | `_get_models_catalog()` | Fetches & caches the OpenRouter `/api/v1/models` catalog for ~1h. Returns a list of model dicts, or `[]` on API failure so callers fall back to safe defaults. Sharing one HTTP request across the multimodal/reasoning/context probes avoids three API calls at startup. |
 | `_check_model_capabilities()` | Queries the OpenRouter models API to determine the model's supported input modalities. Sets `self.multimodal_capabilities` to a list like `["image"]`, or `None` for text-only models (or if the probe fails). |
@@ -120,7 +121,8 @@ All tunable constants. **Modify this file to change defaults.**
 | `SCRATCHPAD_LIMIT` | 80,000 chars | `context.py` — scratchpad truncation warning |
 | `OUTPUT_LIMIT` | 10,000 chars | `agent.py` — output block truncation |
 | `MAX_CODE_BLOCKS` | 1 | `agent.py` — max code blocks executed per LLM response |
-| `BASH_TIMEOUT` | 60 seconds | `sandbox.py` — subprocess timeout |
+| `BASH_TIMEOUT` | 60 seconds | `sandbox.py` — default session/block timeout. A single block may extend this up to `MAX_COMMAND_TIMEOUT` via a first-line `# timeout: N` directive in the block body. |
+| `MAX_COMMAND_TIMEOUT` | 600 seconds | `agent.py` / `sandbox.py` — hard ceiling for the optional per-command `# timeout: N` directive. Values above this are clamped down (with an advisory note). |
 | `DEFAULT_BUDGET` | 0.10 USD | `agent.py` — session cost limit |
 | `DEFAULT_REASONING_EFFORT` | `"low"` | `agent.py` — reasoning effort for OpenRouter |
 | `DEFAULT_MAX_TOKENS` | 8192 | `agent.py` — max output tokens |
@@ -216,9 +218,9 @@ vendor-neutral for everything else.
 
 Wraps `systemd-run` for isolated command execution.
 
-**Constructor:** Takes `scratchpad_path`, an optional `timeout` override, and optional `uuid`/`multimodal_capabilities` flags. Initializes `approved_write_paths` with at least the current working directory.
+**Constructor:** Takes `scratchpad_path`, an optional session-default `timeout` override (CLI `-t`; falls back to `config.BASH_TIMEOUT` = 60), and optional `uuid`/`multimodal_capabilities` flags. Individual `execute` / `execute_python` calls may override this per-call via their `timeout=` kwarg (up to the caller's discretion; `agent.py` clamps it to `MAX_COMMAND_TIMEOUT` = 600). Initializes `approved_write_paths` with at least the current working directory.
 
-**`execute(script_content: str) -> (exit_code, output)`**: Writes the script to a temp file in `.bash_agent_tmp/`, then runs:
+**`execute(script_content: str, timeout: int = None) -> (exit_code, output)`**: Writes the script to a temp file in `.bash_agent_tmp/`, then runs:
 ```
 systemd-run --user --quiet --wait --collect --pipe \
   --property=ProtectSystem=strict \
@@ -229,13 +231,19 @@ systemd-run --user --quiet --wait --collect --pipe \
   /bin/bash {script_path}
 ```
 
-**`execute_python(script_content: str) -> (exit_code, output)`**: Same as `execute()` but runs `python3` (preferring the venv's python3 if it exists) and sets `PYTHONPATH`.
+**`execute_python(script_content: str, timeout: int = None) -> (exit_code, output)`**: Same as `execute()` but runs `python3` (preferring the venv's python3 if it exists) and sets `PYTHONPATH`.
 
 **`request_write(path: str) -> (bool, str)`**: Interactive prompt for expanding `approved_write_paths`.
 
 **Key details:**
 - Temp scripts are created in `.bash_agent_tmp/` (NOT host `/tmp`) so the sandbox can access them
 - `stderr` is merged into `stdout` via `subprocess.STDOUT` — output is always a single string
+- Both `execute` and `execute_python` accept an optional per-call `timeout` kwarg.
+  When provided (a positive int), it overrides `self.timeout` for that single
+  invocation; otherwise `self.timeout` (from CLI `-t` or `config.BASH_TIMEOUT`)
+  applies. On `TimeoutExpired`, the banner reports the ACTUAL applied seconds
+  (the per-call override when used). Non-int / `< 1` values fall back to
+  `self.timeout`.
 - Timeout produces exit code 124 (matching `timeout` command convention)
 - The host `PATH` and `OPENROUTER_API_KEY` are forwarded into the sandbox environment
 - When `uuid` is set, `BASH_AGENT_UUID` is forwarded. `BASH_AGENT_MULTIMODAL` is set to a comma-separated list of the model's input modalities (e.g. `image` or `image,audio`, empty string when text-only) so tools like `vision.py` and `transcribe.py` can emit attached-image / attached-audio payloads
@@ -376,9 +384,10 @@ Agent.run() loop
     │       │
     │       ├─► _extract_blocks()               ──► Parse UUID-fenced blocks
     │       ├─► _handle_special_command()       ──► exit, reset, request-write, ask-user, copy-to-clipboard
-    │       ├─► _execute_script()               ──► Sandbox.execute / execute_python
+    │       ├─► _execute_script()               ──► extract_timeout_directive ──► Sandbox.execute / execute_python(timeout=?)
     │       │       ├─► image fences extracted  ──► _pending_multimodal_images
-    │       │       └─► audio fences extracted  ──► _pending_multimodal_audio
+    │       │       ├─► audio fences extracted  ──► _pending_multimodal_audio
+    │       │       └─► timeout note appended   ──► trailing [SYSTEM WARNING]
     │       ├─► _commit_execution_feedback()    ──► ContextManager.add_message (text or multimodal)
     │       │
     │       ▼ (output blocks injected into conversation)
