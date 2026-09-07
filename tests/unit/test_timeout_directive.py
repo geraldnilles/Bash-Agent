@@ -11,15 +11,20 @@ its very first line:
 
 extract_timeout_directive() is the pure string transformer AGENT-A owns. It
 scrubs a VALID directive from the body and returns the effective integer
-timeout, yet never mutates the script for malformed / misplaced directives
-(they degrade to the default timeout and gain a teaching note instead).
+timeout. Malformed / misplaced directives (line 2+, space before colon,
+non-integer value, etc.) are treated as ordinary script content: they run
+verbatim with the default timeout and produce no warning, because a mistyped
+directive is low-stakes and not worth the added context.
 
 T-47  Agent wiring: _execute_script forwards the per-call timeout (P1)
 
 _execute_script must scrub the directive, dispatch to
 sandbox.execute(..., timeout=eff) / execute_python(..., timeout=eff) ONLY
-when a valid directive is present, and append any advisory note to the
-formatted output using the existing trailing-warning pattern.
+when a valid directive is present, and append any advisory note (clamping)
+to the formatted output using the existing trailing-warning pattern.
+Additionally, when a command actually times out (sandbox exit 124),
+_execute_script appends a retry nudge teaching the model the ``# timeout: N``
+directive so it can try again with a longer limit.
 
 All tests are offline:
   * T-46 calls the pure function directly — no Agent, no sandbox.
@@ -32,7 +37,8 @@ import io
 import unittest
 import uuid
 
-from bash_agent.agent import extract_timeout_directive
+from bash_agent.agent import _build_timeout_nudge, extract_timeout_directive
+from bash_agent.config import BASH_TIMEOUT, MAX_COMMAND_TIMEOUT
 
 from tests.helpers.fakes import (
     FakeSandbox,
@@ -81,24 +87,22 @@ class TestExtractTimeoutDirective(unittest.TestCase):
         self.assertEqual(eff, 90)
         self.assertIsNone(note)
 
-    # ----- invalid / malformed --------------------------------------------
+    # ----- not a directive (ignored silently) ----------------------------
 
-    def test_directive_on_line_two_is_not_a_directive(self):
+    def test_directive_on_line_two_is_ignored_silently(self):
         script, eff, note = extract_timeout_directive(
             "sleep 5\n# timeout: 300"
         )
-        # Script untouched (no data loss)
+        # Script untouched (no data loss); no teaching note
         self.assertEqual(script, "sleep 5\n# timeout: 300")
         self.assertIsNone(eff)
-        # ...but a teaching note is returned teaching first-line placement
-        self.assertIsNotNone(note)
-        self.assertIn("VERY FIRST", note)
+        self.assertIsNone(note)
 
-    def test_leading_blank_line_makes_it_non_directive(self):
+    def test_leading_blank_line_is_ignored_silently(self):
         script, eff, note = extract_timeout_directive("\n# timeout: 300")
         self.assertEqual(script, "\n# timeout: 300")
         self.assertIsNone(eff)
-        self.assertIsNotNone(note)
+        self.assertIsNone(note)
 
     def test_non_comment_leading_line_is_not_a_directive(self):
         script, eff, note = extract_timeout_directive('print("# timeout: 999")')
@@ -106,17 +110,17 @@ class TestExtractTimeoutDirective(unittest.TestCase):
         self.assertIsNone(eff)
         self.assertIsNone(note)
 
-    def test_non_integer_value_is_not_a_directive(self):
+    def test_non_integer_value_is_ignored_silently(self):
         script, eff, note = extract_timeout_directive("# timeout: abc")
         self.assertEqual(script, "# timeout: abc")
         self.assertIsNone(eff)
-        self.assertIn("positive base-10 integer", note)
+        self.assertIsNone(note)
 
-    def test_space_before_colon_is_not_a_directive(self):
+    def test_space_before_colon_is_ignored_silently(self):
         script, eff, note = extract_timeout_directive("# timeout : 200")
         self.assertEqual(script, "# timeout : 200")
         self.assertIsNone(eff)
-        self.assertIsNotNone(note)
+        self.assertIsNone(note)
 
     def test_empty_script_is_untouched(self):
         script, eff, note = extract_timeout_directive("")
@@ -143,6 +147,33 @@ class TestExtractTimeoutDirective(unittest.TestCase):
         self.assertEqual(script, "echo hello")
         self.assertIsNone(eff)
         self.assertIsNone(note)
+
+
+# ---------------------------------------------------------------------------
+# Pure tests: _build_timeout_nudge (exit-124 retry guidance)
+# ---------------------------------------------------------------------------
+
+class TestBuildTimeoutNudge(unittest.TestCase):
+    """Direct calls on _build_timeout_nudge — phrasing / trigger rules."""
+
+    def test_returns_none_for_success_exit(self):
+        self.assertIsNone(_build_timeout_nudge("BASH", 0, 60))
+
+    def test_returns_none_for_other_failure_exit(self):
+        self.assertIsNone(_build_timeout_nudge("BASH", 1, 60))
+
+    def test_fires_on_exit_124_and_mentions_directive(self):
+        nudge = _build_timeout_nudge("BASH", 124, 60)
+        self.assertIsNotNone(nudge)
+        self.assertIn("[SYSTEM WARNING]", nudge)
+        self.assertIn("timed out after 60 seconds", nudge)
+        self.assertIn("BASH", nudge)
+        self.assertIn("# timeout: N", nudge)
+        self.assertIn(f"[{BASH_TIMEOUT}, {MAX_COMMAND_TIMEOUT}]", nudge)
+
+    def test_python_flavor_and_custom_seconds(self):
+        nudge = _build_timeout_nudge("PYTHON", 124, 300)
+        self.assertIn("PYTHON command timed out after 300 seconds", nudge)
 
 
 # ---------------------------------------------------------------------------
@@ -195,17 +226,67 @@ class TimeoutWiringCase(unittest.TestCase):
         self.assertEqual(self.fake_sb.timeouts_used, [("BASH", 60)])
         self.assertIn("clamped to the minimum of 60s", formatted)
 
-    def test_malformed_directive_runs_original_and_warns(self):
+    def test_bash_timeout_appends_retry_nudge(self):
+        # Simulate a real default-timeout (no directive) command timed out
+        self.fake_sb.queue_execute(
+            124,
+            "[SYSTEM ERROR] Command timed out after 60 seconds.\n"
+            "Partial Output:\nworking...",
+        )
+        formatted = self.agent._execute_script("BASH", "sleep 999")
+        # script dispatched verbatim, no per-call timeout (default applied)
+        self.assertEqual(self.fake_sb.executed_scripts, ["sleep 999"])
+        self.assertEqual(self.fake_sb.timeouts_used, [("BASH", None)])
+        # retry nudge appended after the output fence
+        self.assertIn("[SYSTEM WARNING]", formatted)
+        self.assertIn("timed out after 60 seconds", formatted)
+        self.assertIn("# timeout: N", formatted)
+
+    def test_python_timeout_appends_retry_nudge(self):
+        self.fake_sb.queue_execute_python(
+            124,
+            "[SYSTEM ERROR] Python command timed out after 60 seconds.\n"
+            "Partial Output:\nworking...",
+        )
+        formatted = self.agent._execute_script("PYTHON", "import time; time.sleep(999)")
+        self.assertEqual(self.fake_sb.timeouts_used, [("PYTHON", None)])
+        self.assertIn("[SYSTEM WARNING]", formatted)
+        self.assertIn("PYTHON command timed out", formatted)
+        self.assertIn("# timeout: N", formatted)
+
+    def test_timeout_nudge_reports_directive_seconds(self):
+        # A valid directive that still timed out: nudge must reflect 300s
+        self.fake_sb.queue_execute(
+            124,
+            "[SYSTEM ERROR] Command timed out after 300 seconds.\n"
+            "Partial Output:\nworking...",
+        )
+        formatted = self.agent._execute_script("BASH", "# timeout: 300\nslow")
+        self.assertEqual(self.fake_sb.executed_scripts, ["slow"])
+        self.assertEqual(self.fake_sb.timeouts_used, [("BASH", 300)])
+        self.assertIn("timed out after 300 seconds", formatted)
+        self.assertIn("# timeout: N", formatted)
+
+    def test_no_timeout_nudge_on_success(self):
+        # Existing default FakeSandbox returns (0, "ran"); no nudge on success
+        self.fake_sb.execute_result = (0, "ran")
+        formatted = self.agent._execute_script("BASH", "echo hi")
+        self.assertNotIn("timed out after", formatted)
+        self.assertNotIn("SYSTEM WARNING", formatted)
+
+    def test_malformed_directive_runs_original_silently(self):
         formatted = self.agent._execute_script(
             "BASH", "# timeout : 200\necho still-runs"
         )
         # original untouched, no timeout forwarded
-        self.assertEqual(self.fake_sb.executed_scripts, ["# timeout : 200\necho still-runs"])
+        self.assertEqual(
+            self.fake_sb.executed_scripts, ["# timeout : 200\necho still-runs"]
+        )
         self.assertEqual(self.fake_sb.timeouts_used, [("BASH", None)])
-        # teaching note appended after the output fence
-        self.assertIn("[SYSTEM WARNING]", formatted)
+        # mistyped directives are low-stakes: no warning is added
+        self.assertNotIn("[SYSTEM WARNING]", formatted)
 
-    def test_misplaced_directive_runs_original_and_warns(self):
+    def test_misplaced_directive_runs_original_silently(self):
         formatted = self.agent._execute_script(
             "BASH", "echo first\n# timeout: 300"
         )
@@ -213,12 +294,13 @@ class TimeoutWiringCase(unittest.TestCase):
             self.fake_sb.executed_scripts, ["echo first\n# timeout: 300"]
         )
         self.assertEqual(self.fake_sb.timeouts_used, [("BASH", None)])
-        self.assertIn("[SYSTEM WARNING]", formatted)
+        # misplaced directive is ordinary content: no warning is added
+        self.assertNotIn("[SYSTEM WARNING]", formatted)
 
     def test_regression_misplaced_directive_no_data_loss_full_flow(self):
-        """AGENT-E regression: a misplaced/malformed directive surviving the
-        parser reaches the sandbox UNCHANGED (no data loss) and executes with
-        the default timeout, while the OUTPUT gains a teaching warning."""
+        """AGENT-E regression: a misplaced directive surviving the parser
+        reaches the sandbox UNCHANGED (no data loss) and executes with the
+        default timeout; no warning is injected for the mistyped directive."""
         # Misplaced (line 2+) directive inside a real fenced body
         body = "echo real-command\n# timeout: 999"
         executed, feedback = self.agent.parse_and_execute(
@@ -233,10 +315,10 @@ class TimeoutWiringCase(unittest.TestCase):
         )
         # No per-call timeout forwarded -> default remains
         self.assertEqual(self.fake_sb.timeouts_used, [("BASH", None)])
-        # Teaching warning appended on the committed OUTPUT
+        # No system warning injected for the misplaced directive
         users = [m for m in self.agent.context.history if m["role"] == "user"]
         self.assertEqual(len(users), 1)
-        self.assertIn("[SYSTEM WARNING]", users[0]["content"])
+        self.assertNotIn("[SYSTEM WARNING]", users[0]["content"])
 
     def test_full_parse_and_execute_with_directive(self):
         """End-to-end through the parser: directive survives the block body

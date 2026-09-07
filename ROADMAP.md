@@ -28,14 +28,19 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
 ## ✅ Completed
 - **Dynamic Command Timeout:** a single BASH/PYTHON block can now raise its own
   grace period up to 600s via an optional first-line directive `# timeout: N`
-  (N in [60, 600]). The default remains 60s (CLI `-t` or `config.BASH_TIMEOUT`),
-  and malformed/misplaced directives degrade safely to the default with a
-  teaching note — never a silent change. Implemented across `config.py`
+  (N in [60, 600]). The default remains 60s (CLI `-t` or `config.BASH_TIMEOUT`).
+  Malformed/misplaced directives (line 2+, space-before-colon, non-integer
+  value) are treated as ordinary script content — they run verbatim with the
+  default timeout and produce no warning, since a mistyped directive is
+  low-stakes. When a command actually times out (sandbox exit 124), the
+  harness appends a retry nudge teaching the model to re-run with a first-line
+  `# timeout: N` directive to extend the limit. Implemented across `config.py`
   (`MAX_COMMAND_TIMEOUT = 600`), `agent.py` (`extract_timeout_directive` pure
-  helper + `_execute_script` wiring), and `sandbox.py` (optional per-call
-  `timeout=` kwarg; TimeoutExpired banner reports the ACTUAL applied seconds).
-  Covered by `tests/unit/test_timeout_directive.py` (T-46/T-47), new sandbox
-  cases, and shared `FakeSandbox.timeouts_used`.
+  helper + `_build_timeout_nudge` + `_execute_script` wiring), and `sandbox.py`
+  (optional per-call `timeout=` kwarg; TimeoutExpired banner reports the ACTUAL
+  applied seconds). Covered by `tests/unit/test_timeout_directive.py`
+  (T-46/T-47 + nudge cases), new sandbox cases, and shared
+  `FakeSandbox.timeouts_used`.
 - **Vendor-Neutral Token Counting:** `bash_agent.tokenizer.count_tokens`
   now estimates through **LiteLLM's** `token_counter` (lazy import, forcing
   `disable_hf_tokenizer_download = True` so the bundled tiktoken BPE —
