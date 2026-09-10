@@ -54,7 +54,7 @@ def convert_to_mp3(audio_path):
             "ffmpeg", "-y",  # -y to overwrite output file if exists
             "-i", audio_path,
             "-ac", "1",      # mono
-            "-b:a", "128k",  # 128 kbps bitrate
+            "-b:a", "64k",  # 128 kbps bitrate
             "-map", "0:a:0", # take first audio stream only (ignore video)
             "-vn",           # no video
             tmp_path
@@ -120,7 +120,7 @@ def main():
     if is_sandbox_multimodal and session_uuid:
         # Guard: a huge MP3 would clog the pipe/output. Fall through to the
         # LLM path instead if the base64 payload is unreasonably large.
-        if len(base64_audio) <= 5_000_000:
+        if len(base64_audio) <= 10_000_000:
             print(f"---START_ATTACHED_AUDIO-{session_uuid}---")
             print(base64_audio)
             print(f"---END_ATTACHED_AUDIO-{session_uuid}---")
