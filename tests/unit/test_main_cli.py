@@ -91,6 +91,7 @@ class TestParseArgDefaults(unittest.TestCase):
         self.assertFalse(args.keep_tmp)
         self.assertFalse(args.debug)
         self.assertIsNone(args.model)
+        self.assertFalse(args.audio)
         self.assertIsNone(args.reasoning_effort)
         self.assertIsNone(args.max_tokens)
         self.assertIsNone(args.token_budget)
@@ -137,9 +138,17 @@ class TestPlainRun(unittest.TestCase):
         res["agent_cls"].assert_called_once_with(
             keep_tmp=False, debug=False, model=None,
             reasoning_effort=None, max_tokens=None, token_budget=None,
-            timeout=None, resume=False, budget=0.10)
+            timeout=None, resume=False, budget=0.10, audio=False)
         res["agent_cls"].return_value.run.assert_called_once_with(
             "list files")
+
+    def test_audio_flag_passed_to_agent(self):
+        res = run_cli(["bagent", "-m", "hi", "--audio"])
+        self.assertIsNone(res["exit"])
+        res["agent_cls"].assert_called_once_with(
+            keep_tmp=False, debug=False, model=None,
+            reasoning_effort=None, max_tokens=None, token_budget=None,
+            timeout=None, resume=False, budget=0.10, audio=True)
 
     def test_no_input_source_yields_run_none(self):
         # No -m/-p/-x: initial_task stays None; agent still runs.
@@ -322,7 +331,8 @@ class TestCopyProjectFlag(unittest.TestCase):
                                return_value=1234) as ct:
             res = run_cli(["bagent", "--copy-project"], copy_return=sentinel)
         self.assertEqual(res["exit"].code, 0)
-        ct.assert_called_once_with(sentinel, model="deepseek/deepseek-v4-flash-0731")
+        from bash_agent.config import DEFAULT_MODEL
+        ct.assert_called_once_with(sentinel, model=DEFAULT_MODEL)
         # count_tokens -> 1234 -> formatted with thousands sep as "1,234"
         self.assertIn("1,234 tokens", res["stdout"])
         self.assertIn("Project copied to clipboard. Exiting.", res["stdout"])
@@ -337,6 +347,28 @@ class TestCopyProjectFlag(unittest.TestCase):
         ct.assert_called_once_with(sentinel, model="some/model-slug")
         self.assertIn("some/model-slug", res["stdout"])
         self.assertIn("7 tokens", res["stdout"])
+
+    def test_token_count_uses_audio_default_model_with_audio_flag(self):
+        # --audio with no explicit model resolves to the audio-enabled default.
+        from bash_agent.config import DEFAULT_AUDIO_MODEL
+        sentinel = "audio project text"
+        with mock.patch.object(main_module, "count_tokens",
+                               return_value=9) as ct:
+            res = run_cli(["bagent", "--copy-project", "--audio"],
+                          copy_return=sentinel)
+        self.assertEqual(res["exit"].code, 0)
+        ct.assert_called_once_with(sentinel, model=DEFAULT_AUDIO_MODEL)
+        self.assertIn(DEFAULT_AUDIO_MODEL, res["stdout"])
+
+    def test_explicit_model_wins_over_audio_flag(self):
+        # An explicit --model beats --audio (mirrors Agent precedence).
+        sentinel = "abc"
+        with mock.patch.object(main_module, "count_tokens",
+                               return_value=7) as ct:
+            res = run_cli(["bagent", "--copy-project", "--audio", "--model",
+                           "some/model-slug"], copy_return=sentinel)
+        self.assertEqual(res["exit"].code, 0)
+        ct.assert_called_once_with(sentinel, model="some/model-slug")
 
     def test_non_string_copy_result_still_exits_cleanly(self):
         # If a collaborator returns None / non-str (e.g. no clipboard tool),

@@ -161,6 +161,8 @@ vision -p "Extract all SQL table names from this ERD" schema.png
 
 ### Audio Transcription
 
+Pass `--audio` to run the agent on the audio-enabled default model (`xiaomi/mimo-v2.5`, defined as `DEFAULT_AUDIO_MODEL` in `config.py`) instead of the standard text default. An explicit `--model`, a `config.json` `model` entry, or the `OPENROUTER_MODEL` env var still take precedence.
+
 If your chosen model supports native audio input, the agent can attach audio files directly to the conversation:
 
 ```bash
@@ -237,6 +239,7 @@ Absolute counts accept an optional `K`/`M` suffix (metric: `256K` = 256,000 toke
 | `-k, --keep-tmp` | Preserve `.bash_agent_tmp/` between runs |
 | `-d, --debug` | Dump full conversation to `/tmp/bash_agent_log.txt` |
 | `--model <name>` | Override the default model (e.g., `openai/gpt-4o`) |
+| `--audio` | Use the audio-enabled default model instead of the standard default (ignored when `--model`, `config.json`, or `OPENROUTER_MODEL` select a model) |
 | `--reasoning-effort <level>` | Set reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `default` |
 | `--max-tokens <n>` | Override max output tokens (default: 8192) |
 | `--token-budget <spec>` | Context-window token budget: absolute tokens (e.g. `327680`, `256K`, `1.5M`) or a percentage of the model's context window ending in `%` (e.g. `25%`). Defaults to 25% of the model window. |

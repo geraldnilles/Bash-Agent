@@ -27,6 +27,12 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 #DEFAULT_MODEL = "xiaomi/mimo-v2.5-pro"
 DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash"
 
+# Audio-enabled default model. Selected when the --audio CLI flag is passed,
+# overriding DEFAULT_MODEL (but still below an explicit --model / config.json /
+# OPENROUTER_MODEL override). Chosen because xiaomi/mimo-v2.5 accepts audio
+# as an input modality.
+DEFAULT_AUDIO_MODEL = "xiaomi/mimo-v2.5"
+
 # Limits & Timeouts
 HISTORY_FILE = os.path.abspath(".bash_agent_tmp/history.json")
 # Fallback context ceiling (TOKENS) used when the OpenRouter /models probe for

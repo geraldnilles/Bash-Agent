@@ -159,7 +159,7 @@ class TestConfigExportedSymbols(unittest.TestCase):
         cfg = self._import_config_with_empty_env()
         expected = [
             "OPENROUTER_API_KEY", "OPENROUTER_BASE_URL",
-            "DEFAULT_MODEL",
+            "DEFAULT_MODEL", "DEFAULT_AUDIO_MODEL",
             "HISTORY_FILE", "CONTEXT_LIMIT",
             "OUTPUT_LIMIT", "MAX_PIXELS", "MAX_CODE_BLOCKS",
             "BASH_TIMEOUT", "MAX_COMMAND_TIMEOUT", "DEFAULT_BUDGET",

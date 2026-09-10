@@ -11,7 +11,7 @@ import select
 from typing import List, Dict
 
 from bash_agent.prompts import get_system_prompt
-from bash_agent.config import DEFAULT_MODEL, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, DEFAULT_BUDGET, BASH_TIMEOUT, MAX_COMMAND_TIMEOUT
+from bash_agent.config import DEFAULT_MODEL, DEFAULT_AUDIO_MODEL, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, DEFAULT_BUDGET, BASH_TIMEOUT, MAX_COMMAND_TIMEOUT
 from bash_agent.token_budget import parse_token_budget, resolve_budget
 from bash_agent.utils import cleanup_tmp_folder, copy_project_to_clipboard, get_clipboard_content, get_vim_prompt
 from bash_agent.config_file import load_config
@@ -217,7 +217,7 @@ _MODELS_CACHE = {"data": None, "fetched_at": 0.0}
 
 
 class Agent:
-    def __init__(self, keep_tmp=False, debug=False, model=None, reasoning_effort=None, max_tokens=None, token_budget=None, timeout=None, resume=False, budget=None):
+    def __init__(self, keep_tmp=False, debug=False, model=None, reasoning_effort=None, max_tokens=None, token_budget=None, timeout=None, resume=False, budget=None, audio=False):
         self.uuid = str(uuid.uuid4())
         self.debug = debug
         
@@ -229,13 +229,16 @@ class Agent:
             print(f"[Config] Failed to load .bash_agent_tmp/config.json ({e}); ignoring.", file=sys.stderr)
             self.file_config = {}
 
-        # Model priority: CLI arg > config.json > OPENROUTER_MODEL env var > default
+        # Model priority: CLI arg > config.json > OPENROUTER_MODEL env var >
+        # (audio-enabled default when --audio was passed) > standard default
         if model:
             self.model = model
         elif "model" in self.file_config:
             self.model = self.file_config["model"]
         elif os.environ.get("OPENROUTER_MODEL"):
             self.model = os.environ.get("OPENROUTER_MODEL")
+        elif audio:
+            self.model = DEFAULT_AUDIO_MODEL
         else:
             self.model = DEFAULT_MODEL
         

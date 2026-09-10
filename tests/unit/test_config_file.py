@@ -48,7 +48,7 @@ import unittest
 from unittest import mock
 
 from bash_agent import utils as utils_module
-from bash_agent.config import DEFAULT_MAX_TOKENS, DEFAULT_MODEL, DEFAULT_REASONING_EFFORT
+from bash_agent.config import DEFAULT_MAX_TOKENS, DEFAULT_MODEL, DEFAULT_AUDIO_MODEL, DEFAULT_REASONING_EFFORT
 from bash_agent.config_file import (
     CONFIG_FILENAME,
     KNOWN_KEYS,
@@ -287,6 +287,29 @@ class TestAgentConfigPrecedence(ConfigFileTestBase):
         self.assertEqual(agent.model, DEFAULT_MODEL)
         self.assertEqual(agent.reasoning_effort, DEFAULT_REASONING_EFFORT)
         self.assertEqual(agent.max_tokens, DEFAULT_MAX_TOKENS)
+
+    def test_audio_flag_selects_audio_default_model(self):
+        # --audio (audio=True) swaps the standard default for the audio one
+        # only when nothing higher in the precedence chain supplies a model.
+        with without_env_vars("OPENROUTER_MODEL"):
+            agent = self._build_agent(audio=True)
+        self.assertEqual(agent.model, DEFAULT_AUDIO_MODEL)
+
+    def test_audio_flag_ignored_when_cli_model_given(self):
+        with without_env_vars("OPENROUTER_MODEL"):
+            agent = self._build_agent(audio=True, model="cli-flag/model")
+        self.assertEqual(agent.model, "cli-flag/model")
+
+    def test_audio_flag_ignored_when_config_file_supplies_model(self):
+        self.write_config({"model": "config-file/model"})
+        with without_env_vars("OPENROUTER_MODEL"):
+            agent = self._build_agent(audio=True)
+        self.assertEqual(agent.model, "config-file/model")
+
+    def test_audio_flag_ignored_when_env_var_supplies_model(self):
+        with mock.patch.dict(os.environ, {"OPENROUTER_MODEL": "env-var/model"}):
+            agent = self._build_agent(audio=True)
+        self.assertEqual(agent.model, "env-var/model")
 
     def test_config_file_overrides_hardcoded_defaults(self):
         self.write_config({

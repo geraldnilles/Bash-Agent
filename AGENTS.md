@@ -37,7 +37,7 @@ bash_agent/
 
 ### Entry Point: `main.py`
 
-Parses all CLI flags (`-m`, `-p`, `--resume`, `--commit`, etc.), resolves the initial task (from args, clipboard, or stdin), instantiates `Agent`, and calls `agent.run(initial_task)`. The `--copy-project` path short-circuits: it copies the project to the clipboard (via `copy_project_to_clipboard`), then prints the token count of the copied text as counted by the selected model's tokenizer (`bash_agent.tokenizer.count_tokens`, which the `_resolve_model` helper derives with the same CLI > config.json > `OPENROUTER_MODEL` > `DEFAULT_MODEL` precedence as `Agent.__init__`) before exiting 0.
+Parses all CLI flags (`-m`, `-p`, `--resume`, `--commit`, etc.), resolves the initial task (from args, clipboard, or stdin), instantiates `Agent`, and calls `agent.run(initial_task)`. The `--copy-project` path short-circuits: it copies the project to the clipboard (via `copy_project_to_clipboard`), then prints the token count of the copied text as counted by the selected model's tokenizer (`bash_agent.tokenizer.count_tokens`, which the `_resolve_model` helper derives with the same CLI > config.json > `OPENROUTER_MODEL` > (`DEFAULT_AUDIO_MODEL` when `--audio` is set) > `DEFAULT_MODEL` precedence as `Agent.__init__`) before exiting 0.
 
 **Key responsibility:** Translate CLI flags into `Agent` constructor kwargs. Does NOT contain agent logic.
 
@@ -116,6 +116,7 @@ All tunable constants. **Modify this file to change defaults.**
 | Constant | Default | Where Used |
 |----------|---------|------------|
 | `DEFAULT_MODEL` | `"deepseek/deepseek-v4-pro"` | `agent.py` — fallback model |
+| `DEFAULT_AUDIO_MODEL` | `"xiaomi/mimo-v2.5"` | `agent.py` / `main.py` — fallback model when `--audio` is passed (audio-capable input) |
 | `CONTEXT_LIMIT` | 327,680 tokens (fallback) | `context.py` / `token_budget.py` — *fallback* TOKEN ceiling (¼ of the 1,310,720-token DeepSeek v4 flash window). The runtime ceiling is normally model-derived by `agent.py` (`resolve_budget()`), optionally overridden via `--token-budget`. This constant (×4, the presumed default full window) is only used when the probe fails or the model isn't catalogued. |
 | `CONTEXT_WARN_PERCENT` | 99% | `context.py` — % of the *instance* `context_limit` at which the one-time SCRATCHPAD-backup warning is injected |
 | `SCRATCHPAD_LIMIT` | 80,000 chars | `context.py` — scratchpad truncation warning |
@@ -446,7 +447,8 @@ Settings resolve independently per key: CLI flag > `.bash_agent_tmp/config.json`
 1. CLI flags (`--model`, `--max-tokens`, `--reasoning-effort`, `--token-budget`) — always win
 2. Optional persistent file `.bash_agent_tmp/config.json` (loaded by `config_file.py`; survives tmp-folder cleanup)
 3. `OPENROUTER_MODEL` environment variable (model key only)
-4. Hard-coded defaults in `config.py` (`DEFAULT_MODEL`, `DEFAULT_MAX_TOKENS`; reasoning defaults to off)
+4. `--audio` flag — selects `DEFAULT_AUDIO_MODEL` when no model was chosen above (model key only)
+5. Hard-coded defaults in `config.py` (`DEFAULT_MODEL` / `DEFAULT_AUDIO_MODEL`, `DEFAULT_MAX_TOKENS`; reasoning defaults to off)
 
 Note: an explicit CLI `--reasoning-effort default` is a real choice that overrides the file; inside the file it means "defer to the model's built-in default".
 

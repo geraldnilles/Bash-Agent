@@ -4,7 +4,7 @@ import sys
 import os
 import argparse
 from bash_agent.agent import Agent
-from bash_agent.config import DEFAULT_MODEL
+from bash_agent.config import DEFAULT_MODEL, DEFAULT_AUDIO_MODEL
 from bash_agent.config_file import load_config
 from bash_agent.tokenizer import count_tokens
 from bash_agent.utils import copy_project_to_clipboard, get_clipboard_content
@@ -33,6 +33,7 @@ def parse_args():
     parser.add_argument("-k", "--keep-tmp", action="store_true", help="Keep the contents of .bash_agent_tmp/ folder")
     parser.add_argument("-d", "--debug", action="store_true", help="to /tmp/bash_agent_log.txt on every LLM ping")
     parser.add_argument("--model", type=str, default=None, help="OpenRouter model name (overrides OPENROUTER_MODEL env var)")
+    parser.add_argument("--audio", action="store_true", help="Use the audio-enabled default model (xiaomi/mimo-v2.5) instead of the standard default. Ignored when --model/config.json/OPENROUTER_MODEL select a model.")
     parser.add_argument("--reasoning-effort", type=str, choices=['none', 'minimal', 'low', 'medium', 'high', 'default'], default=None, help="Reasoning effort (none, minimal, low, medium, high, or default to use model's built-in default)")
     parser.add_argument("--max-tokens", type=int, default=None, help='Override max output tokens for LLM')
     parser.add_argument(
@@ -58,11 +59,12 @@ def parse_args():
                              "'!' negates.")
     return parser.parse_args()
 
-def _resolve_model(cli_model):
+def _resolve_model(cli_model, audio=False):
     """Resolve the model to count tokens against for --copy-project.
 
     Mirrors Agent.__init__'s precedence exactly:
-        CLI --model > .bash_agent_tmp/config.json > OPENROUTER_MODEL > DEFAULT_MODEL
+        CLI --model > .bash_agent_tmp/config.json > OPENROUTER_MODEL >
+        (DEFAULT_AUDIO_MODEL when audio=True) > DEFAULT_MODEL
     Returns the model slug string (never None).
     """
     if cli_model:
@@ -76,6 +78,8 @@ def _resolve_model(cli_model):
     env_model = os.environ.get("OPENROUTER_MODEL")
     if env_model:
         return env_model
+    if audio:
+        return DEFAULT_AUDIO_MODEL
     return DEFAULT_MODEL
 
 
@@ -93,7 +97,7 @@ def main():
         # Print the token count of the entire copied string as the selected
         # model's tokenizer would see it (CLI > config.json > env > default).
         if isinstance(text, str):
-            model = _resolve_model(args.model)
+            model = _resolve_model(args.model, audio=args.audio)
             try:
                 n = count_tokens(text, model=model)
             except Exception:
@@ -144,7 +148,7 @@ def main():
     
     if args.no_sfx:
         os.environ["BAGENT_NO_SFX"] = "1"
-    agent = Agent(keep_tmp=args.keep_tmp, debug=args.debug, model=args.model, reasoning_effort=args.reasoning_effort, max_tokens=args.max_tokens, token_budget=args.token_budget, timeout=args.timeout, resume=args.resume, budget=args.budget)
+    agent = Agent(keep_tmp=args.keep_tmp, debug=args.debug, model=args.model, reasoning_effort=args.reasoning_effort, max_tokens=args.max_tokens, token_budget=args.token_budget, timeout=args.timeout, resume=args.resume, budget=args.budget, audio=args.audio)
     agent.run(initial_task)
 
 if __name__ == "__main__":
