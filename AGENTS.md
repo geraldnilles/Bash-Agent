@@ -105,7 +105,7 @@ When `finish_reason == "tool_calls"` occurs, the behavior is intentionally diffe
 2. `continue`s the `_get_llm_response()` loop with NO follow-up request and NO history cleanup — the correction is **permanently kept** in the conversation so the next LLM call sees what went wrong and replies with proper BASH/PYTHON blocks.
 Unlike the `length` recovery, nothing here is temporary: the failed attempt and the warning remain in `history.json`.
 
-**Budget tracking:** After each LLM call, cost is extracted from the API response (OpenRouter provides it natively). When `session_cost >= budget`, the loop exits.
+**Budget tracking:** After each LLM call, cost is extracted from the API response (OpenRouter provides it natively). When `session_cost >= budget`, the loop exits. The check runs AFTER the turn's command has executed and its OUTPUT committed, and history is saved just before the check — so a budget break never strands an executed command without its output on disk (see `ContextManager` persistence note).
 
 ---
 
@@ -158,7 +158,7 @@ warning thresholds and the per-turn token stats share the same code path.
    - Step 3 (failsafe): Drop the oldest message entirely
    - Uses hysteresis (targets 80%) to avoid thrashing on every message
 3. **Scratchpad one-shot injection** (`get_scratchpad_block()`): Reads `SCRATCHPAD.md` and returns a fenced block with a `VISIBLE_{pct}%` header (truncated at `SCRATCHPAD_LIMIT` with an `[ERROR]` suffix when oversized). `Agent.run()` calls it once for a fresh session's first user message — NOT re-injected on later changes.
-4. **Persistence** (`save_history()` / `load_history()`): Serializes `{uuid, history}` to `.bash_agent_tmp/history.json`. Called after every message. Loaded on `--resume`.
+4. **Persistence** (`save_history()` / `load_history()`): Serializes `{uuid, history}` to `.bash_agent_tmp/history.json`. Called after every message AND again immediately after `parse_and_execute()` commits a turn's output — critically, BEFORE the budget check can `break` the loop. This guarantees an executed command's OUTPUT block is on disk even when that very turn exhausts the budget, so `--resume` never loads a dangling assistant command with no matching BASH/PYTHON_OUTPUT block. Loaded on `--resume`.
 
 **Content TOKEN calculation** (`ContextManager._content_tokens(content, model=None)`): Text (strings and `{"type": "text"}` parts) is tokenized with the model's vendor-neutral local tokenizer (`bash_agent.tokenizer.count_tokens(text, model=model)` — no character heuristics). The `_history_tokens()` instance method sums every message through that same static helper using `self.model`, and `add_message` / `_trim_context_if_needed` / the per-turn stats all call `_history_tokens()` so a single code path does the measurement. `image_url` parts are charged 1000 tokens/MEGAPIXEL from the decoded data URL; `input_audio` parts 400 tokens/MINUTE from parsed MP3 frames (both cached). Undecodable payloads fall back to flat TOKEN estimates (800 image / 6000 audio). NEVER scales with the raw base64 payload size.
 
@@ -397,7 +397,9 @@ Agent.run() loop
     ├─► ContextManager.add_message("assistant", response)  ── confirms warning
     ├─► ContextManager.add_message("user", output)           ── may inject warning
     ├─► ContextManager._trim_context_if_needed()  (hysteresis pruning, deferred until warning confirmed)
-    ├─► ContextManager.save_history()            ──► history.json
+    ├─► ContextManager.save_history()            ──► history.json (assistant command)
+    ├─► ContextManager.save_history()            ──► history.json (executed OUTPUT, BEFORE budget check)
+    ├─► _handle_turn_budget_and_stats()          ── break here if session_cost >= budget
     │
     └─► Loop continues until exit or budget exhausted
 ```

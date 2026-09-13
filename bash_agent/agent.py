@@ -1086,7 +1086,15 @@ class Agent:
                 executed, feedback_msg = self.parse_and_execute(agent_msg)
                 if not executed:
                     self.context.add_message("user", feedback_msg)
-                    self.context.save_history()
+
+                # Persist BEFORE the budget check below can break the loop.
+                # parse_and_execute() commits the executed command's OUTPUT to
+                # the in-memory context, but that output must also reach disk or
+                # a --resume session would load a dangling assistant command
+                # fence with no matching BASH/PYTHON_OUTPUT block (a protocol
+                # discontinuity). This covers both the executed-output path and
+                # the parse-error feedback path.
+                self.context.save_history()
 
                 self._log_debug_history()
 
