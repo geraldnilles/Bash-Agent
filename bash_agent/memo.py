@@ -218,7 +218,7 @@ def convert_to_mp3(wav_path, mp3_path):
         "ffmpeg", "-y", "-loglevel", "error",
         "-i", wav_path,
         "-c:a", "libmp3lame",
-        "-b:a", "128k",
+        "-b:a", "64k",
         #"-ar", "16000",
         "-ac", "1",
         "-af",

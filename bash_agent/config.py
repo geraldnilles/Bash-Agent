@@ -80,9 +80,9 @@ MODEL_PROVIDERS = {
     "deepseek/deepseek-v4-pro-0813": ["deepseek"],
     "deepseek/deepseek-v4-flash-0731": ["fireworks","deepseek"],
     "deepseek/deepseek-v4-flash-vision-exp": ["fireworks"],
-    "deepseek/deepseek-v4.1-flash": ["io-net","deepseek"],
+    "deepseek/deepseek-v4.1-flash": ["deepseek","deepinfra","fireworks","novita"],
     "xiaomi/mimo-v2.5-pro": ["novita","xiaomi"],
-    "xiaomi/mimo-v2.5": ["xiaomi"],
+    "xiaomi/mimo-v2.5": ["deepinfra","novita","xiaomi" ],
     #"moonshotai/kimi-k3": ["modal","baseten"]
 }
 
