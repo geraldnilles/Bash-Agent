@@ -467,11 +467,23 @@ class Agent:
         self.model_full_context_tokens = None
 
     def _get_lowest_reasoning_effort(self):
-        """Get the lowest supported reasoning effort for the current model."""
+        """Get the lowest supported reasoning effort for the current model.
+
+        "none" (reasoning disabled) is a legal choice for ANY model whose
+        reasoning is not mandatory, even when the catalog's
+        ``supported_efforts`` list omits it: that list enumerates the effort
+        levels available *while reasoning is enabled*, so a model may support
+        disabling reasoning entirely without ever reporting "none" as a
+        supported effort. We therefore treat "none" as implicitly available
+        whenever ``reasoning_mandatory`` is False.
+        """
+        efforts = set(self.reasoning_supported_efforts)
+        if not self.reasoning_mandatory:
+            efforts.add("none")
         # Order from lowest to highest
         effort_order = ["none", "minimal", "low", "medium", "high", "xhigh"]
         for effort in effort_order:
-            if effort in self.reasoning_supported_efforts:
+            if effort in efforts:
                 return effort
         return "medium"  # fallback
 
