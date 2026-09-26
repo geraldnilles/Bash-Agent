@@ -31,7 +31,7 @@ DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash"
 # overriding DEFAULT_MODEL (but still below an explicit --model / config.json /
 # OPENROUTER_MODEL override). Chosen because xiaomi/mimo-v2.5 accepts audio
 # as an input modality.
-DEFAULT_AUDIO_MODEL = "xiaomi/mimo-v2.5"
+DEFAULT_AUDIO_MODEL = "xiaomi/mimo-v2.6-flash"
 
 # Limits & Timeouts
 HISTORY_FILE = os.path.abspath(".bash_agent_tmp/history.json")
@@ -83,7 +83,7 @@ MODEL_PROVIDERS = {
     "deepseek/deepseek-v4.1-flash": ["deepseek","deepinfra","fireworks","novita"],
     "xiaomi/mimo-v2.5-pro": ["novita","xiaomi"],
     "xiaomi/mimo-v2.5": ["deepinfra","novita","xiaomi" ],
-    #"moonshotai/kimi-k3": ["modal","baseten"]
+    "moonshotai/kimi-k3": ["inference-net"],
 }
 
 # OpenRouter App Attribution
