@@ -5,18 +5,20 @@ Unit tests for the model-aware token-estimation routing
 Verifies that ``count_tokens`` selects a *model-specific* offline tokenizer
 when one exists, rather than the single generic fallback LiteLLM chose before:
 
-  * ``deepseek/...``              -> bundled ``deepseek_tokenizer`` (exact)
   * OpenAI-family (incl. leading
     ``openai/`` provider prefix)  -> tiktoken.encoding_for_model
-  * everything else               -> LiteLLM provider-neutral path
+  * Gemini (gemini/, google/)     -> tiktoken o200k_base proxy
+  * everything else (incl.
+    ``deepseek/...``, after the
+    ``deepseek-tokenizer`` dep
+    was removed)                  -> LiteLLM provider-neutral path
   * no tokenizer available        -> ~3.5 chars/token heuristic
 
 The routing is validated structurally (which code path fires) and
 numerically (different model families yield different counts on a
 discriminating sample).  Only stdlib ``unittest`` + mocking; never hits the
 network (LiteLLM's HF download is already disabled by
-``bash_agent.tokenizer``) and both ``tiktoken`` and ``deepseek_tokenizer``
-are bundled deps available offline.
+``bash_agent.tokenizer``) and ``tiktoken`` is a bundled dep available offline.
 """
 import unittest
 from unittest import mock
@@ -26,7 +28,6 @@ from bash_agent.tokenizer import (
     clear_token_cache,
     count_tokens,
     _route_model_specific,
-    _route_deepseek,
     _route_openai_family,
 )
 
@@ -46,15 +47,24 @@ class ModelRoutingCase(unittest.TestCase):
     def setUp(self):
         clear_token_cache()
 
-    def test_deepseek_slug_routes_to_deepseek_tokenizer(self):
-        # _route_deepseek returns an int when deepseek_tokenizer is usable;
-        # if it can't load, it returns None and LiteLLM/char fallback applies.
-        n = _route_deepseek(_DISCRIMINATING_TEXT)
-        if n is not None:
-            self.assertIsInstance(n, int)
-            self.assertGreater(n, 0)
-        # On this host it must be importable (bundled dep).
-        self.assertIsNotNone(n)
+    def test_deepseek_slug_falls_through_to_litellm(self):
+        """DeepSeek slugs have NO family tokenizer since the bundled
+        ``deepseek-tokenizer`` dependency was removed; they must route
+        through the vendor-neutral LiteLLM path (never the tiktoken
+        OpenAI/Gemini family routes)."""
+        # _route_model_specific must decline deepseek (returns None) so the
+        # caller proceeds to LiteLLM.
+        self.assertIsNone(_route_model_specific("deepseek/deepseek-v4-pro",
+                                                _DISCRIMINATING_TEXT))
+        # And count_tokens must produce a positive, deterministic int via
+        # LiteLLM (not crash, not fall through to the char heuristic).
+        clear_token_cache()
+        with mock.patch("bash_agent.tokenizer._encode_with_litellm",
+                        return_value=4321) as fake:
+            n = count_tokens(_DISCRIMINATING_TEXT,
+                             model="deepseek/deepseek-v4-pro")
+            self.assertEqual(n, 4321)
+            fake.assert_called_once()
 
     def test_openai_4o_routes_via_tiktoken(self):
         n = _route_openai_family("gpt-4o", _DISCRIMINATING_TEXT)

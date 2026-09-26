@@ -26,7 +26,7 @@ bash_agent/
 ├── agent.py         # Core Agent class — main run loop; Orchestrator/Subagent roles (SubagentExit, `subagent` command)
 ├── config.py        # All constants, defaults, env var names (incl. orchestrator/subagent models)
 ├── config_file.py   # Optional .bash_agent_tmp/config.json loader (model/max_tokens/reasoning_effort/orchestrator_model/subagent_model)
-├── tokenizer.py     # Model-aware local token counting (DeepSeek BPE, tiktoken o200k family for OpenAI, o200k proxy for Gemini, LiteLLM, ~3.5 chars/token last resort)
+├── tokenizer.py     # Model-aware local token counting (tiktoken o200k family for OpenAI, o200k proxy for Gemini, LiteLLM for everything else incl. DeepSeek, ~3.5 chars/token last resort)
 ├── context.py       # ContextManager — conversation history, pruning, per-role history file
 ├── sandbox.py       # Sandbox — bwrap (bubblewrap) execution wrapper (orchestrator vs subagent isolation)
 ├── llm.py           # LLM provider adapter layer (OpenRouter)
@@ -193,8 +193,6 @@ family first, then falls back through a provider-neutral path to a character
 heuristic:
 
 1. **Known family tokenizers** (offline, exact):
-   * `deepseek/...` → the bundled **`deepseek_tokenizer`** BPE (same tokenizer
-     files shipped with the model) so DeepSeek contexts are measured exactly.
    * OpenAI-family slugs (bare `gpt-4o`, `openai/gpt-4o`, `gpt-oss-120b`,
      `o1`, `gpt-5`, …) → **tiktoken `encoding_for_model`** (e.g. `gpt-4o` →
      `o200k_base`, `gpt-oss-120b` → `o200k_harmony`). A leading `openai/`
@@ -208,8 +206,9 @@ heuristic:
      multilingual/emoji text far better than LiteLLM's generic `cl100k_base`
      (the encoding every unknown slug otherwise collapses onto).
 2. **Provider-neutral LiteLLM path** (`litellm.token_counter`) for any other
-   slug — understands OpenRouter slugs and degrades to a bundled tiktoken BPE
-   for unregistered ones.
+   slug — this includes `deepseek/...` (the former bundled `deepseek-tokenizer`
+   dependency was REMOVED) — understands OpenRouter slugs and degrades to a
+   bundled tiktoken BPE for unregistered ones.
 3. **Measured chars/token heuristic** (~3.5 chars/token) as a last resort when
    no tokenizer library is available, so the system never hard-fails or
    requires a network round-trip just to estimate.
@@ -219,9 +218,9 @@ heuristic:
   text returns 0; results are cached by `(model, text)` in a bounded dict so
   hysteresis pruning (which re-measures the same strings repeatedly) does not
   re-encode each pass.
-- **Lazy imports** — `litellm`, `tiktoken`, and `deepseek_tokenizer` are each
-  imported lazily (never at module import) so merely importing this module
-  stays light and works offline when extra deps are absent. Immediately after
+- **Lazy imports** — `litellm` and `tiktoken` are each imported lazily (never
+  at module import) so merely importing this module stays light and works
+  offline when extra deps are absent. Immediately after
   a successful `litellm` import the module forces
   `litellm.disable_hf_tokenizer_download = True` so the LiteLLM path stays
   deterministic/offline (bundled tiktoken, never a Hugging Face download).
@@ -229,11 +228,13 @@ heuristic:
   through to the next; the last resort never hard-fails.
 
 **Historical note:** earlier code divided character counts by a nominal 8
-(undercounting real BPE token pressure > 2×), then pinned to the DeepSeek-only
-`deepseek-tokenizer`, then went model-agnostic through LiteLLM (which collapses
-almost every non-bare slug onto the generic `cl100k_base`). The current
-implementation restores true model-family fidelity offline while remaining
-vendor-neutral for everything else.
+(undercounting real BPE token pressure > 2×), then pinned to a bundled
+DeepSeek-only `deepseek-tokenizer`, then went model-agnostic through LiteLLM
+(which collapses almost every non-bare slug onto the generic `cl100k_base`).
+The current implementation restores true model-family fidelity offline for the
+OpenAI/Gemini families while remaining vendor-neutral (LiteLLM) for everything
+else, including `deepseek/...` — the `deepseek-tokenizer` dependency was
+removed and DeepSeek slugs now go through LiteLLM.
 
 ### Sandbox Execution: `sandbox.py` → `class Sandbox`
 

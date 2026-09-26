@@ -16,26 +16,29 @@ possible, in rough priority:
 
 1. **Known family tokenizers** (used when the model slug belongs to a family
    we can tokenize precisely and OFFLINE):
-   * ``deepseek/...``            -> bundled ``deepseek_tokenizer`` (an exact
-     BPE tokenizer for the DeepSeek family, packaged with the project's venv).
-   * OpenAI-family slugs maps to tiktoken's model-aware encodings via
+   * OpenAI-family slugs map to tiktoken's model-aware encodings via
      ``tiktoken.encoding_for_model`` (e.g. ``gpt-4o`` -> ``o200k_base``,
      ``gpt-oss-120b`` -> ``o200k_harmony``). We also strip a leading
      ``openai/`` provider prefix before the lookup, which fixes slugs like
      ``openai/gpt-4o`` that LiteLLM's ``open_ai_chat_completion_models`` set
      does NOT contain (LiteLLM would otherwise remap them to ``gpt-3.5-turbo``
      / ``cl100k_base``, losing the 4o family's encoding).
+   * Google Gemini slugs map to the tiktoken ``o200k_base`` proxy
+     (``GEMINI_PROXY_ENCODING``), since Gemini's real SentencePiece is not
+     open/loadable here.
 2. **Provider-neutral LiteLLM path** (``litellm.token_counter``) for any
-   other slug -- understands OpenRouter slugs and degrades to a bundled
-   tiktoken BPE (``cl100k_base`` / ``o200k_base``) for unknown ones.
+   other slug -- this includes ``deepseek/...`` (the former bundled
+   ``deepseek-tokenizer`` dependency was REMOVED) and understands OpenRouter
+   slugs, degrading to a bundled tiktoken BPE (``cl100k_base`` /
+   ``o200k_base``) for unknown ones.
 3. **Measured chars/token heuristic** (~3.5 chars/token) as a last resort when
    no tokenizer library is available / raises, so the system never
    hard-fails or requires a network round-trip just to estimate.
 
-LiteLLM, tiktoken and the DeepSeek tokenizer are all imported **LAZILY** (each
-inside its own counting path) because ``import litellm`` alone pulls in dozens
-of optional third-party packages even for token-only usage, which would break
-offline unit runs that do not have litellm installed.
+LiteLLM and tiktoken are both imported **LAZILY** (each inside its own
+counting path) because ``import litellm`` alone pulls in dozens of optional
+third-party packages even for token-only usage, which would break offline
+unit runs that do not have litellm installed.
 
 To stay deterministic offline we force
 ``litellm.disable_hf_tokenizer_download = True`` immediately after the lazy
@@ -77,10 +80,6 @@ _litellm_available = False
 # --- Lazy tiktoken loader state ---------------------------------------------
 _tiktoken = None
 _tiktoken_import_attempted = False
-
-# --- Lazy DeepSeek tokenizer loader state ------------------------------------
-_deepseek_tok = None
-_deepseek_import_attempted = False
 
 
 def _load_litellm():
@@ -130,29 +129,6 @@ def _load_tiktoken():
         return None
 
 
-def _load_deepseek_tokenizer():
-    """Import (once) and cache the bundled DeepSeek tokenizer instance.
-
-    Returns the module-level ``ds_token`` instance (built from the tokenizer
-    files shipped inside the ``deepseek_tokenizer`` package), or ``None`` if
-    the package is not installed / fails to load.
-    """
-    global _deepseek_tok, _deepseek_import_attempted
-
-    if _deepseek_import_attempted:
-        return _deepseek_tok
-
-    _deepseek_import_attempted = True
-    try:
-        import deepseek_tokenizer  # type: ignore[import-not-found]
-        # module-level ready-to-use instance (DeepSeekTokenizer.from_pretrained)
-        _deepseek_tok = deepseek_tokenizer.ds_token
-        return _deepseek_tok
-    except Exception:
-        _deepseek_tok = None
-        return None
-
-
 def _encode_with_litellm(model: str, text: str) -> int:
     """Return the token count for ``text`` under ``model`` via LiteLLM.
 
@@ -165,22 +141,6 @@ def _encode_with_litellm(model: str, text: str) -> int:
         raise RuntimeError("LiteLLM is not available")
     # text-only form: litellm.token_counter(model=..., text=..., ...) -> int
     return int(lm.token_counter(model=model, text=text))
-
-
-def _route_deepseek(text: str) -> int | None:
-    """Token count via the bundled DeepSeek tokenizer, or ``None``.
-
-    ``None`` means "deepseek_tokenizer is not available"; returning a count
-    means the model slug routed here (DeepSeek family) was tokenized exactly.
-    """
-    ds = _load_deepseek_tokenizer()
-    if ds is None:
-        return None
-    try:
-        ids = ds.encode(text, add_special_tokens=False)
-    except Exception:
-        return None
-    return len(ids)
 
 
 def _route_openai_family(model: str, text: str) -> int | None:
@@ -237,10 +197,9 @@ def _route_model_specific(model: str, text: str) -> int | None:
     applied" so the caller continues down the LiteLLM -> chars/token chain.
     """
     low = model.lower()
-    if "deepseek/" in low:
-        n = _route_deepseek(text)
-        if n is not None:
-            return n
+    # NOTE: ``deepseek/...`` slugs intentionally have NO family tokenizer --
+    # the bundled ``deepseek-tokenizer`` dependency was removed, so they fall
+    # through to the vendor-neutral LiteLLM path (see module docstring).
     # Google Gemini (bare, gemini/..., google/...): best offline proxy.
     if low.startswith("gemini/") or low.startswith("google/gemini"):
         n = _route_gemini_proxy(text)
@@ -285,9 +244,9 @@ def count_tokens(text: str, model: str | None = None) -> int:
         working; unit tests may pass an explicit model.
 
     Estimation strategy (first applicable wins):
-      1. family-specific offline tokenizer (DeepSeek via ``deepseek_tokenizer``,
-         OpenAI-family via tiktoken ``encoding_for_model``, with an ``openai/``
-         prefix stripped; Google Gemini via the ``o200k_base`` proxy -- see
+      1. family-specific offline tokenizer (OpenAI-family via tiktoken
+         ``encoding_for_model``, with an ``openai/`` prefix stripped; Google
+         Gemini via the ``o200k_base`` proxy -- see
          ``GEMINI_PROXY_ENCODING``);
       2. vendor-neutral LiteLLM ``token_counter`` (resolves provider-slugs and
          degrades to a generic tiktoken BPE for unregistered slugs);
