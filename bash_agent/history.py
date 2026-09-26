@@ -20,11 +20,11 @@ image/audio blocks are summarized as ``<Image payload (image/png, N bytes)>``
 style placeholders.
 
 Usage examples:
-    history                          # main orchestrator history
-    history -a                       # main + all subagent histories
-    history .bash_agent_tmp/history_subagent_*.json
-    history --no-color | less        # pipe-friendly (no ANSI escapes)
-    history -t 2000                  # truncate each message to 2000 chars
+    bhistory                         # main orchestrator history
+    bhistory -a                      # main + all subagent histories
+    bhistory .bash_agent_tmp/history_subagent_*.json
+    bhistory --no-color | less       # pipe-friendly (no ANSI escapes)
+    bhistory -t 2000                 # truncate each message to 2000 chars
 """
 import os
 import sys
@@ -245,7 +245,7 @@ def resolve_paths(files: list[str], include_all: bool) -> list[str]:
 def main() -> None:
     use_color_default = not os.environ.get("NO_COLOR")
     parser = argparse.ArgumentParser(
-        prog="history",
+        prog="bhistory",
         description="Print the text contents of agent history JSON files in a readable, colorized form "
                     "(with placeholders for image/audio payloads).",
     )

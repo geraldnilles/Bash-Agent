@@ -576,7 +576,7 @@ Note: an explicit CLI `--reasoning-effort default` is a real choice that overrid
 
 ### History Viewer: `history.py`
 
-Standalone CLI (`history` command). Prints the **text** contents of agent
+Standalone CLI (`bhistory` command). Prints the **text** contents of agent
 history JSON files in a readable, colorized form. Image/audio payloads are
 summarized as compact placeholders — base64 is never dumped.
 

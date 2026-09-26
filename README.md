@@ -31,7 +31,7 @@ The agent operates entirely through the command line. Since it has access to a r
 - **Transcribe audio** using built-in transcription
 - **Record voice memos** from your microphone (PipeWire)
 - **Semantically search** your codebase with embedding-based retrieval
-- **Inspect history** — colorized, role-labeled dump of any history JSON (`history`, `history -a`)
+- **Inspect history** — colorized, role-labeled dump of any history JSON (`bhistory`, `bhistory -a`)
 - **Persist memory** between turns via a `SCRATCHPAD.md` file
 - **Delegate work to subagents** — run as a planning orchestrator that hands tactical tasks to cheaper worker agents
 - **Resume sessions** — stop and pick up exactly where you left off
@@ -240,11 +240,11 @@ Inspect what the agent (and its subagents) actually said, with every role in a
 distinct color and base64 image/audio payloads replaced by compact placeholders:
 
 ```bash
-history                     # top-level/orchestrator history
-history -a                  # orchestrator + every subagent history
-history .bash_agent_tmp/history_subagent_*.json
-history --no-color | less   # pipe-friendly, no ANSI escapes
-history -t 2000             # truncate each message to 2000 chars
+bhistory                     # top-level/orchestrator history
+bhistory -a                  # orchestrator + every subagent history
+bhistory .bash_agent_tmp/history_subagent_*.json
+bhistory --no-color | less   # pipe-friendly, no ANSI escapes
+bhistory -t 2000             # truncate each message to 2000 chars
 ```
 
 Reads `.bash_agent_tmp/history.json` by default (`-a` also pulls in
