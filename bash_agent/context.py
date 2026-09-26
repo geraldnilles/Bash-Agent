@@ -48,9 +48,14 @@ _MISSING = object()
 
 
 class ContextManager:
-    def __init__(self, uuid_str: str, context_limit: int | None = None, model: str | None = None):
+    def __init__(self, uuid_str: str, context_limit: int | None = None, model: str | None = None, history_file: str | None = None):
         self.history: List[Dict[str, str]] = []
         self.uuid = uuid_str
+        # Path this manager persists to. Defaults to the shared config
+        # HISTORY_FILE (the orchestrator/top-level session), but subagents pass
+        # a unique per-run path so a nested run never clobbers the parent's
+        # history.json.
+        self.history_file = history_file if history_file is not None else HISTORY_FILE
         # Per-session context ceiling in TOKENS. An explicitly provided value
         # (Agent resolves it from the OpenRouter model's context_length as
         # ctx_tokens/4) wins over the module-level fallback CONTEXT_LIMIT.
@@ -419,16 +424,16 @@ class ContextManager:
             "uuid": self.uuid,
             "history": self.history
         }
-        os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(self.history_file), exist_ok=True)
+        with open(self.history_file, "w", encoding="utf-8") as f:
             json.dump(state, f, indent=2)
 
     def load_history(self) -> bool:
         """Restore UUID and history from disk. Returns True if successful."""
-        if not os.path.exists(HISTORY_FILE):
+        if not os.path.exists(self.history_file):
             return False
         try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            with open(self.history_file, "r", encoding="utf-8") as f:
                 state = json.load(f)
             self.uuid = state["uuid"]
             self.history = state["history"]

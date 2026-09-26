@@ -8,10 +8,11 @@ import sys
 import time
 import uuid
 import select
+import shlex
 from typing import List, Dict
 
-from bash_agent.prompts import get_system_prompt
-from bash_agent.config import DEFAULT_MODEL, DEFAULT_AUDIO_MODEL, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, DEFAULT_BUDGET, BASH_TIMEOUT, MAX_COMMAND_TIMEOUT
+from bash_agent.prompts import get_system_prompt, get_orchestrator_system_prompt
+from bash_agent.config import DEFAULT_MODEL, DEFAULT_AUDIO_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_SUBAGENT_MODEL, SUBAGENT_HISTORY_PREFIX, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, DEFAULT_BUDGET, BASH_TIMEOUT, MAX_COMMAND_TIMEOUT
 from bash_agent.token_budget import parse_token_budget, resolve_budget
 from bash_agent.utils import cleanup_tmp_folder, copy_project_to_clipboard, get_clipboard_content, get_vim_prompt
 from bash_agent.config_file import load_config
@@ -216,10 +217,24 @@ TRUNCATION_BANNER = "\n\n---⚠️⛔⚠️-OUTPUT_TRUNCATED_HERE-{uuid}-⚠️�
 _MODELS_CACHE = {"data": None, "fetched_at": 0.0}
 
 
+class SubagentExit(Exception):
+    """Raised when a subagent issues the 'exit' special command.
+
+    Unlike a top-level session (which calls sys.exit(0)), a subagent exits by
+    unwinding in-process so the orchestrator that spawned it regains control
+    and can continue its own planning loop.
+    """
+
+
 class Agent:
-    def __init__(self, keep_tmp=False, debug=False, model=None, reasoning_effort=None, max_tokens=None, token_budget=None, timeout=None, resume=False, budget=None, audio=False):
+    def __init__(self, keep_tmp=False, debug=False, model=None, reasoning_effort=None, max_tokens=None, token_budget=None, timeout=None, resume=False, budget=None, audio=False, is_orchestrator=True, is_subagent=False, subagent_model=None):
         self.uuid = str(uuid.uuid4())
         self.debug = debug
+        # Role flags drive sandbox isolation, prompt selection, and lifecycle.
+        # A top-level orchestrator plans and delegates; a subagent performs the
+        # tactical work. (See AGENTS.md "Hierarchical Orchestrator / Subagent Mode".)
+        self.is_orchestrator = is_orchestrator
+        self.is_subagent = is_subagent
         
         # Optional persistent settings file (.bash_agent_tmp/config.json).
         # Precedence: CLI args > config.json > env var > hard-coded defaults.
@@ -229,16 +244,38 @@ class Agent:
             print(f"[Config] Failed to load .bash_agent_tmp/config.json ({e}); ignoring.", file=sys.stderr)
             self.file_config = {}
 
-        # Model priority: CLI arg > config.json > OPENROUTER_MODEL env var >
-        # (audio-enabled default when --audio was passed) > standard default
+        # Resolve the subagent model the orchestrator will hand to spawned
+        # subagents. Priority: explicit constructor arg (CLI --subagent-model) >
+        # config.json "subagent_model" > DEFAULT_SUBAGENT_MODEL.
+        self.subagent_model = (
+            subagent_model
+            or self.file_config.get("subagent_model")
+            or DEFAULT_SUBAGENT_MODEL
+        )
+
+        # Model priority:
+        #   * explicit `model` arg always wins
+        #   * subagents seed from subagent_model / DEFAULT_SUBAGENT_MODEL (they
+        #     do NOT consult the user's config.json/env: the orchestrator owns
+        #     that choice)
+        #   * orchestrators consult "orchestrator_model" in config.json before
+        #     the generic model/env/role defaults
+        #   * otherwise the standard chain:
+        #     config.json model > OPENROUTER_MODEL env > audio default > role default
         if model:
             self.model = model
+        elif is_subagent:
+            self.model = self.subagent_model
+        elif is_orchestrator and "orchestrator_model" in self.file_config:
+            self.model = self.file_config["orchestrator_model"]
         elif "model" in self.file_config:
             self.model = self.file_config["model"]
         elif os.environ.get("OPENROUTER_MODEL"):
             self.model = os.environ.get("OPENROUTER_MODEL")
         elif audio:
             self.model = DEFAULT_AUDIO_MODEL
+        elif is_orchestrator:
+            self.model = DEFAULT_ORCHESTRATOR_MODEL
         else:
             self.model = DEFAULT_MODEL
         
@@ -281,7 +318,20 @@ class Agent:
         # ContextManager's pruning/warning logic uses self.context_limit for
         # every comparison, so no code in context.py reads config.CONTEXT_LIMIT
         # anymore at runtime (that constant is only the module-level fallback).
-        self.context = ContextManager(self.uuid, context_limit=self.context_limit, model=self.model)
+        # Subagents persist to their OWN history file so a nested run never
+        # clobbers the orchestrator/parent session's history.json.
+        subagent_history_file = None
+        if self.is_subagent:
+            subagent_history_file = os.path.join(
+                os.path.abspath(".bash_agent_tmp"),
+                f"{SUBAGENT_HISTORY_PREFIX}{self.uuid[:8]}.json",
+            )
+        self.context = ContextManager(
+            self.uuid,
+            context_limit=self.context_limit,
+            model=self.model,
+            history_file=subagent_history_file,
+        )
 
         # Handle Resume: attempt to restore previous session
         history_loaded = False
@@ -290,11 +340,11 @@ class Agent:
             if history_loaded:
                 # Re-bind components to the restored UUID
                 self.uuid = self.context.uuid
-                self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout, uuid=self.uuid, multimodal_capabilities=self.multimodal_capabilities)
+                self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout, uuid=self.uuid, multimodal_capabilities=self.multimodal_capabilities, is_orchestrator=self.is_orchestrator)
                 print(f"[System] Resumed previous session. Re-bound to UUID: {self.uuid}")
         
         if not history_loaded:
-            self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout, uuid=self.uuid, multimodal_capabilities=self.multimodal_capabilities)
+            self.sandbox = Sandbox(self.context.scratchpad_path, timeout=timeout, uuid=self.uuid, multimodal_capabilities=self.multimodal_capabilities, is_orchestrator=self.is_orchestrator)
         # Attach the session UUID to all OpenRouter calls (consistent routing
         # improves prompt-cache hits across requests in the same session).
         llm.set_session_id(self.uuid)
@@ -363,7 +413,23 @@ class Agent:
             if os.path.exists(role_file_path):
                 with open(role_file_path, "r", encoding="utf-8") as f:
                     custom_role = f.read().strip()
-            system_prompt = get_system_prompt(self.uuid, os.path.abspath("."), self.context.scratchpad_path, role_text=custom_role, multimodal_capabilities=self.multimodal_capabilities)
+            if self.is_orchestrator:
+                # Orchestrator runs confined to .bash_agent_tmp/ and delegates
+                # all tactical work to subagents.
+                system_prompt = get_orchestrator_system_prompt(
+                    self.uuid,
+                    self.context.scratchpad_path,
+                    subagent_model=self.subagent_model or DEFAULT_SUBAGENT_MODEL,
+                )
+            else:
+                system_prompt = get_system_prompt(
+                    self.uuid,
+                    os.path.abspath("."),
+                    self.context.scratchpad_path,
+                    role_text=custom_role,
+                    multimodal_capabilities=self.multimodal_capabilities,
+                    is_subagent=self.is_subagent,
+                )
             self.context.add_message("system", system_prompt)
         self.budget = budget if budget is not None else DEFAULT_BUDGET
         self.session_cost = 0.0
@@ -545,6 +611,9 @@ class Agent:
             exit_code = 0 if success else 1
             return True, self._format_output(exit_code, msg, cmd_type)
 
+        if script == "subagent" or script.startswith("subagent ") or script.startswith("subagent\n") or script.startswith("subagent\t"):
+            return self._handle_subagent_command(cmd_type, script)
+
         if script.startswith("ask-user "):
             question = script.split(" ", 1)[1]
             print(f"\n{COLOR_OUT}[Question to User] {question}{COLOR_RESET}")
@@ -555,6 +624,13 @@ class Agent:
             return True, self._format_output(0, answer, cmd_type)
 
         if script == "exit":
+            if self.is_subagent:
+                # Unwind in-process so the orchestrator that spawned us regains
+                # control (never sys.exit the whole program from a subagent).
+                print(f"\n[System] Subagent {self.uuid[:8]} completed task.")
+                self._log_debug_history()
+                raise SubagentExit()
+            # Top-level / orchestrator exit: terminate the session.
             print("\n[System] Agent has initiated exit.")
             self._log_debug_history()
             if _SFX_AVAILABLE:
@@ -602,6 +678,82 @@ class Agent:
             sys.exit(0)
 
         return False, ""
+
+    def _handle_subagent_command(self, cmd_type: str, script: str) -> tuple[bool, str]:
+        """Handle the `subagent "<task>"` built-in command.
+
+        Only an orchestrator may spawn subagents. The subagent runs in-process
+        (a nested Agent) with full project access, performs the task, then
+        `exit`s -- which raises SubagentExit, caught here. Its cumulative cost
+        is folded into this session and its last 2 conversation messages are
+        returned to the orchestrator as the command's output.
+        """
+        if not self.is_orchestrator:
+            return True, self._format_output(
+                1,
+                "Subagents cannot spawn nested subagents. "
+                "Only a top-level orchestrator may use the `subagent` command.",
+                cmd_type,
+            )
+
+        # Parse the task prompt: strip the leading `subagent` token, tolerate
+        # an optional `-m` flag, then shlex-split the remainder so quoted
+        # prompts survive intact.
+        rest = script[len("subagent"):].strip()
+        tokens = []
+        if rest:
+            try:
+                tokens = shlex.split(rest)
+            except ValueError as e:
+                return True, self._format_output(
+                    1, f"Invalid subagent command syntax: {e}", cmd_type
+                )
+        if tokens and tokens[0] == "-m":
+            tokens = tokens[1:]
+        subagent_task = " ".join(tokens).strip()
+        if not subagent_task:
+            return True, self._format_output(
+                1,
+                "The `subagent` command requires a task prompt, e.g. "
+                'subagent "list all .py files in bash_agent/".',
+                cmd_type,
+            )
+
+        print(f"\n[System] Spawning subagent with task: {subagent_task}")
+
+        subagent_inst = Agent(
+            keep_tmp=True,
+            debug=self.debug,
+            model=self.subagent_model or DEFAULT_SUBAGENT_MODEL,
+            is_orchestrator=False,
+            is_subagent=True,
+            timeout=getattr(self.sandbox, "timeout", None),
+            budget=max(0.01, self.budget - self.session_cost) if self.budget else None,
+        )
+
+        try:
+            subagent_inst.run(initial_task=subagent_task)
+        except SubagentExit:
+            pass
+        finally:
+            self.session_cost += subagent_inst.session_cost
+
+        # Return the subagent's last 2 conversation messages as the summary.
+        recent_msgs = subagent_inst.context.history[-2:]
+        summary_blocks = []
+        for msg in recent_msgs:
+            role = msg.get("role", "unknown").upper()
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = "[Multimodal content omitted]"
+            summary_blocks.append(f"[{role} MESSAGE]:\n{content}")
+
+        subagent_summary = (
+            f"=== SUBAGENT {subagent_inst.uuid[:8]} COMPLETED ===\n"
+            f"Cost: ${subagent_inst.session_cost:.4f}\n\n"
+            + "\n\n".join(summary_blocks)
+        )
+        return True, self._format_output(0, subagent_summary, cmd_type)
 
     def _execute_script(self, cmd_type: str, script: str) -> str:
         """
@@ -1035,7 +1187,13 @@ class Agent:
         executed via _execute_script(), so the injected transcript is
         byte-for-byte identical in format to a live exchange. Never called for
         resumed sessions (see self.resumed_session).
+
+        Skipped entirely for ORCHESTRATORS: the warmup scripts list the project
+        root, which is unreadable under the orchestrator's ProtectHome=yes
+        sandbox, so running them would only produce confusing errors.
         """
+        if self.is_orchestrator:
+            return
         print("[System] Running protocol warmup exchanges...")
         for template in WARMUP_TURNS:
             agent_msg = template.format(uuid=self.uuid)

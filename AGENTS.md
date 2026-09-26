@@ -10,21 +10,27 @@ Bash Agent is a Python CLI that orchestrates an autonomous LLM-in-the-loop agent
 
 **Entry point:** `python3 -m bash_agent.main` or the `bagent` console script (defined in `pyproject.toml`).
 
+> **Runs in one of two modes.** By default the CLI launches a *hierarchical*
+> **Orchestrator** that plans work and delegates tactical tasks to **Subagents**
+> (see "Hierarchical Orchestrator / Subagent Mode" below). The legacy single
+> all-powerful agent is still available via `--no-orchestrator` / `--direct`
+> (equivalently `Agent(is_orchestrator=False)`).
+
 ---
 
 ## Module Map
 
 ```
 bash_agent/
-├── main.py          # CLI argument parsing, entry point, glue
-├── agent.py         # Core Agent class — the main run loop
-├── config.py        # All constants, defaults, env var names
-├── config_file.py   # Optional .bash_agent_tmp/config.json loader (model/max_tokens/reasoning_effort)
+├── main.py          # CLI argument parsing, entry point, glue (orchestrator vs --direct mode)
+├── agent.py         # Core Agent class — main run loop; Orchestrator/Subagent roles (SubagentExit, `subagent` command)
+├── config.py        # All constants, defaults, env var names (incl. orchestrator/subagent models)
+├── config_file.py   # Optional .bash_agent_tmp/config.json loader (model/max_tokens/reasoning_effort/orchestrator_model/subagent_model)
 ├── tokenizer.py     # Model-aware local token counting (DeepSeek BPE, tiktoken o200k family for OpenAI, o200k proxy for Gemini, LiteLLM, ~3.5 chars/token last resort)
-├── context.py       # ContextManager — conversation history, pruning
-├── sandbox.py       # Sandbox — systemd-run execution wrapper
+├── context.py       # ContextManager — conversation history, pruning, per-role history file
+├── sandbox.py       # Sandbox — systemd-run execution wrapper (orchestrator vs subagent isolation)
 ├── llm.py           # LLM provider adapter layer (OpenRouter)
-├── prompts.py       # System prompt template generation
+├── prompts.py       # System prompt template generation (orchestrator + subagent prompts)
 ├── utils.py         # Misc helpers (clipboard, cleanup, vim prompt)
 ├── search.py        # Semantic code search (embeddings + reranking)
 ├── vision.py        # Image analysis via LLM (native multimodal or fallback)
@@ -37,7 +43,13 @@ bash_agent/
 
 ### Entry Point: `main.py`
 
-Parses all CLI flags (`-m`, `-p`, `--resume`, `--commit`, etc.), resolves the initial task (from args, clipboard, or stdin), instantiates `Agent`, and calls `agent.run(initial_task)`. The `--copy-project` path short-circuits: it copies the project to the clipboard (via `copy_project_to_clipboard`), then prints the token count of the copied text as counted by the selected model's tokenizer (`bash_agent.tokenizer.count_tokens`, which the `_resolve_model` helper derives with the same CLI > config.json > `OPENROUTER_MODEL` > (`DEFAULT_AUDIO_MODEL` when `--audio` is set) > `DEFAULT_MODEL` precedence as `Agent.__init__`) before exiting 0.
+Parses all CLI flags (`-m`, `-p`, `--resume`, `--commit`, `--no-orchestrator`/`--direct`, `--subagent-model`, `--orchestrator-model`, etc.), resolves the initial task (from args, clipboard, or stdin), instantiates `Agent`, and calls `agent.run(initial_task)`.
+
+**Role/hierarchy flags (orchestrator vs single-agent):**
+- `--no-orchestrator` / `--direct` → `is_orchestrator=False` (legacy standalone single-agent; runs the warmup exchanges and has normal project write access).
+- `--subagent-model <slug>` → forwarded as `subagent_model`; the OpenRouter slug subagents run on (falls back to `config.json` `subagent_model` → `DEFAULT_SUBAGENT_MODEL`).
+- `--orchestrator-model <slug>` → when orchestrating, becomes the effective model passed as `model=` (an explicit alias for `--model`; wins over it).
+- `main()` sets `is_orchestrator = not args.no_orchestrator` (default **True**) and forwards `is_orchestrator` + `subagent_model` to `Agent(...)`. The `--copy-project` path short-circuits: it copies the project to the clipboard (via `copy_project_to_clipboard`), then prints the token count of the copied text as counted by the selected model's tokenizer (`bash_agent.tokenizer.count_tokens`, which the `_resolve_model` helper derives with the same CLI > config.json > `OPENROUTER_MODEL` > (`DEFAULT_AUDIO_MODEL` when `--audio` is set) > `DEFAULT_MODEL` precedence as `Agent.__init__`) before exiting 0.
 
 **Key responsibility:** Translate CLI flags into `Agent` constructor kwargs. Does NOT contain agent logic.
 
@@ -60,16 +72,19 @@ This is the heart of the project. The `Agent` class:
    - Feed the output back into the conversation
    - Repeat until `exit` command or budget exhausted
 
+**Roles & lifecycle:** A top-level agent defaults to `is_orchestrator=True`. When it emits `subagent "<task>"`, a nested `Agent(is_subagent=True)` runs in-process; that subagent ends by emitting `exit`, which raises the module-level **`SubagentExit`** exception (never `sys.exit`) so control returns to the orchestrator. See "Hierarchical Orchestrator / Subagent Mode" below.
+
 **Key methods (in `agent.py`):**
 
 | Method | Purpose |
 |--------|---------|
-| `__init__()` | Sets up UUID, model, sandbox, context, budget. Handles `--resume`. Resolves the model's context ceiling — by default a quarter of the model's `context_length`, overridable via the `token_budget`/`--token-budget` arg — and passes it to `ContextManager`, threading the model slug as well so content accounting uses that model's tokenizer (see `_fetch_model_context_limit` / `token_budget.py`). |
+| `__init__()` | Sets up UUID, model, sandbox, context, budget, and **role flags** (`is_orchestrator=True`, `is_subagent=False`, `subagent_model=None`). The role flags drive sandbox isolation (`Sandbox(is_orchestrator=...)`), prompt selection (`get_orchestrator_system_prompt` vs `get_system_prompt(..., is_subagent=...)`), and lifecycle. Model precedence: explicit `model` arg > (subagent) `subagent_model`/`config.json subagent_model`/`DEFAULT_SUBAGENT_MODEL` > (orchestrator) `config.json orchestrator_model` > `config.json model` > `OPENROUTER_MODEL` env > (audio) `DEFAULT_AUDIO_MODEL` > (orchestrator) `DEFAULT_ORCHESTRATOR_MODEL` > `DEFAULT_MODEL`. Subagents persist to their OWN `ContextManager` history file (`history_subagent_<uuid8>.json`). Handles `--resume`. Resolves the model's context ceiling — by default a quarter of the model's `context_length`, overridable via the `token_budget`/`--token-budget` arg — and passes it to `ContextManager`, threading the model slug as well so content accounting uses that model's tokenizer (see `_fetch_model_context_limit` / `token_budget.py`). |
 | `run(initial_task)` | The main loop. Sends prompts, parses responses, executes commands. |
-| `_run_warmup_exchanges()` | Protocol warmup: on FRESH sessions only (`--resume` skips it), pre-fills history with two scripted assistant turns from the `WARMUP_TURNS` constant (a PYTHON version check plus a listing of all installed 3rd-party PyPI packages, then a BASH `ls -la`). Each template is parsed via the production `_extract_blocks()` (raises if it ever fails to parse) and executed via `_execute_script()`, so the injected transcript is byte-for-byte identical in format to a live exchange. Called from `run()` right after the initial task is committed. |
+| `_run_warmup_exchanges()` | Protocol warmup: on FRESH sessions only (`--resume` skips it) **and only for non-orchestrators** (an orchestrator under `ProtectHome=yes` cannot `ls` the repo, so warmup early-returns when `is_orchestrator`). Pre-fills history with two scripted assistant turns from the `WARMUP_TURNS` constant (a PYTHON version check plus a listing of all installed 3rd-party PyPI packages, then a BASH `ls -la`). Each template is parsed via the production `_extract_blocks()` (raises if it ever fails to parse) and executed via `_execute_script()`, so the injected transcript is byte-for-byte identical in format to a live exchange. Called from `run()` right after the initial task is committed. |
 | `parse_and_execute(agent_msg)` | Coordination pipeline: extracts blocks via `_extract_blocks()`, dispatches each to `_handle_special_command()` or `_execute_script()`, enforces `MAX_CODE_BLOCKS` limit, and commits results via `_commit_execution_feedback()`. Returns `(executed: bool, feedback: str)`. |
 | `_extract_blocks(response_text)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Returns `(blocks, None)` on success, or `([], warning_message)` when no blocks or malformed UUID fences are found. |
-| `_handle_special_command(cmd_type, script)` | Intercepts built-in agent commands (`exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Returns `(handled: bool, formatted_output: str)`. Commands that terminate the session (`exit`, `copy-to-clipboard`) call `sys.exit()` in-process. |
+| `_handle_special_command(cmd_type, script)` | Intercepts built-in agent commands (`subagent`, `exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Returns `(handled: bool, formatted_output: str)`. Commands that terminate the session (`exit`, `copy-to-clipboard`) call `sys.exit()` in-process — EXCEPT for a subagent, where `exit` raises `SubagentExit` instead (so the orchestrator regains control). Dispatches `subagent`/`subagent ...` to `_handle_subagent_command()`. |
+| `_handle_subagent_command(cmd_type, script)` | Handles the `subagent "<task>"` built-in. Rejects nested subagents (only an orchestrator may spawn). Parses the prompt with `shlex.split` (tolerating a leading `-m`). Spawns a nested `Agent(is_orchestrator=False, is_subagent=True, model=subagent_model or DEFAULT_SUBAGENT_MODEL)`, runs it, catches `SubagentExit`, and folds its `session_cost` into the parent's. Returns the subagent's **last 2** history messages (multimodal content replaced with `[Multimodal content omitted]`) inside a `=== SUBAGENT <uuid8> COMPLETED ===\nCost: $...` summary block. |
 | `_execute_script(cmd_type, script)` | Executes a bash or python script via `Sandbox.execute()` / `Sandbox.execute_python()`. First calls the pure helper `extract_timeout_directive(script)` which parses an optional first-line `# timeout: N` directive (N in [60, 600]) — a valid directive is scrubbed from the script and forwarded as the per-call `timeout=` kwarg; malformed/misplaced directives leave the ORIGINAL script intact (no data loss) and run verbatim with the default timeout (no teaching note). When the command actually times out (sandbox exit 124), appends a retry nudge (see `_build_timeout_nudge()`) reminding the model to use a first-line `# timeout: N` directive to extend the limit. Clamping of a valid out-of-range directive produces an advisory note. Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` and `---START_ATTACHED_AUDIO-{uuid}---` fences, strips base64 payloads, collects them in `self._pending_multimodal_images` / `self._pending_multimodal_audio`, and returns formatted output. On non-zero exit whose output references a `/tmp/` file with a file-not-found style error, appends a reminder that `/tmp/` is wiped each turn and `.bash_agent_tmp/` should be used instead (see `_build_tmp_file_warning()`). |
 | `extract_timeout_directive(script)` | Pure string helper (no Agent/sandbox needed): parses an optional first-line `# timeout: N` directive from a BASH/PYTHON block body. Returns `(scrubbed_script, effective_seconds_or_None, note)`. Valid directives (case-insensitive key, positive base-10 int, first-line-only) are scrubbed; values are clamped to [BASH_TIMEOUT=60, MAX_COMMAND_TIMEOUT=600] with an advisory note when clamped. Malformed/misplaced directives (line 2+, space-before-colon, non-integer value, etc.) return the ORIGINAL script (no data loss) and are ignored silently — a mistyped directive is low-stakes and runs verbatim with the default timeout. Absent directives return `(script, None, None)`. |
 | `_commit_execution_feedback(outputs)` | Bundles output blocks into a user message and appends to context. Builds structured multimodal content when `self._pending_multimodal_images` or `self._pending_multimodal_audio` is non-empty. |
@@ -118,6 +133,9 @@ All tunable constants. **Modify this file to change defaults.**
 |----------|---------|------------|
 | `DEFAULT_MODEL` | `"deepseek/deepseek-v4-pro"` | `agent.py` — fallback model |
 | `DEFAULT_AUDIO_MODEL` | `"xiaomi/mimo-v2.5"` | `agent.py` / `main.py` — fallback model when `--audio` is passed (audio-capable input) |
+| `DEFAULT_ORCHESTRATOR_MODEL` | `"deepseek/deepseek-v4.1-flash"` | `agent.py` — fallback model for a top-level orchestration agent (when not overridden by `--model`/`--orchestrator-model`, `config.json`, or `OPENROUTER_MODEL`) |
+| `DEFAULT_SUBAGENT_MODEL` | `"deepseek/deepseek-v4.1-flash"` | `agent.py` — fallback model for spawned subagents (overridable via `--subagent-model` or `config.json` `subagent_model`) |
+| `SUBAGENT_HISTORY_PREFIX` | `"history_subagent_"` | `agent.py` / `utils.py` — prefix for each subagent's dedicated history file (`history_subagent_<uuid8>.json`) so a nested run never overwrites the parent `history.json`; `cleanup_tmp_folder()` preserves matching files |
 | `CONTEXT_LIMIT` | 327,680 tokens (fallback) | `context.py` / `token_budget.py` — *fallback* TOKEN ceiling (¼ of the 1,310,720-token DeepSeek v4 flash window). The runtime ceiling is normally model-derived by `agent.py` (`resolve_budget()`), optionally overridden via `--token-budget`. This constant (×4, the presumed default full window) is only used when the probe fails or the model isn't catalogued. |
 | `CONTEXT_WARN_PERCENT` | 99% | `context.py` — % of the *instance* `context_limit` at which the one-time SCRATCHPAD-backup warning is injected |
 | `SCRATCHPAD_LIMIT` | 80,000 chars | `context.py` — scratchpad truncation warning |
@@ -142,7 +160,7 @@ All tunable constants. **Modify this file to change defaults.**
 
 Manages the message list (`self.history: List[Dict[str, str]]`), context pruning, scratchpad one-shot injection, and session persistence.
 
-Constructor: `ContextManager(uuid_str, context_limit=None, model=None)` — `model`
+Constructor: `ContextManager(uuid_str, context_limit=None, model=None, history_file=None)` — `history_file` overrides the persistence path (defaults to `config.HISTORY_FILE`, i.e. `.bash_agent_tmp/history.json`); subagents pass a per-session file so a nested run never clobbers the parent's history. `model`
 (an OpenRouter slug, e.g. `"deepseek/deepseek-v4-flash-0731"`) selects which
 tokenizer `count_tokens` estimates against; when `None` it falls back to
 `config.DEFAULT_MODEL`. `Agent` always passes its resolved model so pruning /
@@ -220,15 +238,26 @@ vendor-neutral for everything else.
 
 Wraps `systemd-run` for isolated command execution.
 
-**Constructor:** Takes `scratchpad_path`, an optional session-default `timeout` override (CLI `-t`; falls back to `config.BASH_TIMEOUT` = 60), and optional `uuid`/`multimodal_capabilities` flags. Individual `execute` / `execute_python` calls may override this per-call via their `timeout=` kwarg (up to the caller's discretion; `agent.py` clamps it to `MAX_COMMAND_TIMEOUT` = 600). Initializes `approved_write_paths` with at least the current working directory.
+**Constructor:** Takes `scratchpad_path`, an optional session-default `timeout` override (CLI `-t`; falls back to `config.BASH_TIMEOUT` = 60), optional `uuid`/`multimodal_capabilities` flags, and an **`is_orchestrator: bool = False`** flag. Individual `execute` / `execute_python` calls may override the timeout per-call via their `timeout=` kwarg (up to the caller's discretion; `agent.py` clamps it to `MAX_COMMAND_TIMEOUT` = 600).
+
+**Isolation posture by role (`is_orchestrator`):**
+
+| Aspect | Subagent / direct (`is_orchestrator=False`) | Orchestrator (`is_orchestrator=True`) |
+|---|---|---|
+| Working directory | `os.path.abspath(".")` (project root) | `os.path.abspath(".bash_agent_tmp")` |
+| `approved_write_paths` | `[project root]` | `[.bash_agent_tmp]` |
+| `ProtectHome=` | `read-only` | **`yes`** (home/project tree unreadable) |
+| `request_write()` | normal interactive prompt | always rejected: `(False, "Orchestrator agent cannot request write access outside .bash_agent_tmp. Delegate file changes to a subagent.")` |
+
+The sandbox stores the working dir as `self._workdir` and computes `protect_home_val` dynamically, so both `execute()` and `execute_python()` build the `--working-directory=` and `--property=ProtectHome=` flags from the role.
 
 **`execute(script_content: str, timeout: int = None) -> (exit_code, output)`**: Writes the script to a temp file in `.bash_agent_tmp/`, then runs:
 ```
 systemd-run --user --quiet --wait --collect --pipe \
   --property=ProtectSystem=strict \
-  --property=ProtectHome=read-only \
+  --property=ProtectHome={read-only | yes} \
   --property=PrivateTmp=yes \
-  --working-directory={cwd} \
+  --working-directory={self._workdir} \
   --property=ReadWritePaths={approved_paths} \
   /bin/bash {script_path}
 ```
@@ -276,12 +305,20 @@ Abstraction layer over the OpenRouter backend. Normalizes payloads and request s
 
 Generates the massive system prompt that defines the agent's behavior. Key function:
 
-**`get_system_prompt(uuid, cwd, scratchpad_path, role_text, multimodal_capabilities)`**:
+**`get_system_prompt(uuid, cwd, scratchpad_path, role_text, multimodal_capabilities, is_subagent=False)`**:
 - Returns a formatted string with all protocol rules
+- When `is_subagent=True`, appends a `## SUBAGENT ROLE` section telling the model it is a focused subagent: inspect/edit/test with normal commands, give a concise final summary, then emit `exit` (a bash block); write long reports to `.bash_agent_tmp/`
 - Injects the session UUID, working directory, current date
 - Conditionally includes native-image attach instructions when `"image"` is in `multimodal_capabilities` (e.g. `["image"]`); otherwise includes the text-only vision fallback instructions
 - Conditionally includes `role_text` if a `ROLE.md` file exists
 - Includes rules for: execution blocks, output metadata, special commands, file editing, semantic search, vision, transcription, PDF processing, scratchpad usage, workflow & error recovery
+
+**`get_orchestrator_system_prompt(uuid, scratchpad_path, subagent_model=None)`**:
+- Returns the dedicated prompt for a top-level **Orchestrator** (`Agent(is_orchestrator=True)`).
+- Defines the persona (technical lead / project manager that delegates rather than edits), the `ProtectHome=yes` / `.bash_agent_tmp`-only environment constraints, the `request-write` lockout, and the `subagent "<task>"` built-in (with a concrete example).
+- Documents the orchestrator workflow: PLAN (persist the roadmap in `SCRATCHPAD.md`) → DISPATCH one `subagent` block per turn → REVIEW the last-2-messages summary → ITERATE → FINISH with `exit`.
+- Optionally states the subagent model via `subagent_model`.
+- Fence markers are assembled procedurally from `_S`/`_E`/`_U`/`_fence` helpers so no literal UUID-fenced sample is embedded in the source (keeps the protocol unambiguous).
 
 **If modifying agent behavior, this is the most impactful file.** The prompt is ~4000 tokens and defines the entire protocol.
 
@@ -291,7 +328,7 @@ Generates the massive system prompt that defines the agent's behavior. Key funct
 
 | Function | Purpose |
 |----------|---------|
-| `cleanup_tmp_folder()` | Removes contents of `.bash_agent_tmp/` except protected files (SCRATCHPAD.md, ROLE.md, vim_prompt.tmp, embeddings.json, search_disabled, history.json, clipboard_blacklist.txt, config.json) |
+| `cleanup_tmp_folder()` | Removes contents of `.bash_agent_tmp/` except protected files (SCRATCHPAD.md, ROLE.md, vim_prompt.tmp, embeddings.json, search_disabled, history.json, clipboard_blacklist.txt, config.json) **and per-subagent histories** (`history_subagent_*.json`, so parallel/sequential subagent transcripts survive a parent cleanup) |
 | `copy_project_to_clipboard(file_paths=None, ignore=None, include=None)` | Copies project files to system clipboard as XML-like tagged format. `file_paths`/`include` and `ignore` accept **gitignore-syntax globs** (implemented by the shared `bash_agent.ignore.GitIgnoreMatcher`); `.gitignore`, clipboard blacklist, and user ignores are flattened into one last-match-wins rule list. `--files` is a deprecated alias of the `include` param. Returns the full composed clipboard text (prefix + file blocks + directory tree + suffix) whether or not the clipboard write succeeded, so callers can count its tokens without re-reading the clipboard. |
 | `get_clipboard_content()` | Reads from system clipboard (supports xclip, wl-paste, pbpaste) |
 | `get_vim_prompt()` | Reads user input from a temporary vim file |
@@ -369,6 +406,75 @@ Standalone CLI (`memo` command). Records audio from PipeWire microphones.
 
 ---
 
+## Hierarchical Orchestrator / Subagent Mode
+
+The default run mode is a **two-tier hierarchy**. A high-capability (expensive)
+model acts as the top-level **Orchestrator**; a fast/cheap model does tactical
+work as a **Subagent**. The orchestrator never touches project files directly —
+it can only see `.bash_agent_tmp/` — and instead delegates every read/edit/test
+task via the `subagent` built-in.
+
+```
+       User CLI (`bagent`, orchestrator mode by default)
+                          │
+                          ▼
+        Orchestrator  (is_orchestrator=True, expensive model)
+          Sandbox: ProtectHome=yes, workdir=.bash_agent_tmp, writes locked to .bash_agent_tmp
+          Prompt:  get_orchestrator_system_prompt()   (NO warmup exchanges)
+          Plans in .bash_agent_tmp/SCRATCHPAD.md
+                          │  emits:  subagent "<task>"
+                          ▼
+        Subagent  (is_subagent=True, is_orchestrator=False, cheap model)
+          Sandbox: ProtectHome=read-only, workdir=project root, writes=project root
+          Prompt:  get_system_prompt(..., is_subagent=True)
+          Reads/edits/tests, then emits `exit`
+                          │  raises SubagentExit()
+                          ▼
+        Orchestrator receives the subagent's LAST 2 messages + folded cost
+                          │
+                          ▼
+                    iterate / verify / exit
+```
+
+### Roles and flags
+
+| Constructor arg | Default | Effect |
+|---|---|---|
+| `is_orchestrator` | `True` | Selects `ProtectHome=yes`, `.bash_agent_tmp` workdir, locked writes, orchestrator prompt, and skips warmup. `Agent(is_orchestrator=False)` restores the legacy single agent. |
+| `is_subagent` | `False` | Marks a nested worker. Its `exit` raises `SubagentExit` (not `sys.exit`), it uses the subagent prompt section, and it persists to its own history file. |
+| `subagent_model` | `None` | Explicit subagent slug (CLI `--subagent-model`) → else `config.json subagent_model` → else `DEFAULT_SUBAGENT_MODEL`. |
+
+CLI: `--no-orchestrator` / `--direct` disables the hierarchy; `--orchestrator-model`
+overrides the orchestrator's model (alias of `--model` in orchestrator mode);
+`--subagent-model` sets the worker model.
+
+### Lifecycle and cost
+
+- `Agent._handle_special_command()` recognizes `subagent` / `subagent ...` and
+  routes to `Agent._handle_subagent_command()`.
+- Only an orchestrator may spawn — a subagent attempt returns a
+  `Subagents cannot spawn nested subagents` error block.
+- The task is parsed from the block with `shlex.split` (quotes survive; an
+  optional leading `-m` is tolerated) and a missing prompt is an error.
+- The subagent runs in-process via a nested `Agent(is_orchestrator=False,
+  is_subagent=True, keep_tmp=True, model=self.subagent_model or
+  DEFAULT_SUBAGENT_MODEL, budget=self.budget - self.session_cost)`.
+- A `SubagentExit` from the child is caught; the child's `session_cost` is added
+  to the parent's in a `finally` so cost is always aggregated.
+- The orchestrator's command output is the child's **last 2** conversation
+  messages (list/multimodal content rendered as `[Multimodal content omitted]`),
+  wrapped in a `=== SUBAGENT <uuid8> COMPLETED ===` banner with the cost.
+
+### Design decisions (do not regress)
+
+- Default `Agent()` is an **orchestrator**; legacy single-agent behavior is
+  opt-in via `--no-orchestrator`/`--direct` (or `is_orchestrator=False`).
+- Orchestrators **skip warmup** (their sandbox cannot read the repo).
+- Subagents **never** `sys.exit`; they raise `SubagentExit`.
+- Subagent history is isolated in `history_subagent_<uuid8>.json`.
+
+---
+
 ## Data Flow Diagram
 
 ```
@@ -385,7 +491,8 @@ Agent.run() loop
     ├─► Agent.parse_and_execute(response)
     │       │
     │       ├─► _extract_blocks()               ──► Parse UUID-fenced blocks
-    │       ├─► _handle_special_command()       ──► exit, reset, request-write, ask-user, copy-to-clipboard
+    │       ├─► _handle_special_command()       ──► subagent │ exit │ reset │ request-write │ ask-user │ copy-to-clipboard
+    │       │       └─► (subagent) _handle_subagent_command ──► nested Agent(is_subagent=True) ──► SubagentExit ──► last 2 msgs + cost
     │       ├─► _execute_script()               ──► extract_timeout_directive ──► Sandbox.execute / execute_python(timeout=?)
     │       │       ├─► image fences extracted  ──► _pending_multimodal_images
     │       │       ├─► audio fences extracted  ──► _pending_multimodal_audio
@@ -416,8 +523,9 @@ Agent.run() loop
 - The UUID is persisted in `history.json` for session resumption
 
 ### 2. File Paths
-- The agent's working directory is always the project root (where `main.py` was invoked)
+- The agent's working directory is the project root (where `main.py` was invoked) **for subagents / `--direct` mode**. An **orchestrator**'s working directory and only writable path are `.bash_agent_tmp/` (its `ProtectHome=yes` hides the repo entirely).
 - `.bash_agent_tmp/` is the ONLY writable scratch space (besides the project root)
+- Subagent histories use `history_subagent_<uuid8>.json` so a nested run never overwrites the parent `history.json`
 - Temp files for sandbox execution MUST be created inside `.bash_agent_tmp/` (not host `/tmp`) because the sandbox's `PrivateTmp=yes` gives it an isolated `/tmp`
 
 ### 3. Output Truncation
@@ -433,9 +541,10 @@ Agent.run() loop
 
 ### 5. Sandbox Properties
 - `ProtectSystem=strict`: /usr, /boot, /etc are read-only
-- `ProtectHome=read-only`: /home is read-only
+- `ProtectHome=read-only` (subagents / `--direct`) or **`ProtectHome=yes`** (orchestrators): /home is read-only, or fully hidden for orchestrators
 - `PrivateTmp=yes`: isolated /tmp and /var/tmp
-- `ReadWritePaths`: dynamically expanded via `request-write`
+- `--working-directory=` is the project root for subagents and `.bash_agent_tmp/` for orchestrators
+- `ReadWritePaths`: dynamically expanded via `request-write` — which orchestrators are forbidden from using
 - Unique `--unit=` per invocation (`bash-agent-<pid>-<n>-<hex>.service`); on
   client-side timeout the unit is stopped via `systemctl --user stop`
   (`Sandbox._reap_unit`) so timed-out workloads don't leak onto the host.
@@ -447,11 +556,13 @@ Agent.run() loop
 
 Settings resolve independently per key: CLI flag > `.bash_agent_tmp/config.json` > environment variable > hard-coded default.
 
-1. CLI flags (`--model`, `--max-tokens`, `--reasoning-effort`, `--token-budget`) — always win
-2. Optional persistent file `.bash_agent_tmp/config.json` (loaded by `config_file.py`; survives tmp-folder cleanup)
+**Model key, by role.** Subagents ignore the user's model config/env entirely (the orchestrator owns that choice): explicit `model` arg > `subagent_model` arg / `config.json subagent_model` > `DEFAULT_SUBAGENT_MODEL`. Orchestrators and `--direct` agents follow:
+
+1. CLI flags (`--model`/`--orchestrator-model`, `--max-tokens`, `--reasoning-effort`, `--token-budget`) — always win (`--orchestrator-model` becomes the effective `model` in orchestrator mode)
+2. Optional persistent file `.bash_agent_tmp/config.json` (loaded by `config_file.py`; survives tmp-folder cleanup). Model key order: `orchestrator_model` (in orchestrator mode) > `model`. `subagent_model` selects the worker slug.
 3. `OPENROUTER_MODEL` environment variable (model key only)
 4. `--audio` flag — selects `DEFAULT_AUDIO_MODEL` when no model was chosen above (model key only)
-5. Hard-coded defaults in `config.py` (`DEFAULT_MODEL` / `DEFAULT_AUDIO_MODEL`, `DEFAULT_MAX_TOKENS`; reasoning defaults to off)
+5. Hard-coded defaults in `config.py` (`DEFAULT_ORCHESTRATOR_MODEL` for orchestrators, else `DEFAULT_MODEL` / `DEFAULT_AUDIO_MODEL`, `DEFAULT_MAX_TOKENS`; reasoning defaults to off)
 
 Note: an explicit CLI `--reasoning-effort default` is a real choice that overrides the file; inside the file it means "defer to the model's built-in default".
 
@@ -485,6 +596,11 @@ To add a new tool (like `vision` or `search`):
   `bash_agent.context.count_tokens` too. (`tests/helpers/fakes.py` exposes the
   reusable `DeterministicTokenCounts` patcher that covers both seams.)
 - **Multimodal content format**: When `multimodal_capabilities` includes `"image"` and/or `"audio"`, images/audio attached via `vision.py`/`transcribe.py` cause the agent to construct content as a list of content blocks `[{"type": "text", ...}, {"type": "image_url", ...}, {"type": "input_audio", ...}]` instead of a plain string. The `ContextManager._content_tokens()` method and pruning logic must handle both formats.
+- **Orchestrator defaults**: `Agent()` is an orchestrator by default. If you add tests or code that exercises the legacy full loop (warmup, repo-root writes, `request-write`), construct the agent with `is_orchestrator=False` — otherwise warmup is skipped and the sandbox cannot see the repo. Existing tests were updated for this; do not re-introduce the old default.
+- **Subagent `exit` must not `sys.exit`**: Inside `_handle_special_command`, the `exit` handler branches on `self.is_subagent` and raises `SubagentExit`. Keep that branch — a subagent calling `sys.exit(0)` would tear down the orchestrator's process.
+- **Cost aggregation is in a `finally`**: `_handle_subagent_command()` adds the child's `session_cost` to the parent even if the child raises. Don't move that line into the `try` body, or a crashed subagent's spend would be lost.
+- **`FakeSandbox` has no `.timeout`**: agent code reads `getattr(self.sandbox, "timeout", None)` when constructing a child; keep that defensive access.
+- **Per-role history files**: subagents pass `history_file=.../history_subagent_<uuid8>.json` to `ContextManager`. If you change the persistence path logic in `context.py`, preserve that override so nested runs don't clobber `history.json`.
 
 ---
 
@@ -522,6 +638,7 @@ When making changes:
 3. Test sandbox changes with a command that tries to write to `/etc` (should fail)
 4. Test context pruning by artificially lowering `CONTEXT_LIMIT` and running a long session
 5. Test resume with `bagent --resume` after a short session
+6. Test the hierarchy with `bagent -m "Use a subagent to check the git status and list all .py files in bash_agent/"` (requires `OPENROUTER_API_KEY`): the orchestrator should emit a `subagent` block, the subagent should run the commands in the repo root and report back, and the orchestrator should receive the subagent's last 2 messages. The unit contracts live in `tests/unit/test_subagent.py`.
 
 ---
 

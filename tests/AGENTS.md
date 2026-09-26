@@ -19,10 +19,15 @@ installed or which model slug is selected.
   `test_llm_adapter.py` for Group 5; `test_config_file.py` for Group 42 (persistent config.json); supporting-module groups live in
   `test_transcribe.py` (T-39), `test_memo.py` (T-40),
   `test_search_helpers.py` (T-41), `test_agent_reasoning_effort.py` (T-44 —
-  implicit "none" reasoning level for non-mandatory models), and
+  implicit "none" reasoning level for non-mandatory models),
+  `test_subagent.py` (Group 43 — hierarchical Orchestrator/Subagent mode:
+  sandbox isolation, `SubagentExit`, the `subagent` command, cost folding,
+  nested refusal, warmup skipping), and
   `test_tokenizer_routing.py` —
   model-aware token estimation (`count_tokens` family routing))
-- `integration/` — real processes, still offline (systemd-run, fake-LLM loop)
+- `integration/` — real processes, still offline (systemd-run, fake-LLM loop;
+  includes Group 43's T-43g orchestrator→subagent end-to-end run in
+  `test_full_agent_loop.py`).
 
 ## Non-negotiable rules
 
@@ -65,6 +70,14 @@ a narrow seam (`llm._CLIENT_CACHE`, `urllib.request.urlopen`,
   constructing an `Agent`.
 - `exit` and `copy-to-clipboard` special commands call `sys.exit()` in-process;
   assert with `assertRaises(SystemExit)`.
+  **Exception:** a subagent's `exit` raises `bash_agent.agent.SubagentExit`
+  instead — assert with `assertRaises(SubagentExit)`.
+- **Role-aware construction.** `Agent()` now defaults to `is_orchestrator=True`.
+  Orchestrators skip the warmup exchanges and run in a `ProtectHome=yes`
+  sandbox anchored at `.bash_agent_tmp/`, so any test that expects the legacy
+  full loop with repo-root access MUST pass `is_orchestrator=False`. Subagent
+  tests construct nested agents with `is_subagent=True` (and a faked child)
+  so no real LLM call happens.
 - Sandbox integration tests need a systemd **user** session; guard with
   `skipUnless(shutil.which("systemd-run"), ...)` and keep each invocation well
   under the 60s harness timeout.

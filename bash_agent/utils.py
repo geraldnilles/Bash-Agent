@@ -10,6 +10,9 @@ def cleanup_tmp_folder():
             item_path = os.path.join(tmp_path, item)
             if item in [ "SCRATCHPAD.md", "vim_prompt.tmp", "ROLE.md", "embeddings.json", "search_disabled", "history.json", "clipboard_blacklist.txt", "config.json" ]:
                 continue  # Keep the scratchpad
+            # Preserve per-subagent session histories (history_subagent_*.json).
+            if item.startswith("history_subagent_") and item.endswith(".json"):
+                continue
             if os.path.isfile(item_path):
                 os.remove(item_path)
             elif os.path.isdir(item_path):

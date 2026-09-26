@@ -146,7 +146,7 @@ class FullLoopCase(unittest.TestCase):
         self._ctx_patch.start()
 
         # Fresh agent for the primary session; tests may construct more.
-        self.agent = Agent()
+        self.agent = Agent(is_orchestrator=False)
         self.uid = self.agent.uuid
 
         # Remember prior openrouter client so tearDown restores global state.
@@ -319,7 +319,7 @@ class TestResumeFlow(FullLoopCase):
         self.assertTrue(os.path.exists(os.path.join(self.tmpdir, "carried.txt")))
 
         # ---- Session B: resume from disk ---------------------------------------
-        agent_b = Agent(resume=True)
+        agent_b = Agent(resume=True, is_orchestrator=False)
         self.assertTrue(agent_b.resumed_session)
         self.assertEqual(agent_b.uuid, uuid_a, "UUID must be re-bound from disk")
 
@@ -368,6 +368,159 @@ class TestResumeFlow(FullLoopCase):
 
         # The fake saw exactly the two turns of session B.
         self.assertEqual(len(fake_b.calls), 2)
+
+
+
+
+# ---------------------------------------------------------------------------
+# Group 43 integration — Orchestrator -> Subagent end-to-end (offline)
+# ---------------------------------------------------------------------------
+
+@unittest.skipUnless(systemd_user_bus_available(), "systemd-run user session unavailable")
+class TestOrchestratorSubagentLoop(FullLoopCase):
+    """
+    T-43g: Drive a REAL orchestrator run whose only delegation is a `subagent`
+    block, whose subagent runs REAL sandbox commands in the project root, and
+    whose exit unwinds back into the orchestrator.
+
+    Proves the whole hierarchy offline:
+      * the orchestrator (ProtectHome=yes) runs NO warmup and delegates via
+        `subagent "<task>"`,
+      * the spawned subagent constructs with is_subagent=True and executes a
+        real systemd-run bash command (a file appears on disk),
+      * the subagent's `exit` raises SubagentExit (not SystemExit) so the
+        orchestrator continues,
+      * the orchestrator receives the subagent's LAST 2 messages + folded cost,
+      * the subagent persisted to its own history_subagent_*.json, leaving the
+        parent history.json intact,
+      * the orchestrator's own `exit` ends the process with SystemExit(0).
+    """
+
+    def setUp(self):
+        # Reuse FullLoopCase's seam-style setup, but the primary agent here is
+        # an ORCHESTRATOR (the default role). FullLoopCase builds a
+        # non-orchestrator; rebuild it in the orchestrator role.
+        super().setUp()
+        self.agent = Agent(is_orchestrator=True, keep_tmp=True)
+        self.uid = self.agent.uuid
+
+    def test_orchestrator_delegates_and_folds_cost(self):
+        import re as _re
+
+        subdir = os.path.join(self.tmpdir, ".bash_agent_tmp")
+        sub_marker = os.path.join(self.tmpdir, "subagent-ran.txt")
+
+        seen_uuid = {}
+        counters = {"orch": 0, "sub": 0}
+
+        def _sys_uid(messages):
+            content = messages[0].get("content", "") if messages else ""
+            if isinstance(content, list):
+                content = " ".join(
+                    b.get("text", "") for b in content if isinstance(b, dict)
+                )
+            m = _re.search(r"current session UUID is: ([0-9a-fA-F-]+)", content)
+            uid = m.group(1) if m else "unknown"
+            role = "orch" if "ORCHESTRATOR agent" in content else (
+                "sub" if "SUBAGENT ROLE" in content else "??"
+            )
+            return uid, role, content
+
+        def dynamic(**kwargs):
+            uid, role, content = _sys_uid(kwargs["messages"])
+            seen_uuid.setdefault(role, uid)
+            n = counters[role]
+            counters[role] = n + 1
+            if role == "orch":
+                if n == 0:
+                    # First (and only) intended delegation.
+                    return make_fake_response(
+                        content="Delegating now.\n\n"
+                                + bash_block(uid, 'subagent "write a marker file"'),
+                        cost=0.002,
+                    )
+                # After reviewing the subagent summary, finish.
+                return make_fake_response(
+                    content="Goal verified. Ending session.\n\n"
+                            + bash_block(uid, "exit"),
+                    cost=0.002,
+                )
+            if role == "sub":
+                if n == 0:
+                    # Subagent does REAL work in the project root.
+                    script = (
+                        "echo subagent-ran > subagent-ran.txt\n"
+                        "echo done-work\n"
+                    )
+                    return make_fake_response(
+                        content="Working.\n\n" + bash_block(uid, script),
+                        cost=0.002,
+                    )
+                # Subagent finishes -> raises SubagentExit (never sys.exit).
+                return make_fake_response(
+                    content="Task complete.\n\n" + bash_block(uid, "exit"),
+                    cost=0.002,
+                )
+            # Fallback: never leave the queue empty.
+            return make_fake_response(
+                content=bash_block(uid, "exit"), cost=0.0
+            )
+
+        fake = FakeLLMClient(responses=[dynamic, dynamic, dynamic, dynamic])
+        llm._CLIENT_CACHE["openrouter"] = fake
+
+        with runaway_guard(40):
+            with self.assertRaises(SystemExit) as cm:
+                self.agent.run("delegate a marker write to a subagent")
+        self.assertEqual(cm.exception.code, 0)
+
+        # --- Roles actually exercised -----------------------------------------
+        self.assertIn("orch", seen_uuid)
+        self.assertIn("sub", seen_uuid)
+        self.assertNotEqual(seen_uuid["orch"], seen_uuid["sub"])
+        self.assertEqual(seen_uuid["orch"], self.uid)
+
+        # --- Orchestrator history shape ---------------------------------------
+        h = self.history()
+        self.assertEqual(h[0]["role"], "system")
+        roles = [m["role"] for m in h]
+        # system, user(task), assistant(subagent cmd), user(summary), assistant(exit)
+        self.assertEqual(len(h), 5, "unexpected orchestrator history: %r" % roles)
+
+        deleg_cmd = h[2]["content"]
+        self.assertIn(_cmd_start("BASH", self.uid), deleg_cmd)
+        self.assertIn("subagent", deleg_cmd)
+
+        summary = h[3]["content"]
+        self.assertIn(_out_start("BASH", 0, self.uid), summary)
+        self.assertIn("SUBAGENT", summary)
+        self.assertIn("COMPLETED", summary)
+        self.assertIn("done-work", summary, "summary must carry subagent output")
+
+        # --- The subagent's real sandbox work landed on disk ------------------
+        self.assertTrue(
+            os.path.exists(sub_marker),
+            "subagent's sandboxed command did not really run",
+        )
+        with open(sub_marker) as f:
+            self.assertEqual(f.read().strip(), "subagent-ran")
+
+        # --- Cost folded: 4 scripted calls x $0.002 ---------------------------
+        self.assertAlmostEqual(self.agent.session_cost, 0.008, places=9)
+
+        # --- Subagent used its OWN history file -------------------------------
+        sub_hist = os.path.join(
+            subdir, "history_subagent_%s.json" % seen_uuid["sub"][:8]
+        )
+        self.assertTrue(
+            os.path.exists(sub_hist),
+            "subagent history file missing: %s" % sub_hist,
+        )
+        # Parent history.json is still the orchestrator's and is consistent.
+        with open(self.hist_file) as f:
+            state = json.load(f)
+        self.assertEqual(state["uuid"], self.uid)
+        self.assertEqual(state["history"], h)
 
 
 if __name__ == "__main__":

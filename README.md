@@ -32,6 +32,7 @@ The agent operates entirely through the command line. Since it has access to a r
 - **Record voice memos** from your microphone (PipeWire)
 - **Semantically search** your codebase with embedding-based retrieval
 - **Persist memory** between turns via a `SCRATCHPAD.md` file
+- **Delegate work to subagents** — run as a planning orchestrator that hands tactical tasks to cheaper worker agents
 - **Resume sessions** — stop and pick up exactly where you left off
 
 ---
@@ -145,6 +146,41 @@ You approve or deny interactively.
 
 ## Key Features in Depth
 
+### Hierarchical Orchestrator / Subagent Mode
+
+By default the agent runs as a **two-tier hierarchy**. The top-level agent is an
+**Orchestrator**: a high-level planner that runs in a strict sandbox
+(`ProtectHome=yes`, working directory locked to `.bash_agent_tmp/`, `request-write`
+disabled) and therefore cannot touch your project code directly. It delegates
+every tactical task — reading files, editing code, running tests — to focused
+**Subagents** via the built-in `subagent` command:
+
+```
+---START_BASH_COMMAND-{uuid}---
+subagent "Find all instances of deprecated API calls in src/ and report back"
+---END_BASH_COMMAND-{uuid}---
+```
+
+Each subagent runs with full project read/write access in the standard sandbox,
+performs the task, then `exit`s. The orchestrator receives the subagent's last
+two messages (plus its cost, folded into the session budget) and continues
+planning. Because tactical detail stays in the subagent's own context and only a
+compact summary flows back, the orchestrator's context stays small and cheap.
+
+Use a high-capability model for planning and a fast/cheap one for execution:
+
+```bash
+bagent --orchestrator-model deepseek/deepseek-v4-pro \
+       --subagent-model deepseek/deepseek-v4.1-flash \
+       -m "Refactor the tokenizer into two modules and run the tests"
+```
+
+The legacy single-agent (one model does everything) is still available:
+
+```bash
+bagent --direct -m "Run ls and tell me what you see"   # or --no-orchestrator
+```
+
 ### Vision (Image Analysis)
 
 If your chosen model supports native image input (GPT-4V, Claude, Gemini models via OpenRouter, etc.), the agent can analyze images directly:
@@ -239,6 +275,9 @@ Absolute counts accept an optional `K`/`M` suffix (metric: `256K` = 256,000 toke
 | `-k, --keep-tmp` | Preserve `.bash_agent_tmp/` between runs |
 | `-d, --debug` | Dump full conversation to `/tmp/bash_agent_log.txt` |
 | `--model <name>` | Override the default model (e.g., `openai/gpt-4o`) |
+| `--orchestrator-model <name>` | Model slug for the top-level orchestrator (alias for `--model` in orchestrator mode). |
+| `--subagent-model <name>` | Model slug subagents run on (default: a fast/cheap model). |
+| `--no-orchestrator`, `--direct` | Run in standalone single-agent mode (legacy behavior) instead of the default orchestrator/subagent hierarchy. |
 | `--audio` | Use the audio-enabled default model instead of the standard default (ignored when `--model`, `config.json`, or `OPENROUTER_MODEL` select a model) |
 | `--reasoning-effort <level>` | Set reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `default` |
 | `--max-tokens <n>` | Override max output tokens (default: 8192) |
@@ -287,7 +326,9 @@ For settings you want on every session in a given project, create `.bash_agent_t
 {
   "model": "deepseek/deepseek-v4-pro",
   "max_tokens": 16384,
-  "reasoning_effort": "medium"
+  "reasoning_effort": "medium",
+  "orchestrator_model": "deepseek/deepseek-v4-pro",
+  "subagent_model": "deepseek/deepseek-v4.1-flash"
 }
 ```
 
@@ -296,6 +337,8 @@ For settings you want on every session in a given project, create `.bash_agent_t
 | `model` | OpenRouter slug | Overrides `OPENROUTER_MODEL`; loses to `--model` |
 | `max_tokens` | Positive integer | Overrides the 8192 default; loses to `--max-tokens` |
 | `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `default` | `default` defers to the model's built-in behavior; loses to `--reasoning-effort` |
+| `orchestrator_model` | OpenRouter slug | Model for the top-level orchestrator; loses to `--orchestrator-model`/`--model` |
+| `subagent_model` | OpenRouter slug | Model for spawned subagents; loses to `--subagent-model` |
 
 **Precedence per setting:** CLI flag > `config.json` > environment variable > built-in default. Fallbacks are per-key: passing only `--max-tokens` leaves `model`/`reasoning_effort` from the file intact. Malformed files are skipped with a `[Config]` warning on stderr; invalid values are dropped individually.
 

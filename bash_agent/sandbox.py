@@ -6,8 +6,16 @@ import uuid as uuid_lib
 from bash_agent.config import BASH_TIMEOUT
 
 class Sandbox:
-    def __init__(self, scratchpad_path: str, timeout: int = None, uuid: str = None, multimodal_capabilities: list = None):
-        self.approved_write_paths = [os.path.abspath(".")]
+    def __init__(self, scratchpad_path: str, timeout: int = None, uuid: str = None, multimodal_capabilities: list = None, is_orchestrator: bool = False):
+        self.is_orchestrator = is_orchestrator
+        self._workdir = os.path.abspath(".bash_agent_tmp" if is_orchestrator else ".")
+        if is_orchestrator:
+            # Orchestrator is confined entirely to .bash_agent_tmp/: it may
+            # write ONLY there and (via ProtectHome=yes) cannot read the user's
+            # home / project tree at all. Tactical file work is delegated.
+            self.approved_write_paths = [os.path.abspath(".bash_agent_tmp")]
+        else:
+            self.approved_write_paths = [os.path.abspath(".")]
         self.timeout = timeout if timeout is not None else BASH_TIMEOUT
         self.uuid = uuid
         self.multimodal_capabilities = multimodal_capabilities or []
@@ -43,6 +51,12 @@ class Sandbox:
         return self.timeout
 
     def request_write(self, path: str) -> bool:
+        if self.is_orchestrator:
+            return (
+                False,
+                "Orchestrator agent cannot request write access outside "
+                ".bash_agent_tmp. Delegate file changes to a subagent.",
+            )
         abs_path = os.path.abspath(path)
         print(f"\n[AGENT REQUEST] The agent is requesting write access to: {abs_path}")
         ans = input("Approve? (y/n/message): ")
@@ -70,14 +84,16 @@ class Sandbox:
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
         unit_name = self._unit_name()
 
+        protect_home_val = "yes" if self.is_orchestrator else "read-only"
         cmd = [
             "systemd-run", "--user", "--quiet", "--wait", "--collect", "--pipe",
             f"--unit={unit_name}",
             "--property=ProtectSystem=strict",
-            "--property=ProtectHome=read-only",
+            f"--property=ProtectHome={protect_home_val}",
             "--property=PrivateTmp=yes",
-            # Optional but helpful: start the bash session in the project directory
-            f"--working-directory={os.path.abspath('.')}",
+            # Start the bash session in the project directory (orchestrator:
+            # confined to .bash_agent_tmp/).
+            f"--working-directory={self._workdir}",
             f"--property=Environment=PATH={host_path}"
         ]
 
@@ -140,14 +156,15 @@ class Sandbox:
         os.chmod(script_path, 0o700)
 
         unit_name = self._unit_name()
+        protect_home_val = "yes" if self.is_orchestrator else "read-only"
         cmd = [
             "systemd-run", "--user", "--quiet", "--wait", "--collect", "--pipe",
             f"--unit={unit_name}",
             "--property=ProtectSystem=strict",
-            "--property=ProtectHome=read-only",
+            f"--property=ProtectHome={protect_home_val}",
             "--property=PrivateTmp=yes",
-            f"--working-directory={os.path.abspath('.')}",
-            f"--property=Environment=PYTHONPATH={os.path.abspath(".")}",
+            f"--working-directory={self._workdir}",
+            f"--property=Environment=PYTHONPATH={self._workdir}",
         ]
         
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")

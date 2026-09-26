@@ -136,7 +136,7 @@ class TestLoadConfigBasics(ConfigFileTestBase):
         self.assertTrue(os.path.isabs(get_config_path()))
 
     def test_known_keys_constant_matches_validation_surface(self):
-        self.assertEqual(KNOWN_KEYS, ("model", "max_tokens", "reasoning_effort"))
+        self.assertEqual(KNOWN_KEYS, ("model", "max_tokens", "reasoning_effort", "orchestrator_model", "subagent_model"))
         self.assertIn("default", VALID_REASONING_EFFORTS)
 
 

@@ -33,6 +33,19 @@ DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash"
 # as an input modality.
 DEFAULT_AUDIO_MODEL = "xiaomi/mimo-v2.6-flash"
 
+# Hierarchical multi-agent defaults. The top-level agent acts as an
+# ORCHESTRATOR that plans and delegates tactical work to cost-effective
+# SUBAGENTS (see AGENTS.md "Hierarchical Orchestrator / Subagent Mode").
+# These are the fallbacks used when neither the CLI nor config.json pins a
+# per-role model.
+DEFAULT_ORCHESTRATOR_MODEL = "deepseek/deepseek-v4.1-flash"
+DEFAULT_SUBAGENT_MODEL = "deepseek/deepseek-v4.1-flash"
+
+# Prefix (relative to .bash_agent_tmp/) for subagent history files. Subagents
+# get their OWN history file so a nested run never overwrites the parent
+# orchestrator's history.json.
+SUBAGENT_HISTORY_PREFIX = "history_subagent_"
+
 # Limits & Timeouts
 HISTORY_FILE = os.path.abspath(".bash_agent_tmp/history.json")
 # Fallback context ceiling (TOKENS) used when the OpenRouter /models probe for

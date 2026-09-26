@@ -12,11 +12,6 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
 
 ## Medium Priority
 
-- **Sub Agents:** Allow the top-level agent to spawn sub agents
-  - There will be a `subagent` bash tool where the prompt and role can be passed in as command line arguments
-  - Only the top level agent will have access to this rule
-  - The subagent will operate in the same sandbox
-  - The main benefit is that context can be controlled and kept in check
 
 ---
 
@@ -26,6 +21,26 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
 ---
 
 ## ✅ Completed
+- **Sub Agents / Hierarchical Orchestrator Mode:** the top-level agent now runs
+  as a planning **Orchestrator** that delegates tactical work to **Subagents**
+  via the built-in `subagent "<task>"` command (sole content of a bash block).
+  - Only the top-level orchestrator may spawn; a subagent trying to spawn a
+    nested subagent is refused.
+  - The orchestrator runs in a STRICT, delegated sandbox (`ProtectHome=yes`,
+    working dir anchored at `.bash_agent_tmp/`, writes locked there, and
+    `request-write` disabled) so it cannot touch project code directly; the
+    subagent runs with full project read/write in the standard sandbox.
+  - Each subagent is a nested in-process `Agent(is_subagent=True)` whose `exit`
+    raises `SubagentExit` (instead of `sys.exit`) so the orchestrator regains
+    control; its cumulative cost is folded into the parent session and its last
+    2 messages are returned as the command's output.
+  - Subagents persist to an isolated `history_subagent_<uuid8>.json`; they can
+    use a different (cheaper) model via `--subagent-model` / `config.json`
+    `subagent_model`, while the orchestrator uses `--orchestrator-model`.
+  - The main benefit is context control: tactical noise stays in the subagent's
+    context, and only a compact summary flows back to the orchestrator.
+  - Legacy single-agent behavior remains available via `--no-orchestrator` /
+    `--direct`.
 - **Dynamic Command Timeout:** a single BASH/PYTHON block can now raise its own
   grace period up to 600s via an optional first-line directive `# timeout: N`
   (N in [60, 600]). The default remains 60s (CLI `-t` or `config.BASH_TIMEOUT`).

@@ -138,7 +138,7 @@ class TestPlainRun(unittest.TestCase):
         res["agent_cls"].assert_called_once_with(
             keep_tmp=False, debug=False, model=None,
             reasoning_effort=None, max_tokens=None, token_budget=None,
-            timeout=None, resume=False, budget=0.10, audio=False)
+            timeout=None, resume=False, budget=0.10, audio=False, is_orchestrator=True, subagent_model=None)
         res["agent_cls"].return_value.run.assert_called_once_with(
             "list files")
 
@@ -148,7 +148,7 @@ class TestPlainRun(unittest.TestCase):
         res["agent_cls"].assert_called_once_with(
             keep_tmp=False, debug=False, model=None,
             reasoning_effort=None, max_tokens=None, token_budget=None,
-            timeout=None, resume=False, budget=0.10, audio=True)
+            timeout=None, resume=False, budget=0.10, audio=True, is_orchestrator=True, subagent_model=None)
 
     def test_no_input_source_yields_run_none(self):
         # No -m/-p/-x: initial_task stays None; agent still runs.

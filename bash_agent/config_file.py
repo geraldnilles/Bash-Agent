@@ -29,7 +29,7 @@ import sys
 CONFIG_FILENAME = "config.json"
 
 # Keys we understand; anything else triggers a warning and is ignored.
-KNOWN_KEYS = ("model", "max_tokens", "reasoning_effort")
+KNOWN_KEYS = ("model", "max_tokens", "reasoning_effort", "orchestrator_model", "subagent_model")
 
 # Mirrors the argparse choices for --reasoning-effort in main.py.
 VALID_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "default")
@@ -77,6 +77,14 @@ def load_config(path=None):
             settings["model"] = model.strip()
         else:
             _warn(f"Ignoring key 'model' in {CONFIG_FILENAME}: expected a non-empty string")
+
+    for slug_key in ("orchestrator_model", "subagent_model"):
+        slug = raw.get(slug_key)
+        if slug is not None:
+            if isinstance(slug, str) and slug.strip():
+                settings[slug_key] = slug.strip()
+            else:
+                _warn(f"Ignoring key '{slug_key}' in {CONFIG_FILENAME}: expected a non-empty string")
 
     max_tokens = raw.get("max_tokens")
     if max_tokens is not None:
