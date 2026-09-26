@@ -31,6 +31,7 @@ The agent operates entirely through the command line. Since it has access to a r
 - **Transcribe audio** using built-in transcription
 - **Record voice memos** from your microphone (PipeWire)
 - **Semantically search** your codebase with embedding-based retrieval
+- **Inspect history** — colorized, role-labeled dump of any history JSON (`history`, `history -a`)
 - **Persist memory** between turns via a `SCRATCHPAD.md` file
 - **Delegate work to subagents** — run as a planning orchestrator that hands tactical tasks to cheaper worker agents
 - **Resume sessions** — stop and pick up exactly where you left off
@@ -232,6 +233,25 @@ search "database connection pooling" -n 10
 ```
 
 Uses OpenAI-compatible embeddings with re-ranking for accuracy. Indexes your entire project tree and updates incrementally.
+
+### History Viewer
+
+Inspect what the agent (and its subagents) actually said, with every role in a
+distinct color and base64 image/audio payloads replaced by compact placeholders:
+
+```bash
+history                     # top-level/orchestrator history
+history -a                  # orchestrator + every subagent history
+history .bash_agent_tmp/history_subagent_*.json
+history --no-color | less   # pipe-friendly, no ANSI escapes
+history -t 2000             # truncate each message to 2000 chars
+```
+
+Reads `.bash_agent_tmp/history.json` by default (`-a` also pulls in
+`history_subagent_*.json`). Image and audio blocks print as
+`<Image payload (image/png, 1234 bytes)>` / `<Audio payload (mp3, 4321 bytes)>`
+— the raw base64 is never dumped. Missing or malformed files are skipped with a
+warning rather than crashing.
 
 ### Session Resume
 

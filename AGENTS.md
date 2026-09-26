@@ -38,7 +38,8 @@ bash_agent/
 ├── token_budget.py  # --token-budget parsing/derivation (absolute tokens or % of model window)
 ├── ignore.py        # gitignore-style glob matcher shared by --copy-project/--include/--ignore
 ├── sfx.py           # Subtle sound FX — programmatic wav synthesis (PipeWire: pw-play/paplay)
-└── memo.py          # Voice memo recording (PipeWire + ffmpeg)
+├── memo.py          # Voice memo recording (PipeWire + ffmpeg)
+└── history.py       # History viewer CLI — colorized dump of agent history JSON (image/audio placeholders)
 ```
 
 ### Entry Point: `main.py`
@@ -570,6 +571,38 @@ Settings resolve independently per key: CLI flag > `.bash_agent_tmp/config.json`
 Note: an explicit CLI `--reasoning-effort default` is a real choice that overrides the file; inside the file it means "defer to the model's built-in default".
 
 ---
+
+---
+
+### History Viewer: `history.py`
+
+Standalone CLI (`history` command). Prints the **text** contents of agent
+history JSON files in a readable, colorized form. Image/audio payloads are
+summarized as compact placeholders — base64 is never dumped.
+
+**Flow:**
+1. Resolves target files: explicit path args (globs allowed) or, by default,
+   `config.HISTORY_FILE` (the orchestrator history). With `-a/--all`, every
+   `config.SUBAGENT_HISTORY_PREFIX*.json` in `.bash_agent_tmp/` is appended.
+2. Prints a per-file header (`basename | session uuid | N message(s)`).
+3. Prints each message labeled by role (`[SYSTEM]`/`[USER]`/`[ASSISTANT]`),
+   each in a unique color (system=`COLOR_CMD` cyan, user=`COLOR_COST` green,
+   assistant=`COLOR_PY_CMD` magenta) via the shared `COLOR_RESET`.
+4. `content` may be a plain string or a block list; text is printed as-is,
+   `image_url`/`input_audio` become `<Image payload (image/png, N bytes)>` /
+   `<Audio payload (mp3, N bytes)>` (legacy bare-string forms handled), and
+   unknown block types render as `<type payload>`.
+5. Missing/malformed files warn on stderr and are skipped (never crash);
+   exit code is non-zero only when nothing could be loaded.
+
+**Flags:** `-a/--all`, `-t/--truncate N`, `--no-color` (also honors the
+`NO_COLOR` env var).
+
+**Key functions:**
+- `resolve_paths(files, include_all)` — expands globs + subagent files
+- `load_history(path)` — safe JSON load with shape validation
+- `print_history(path, data, use_color, truncate)` — renders one file
+- `_format_image_block` / `_format_audio_block` — placeholder builders
 
 ## Adding a New Built-in Tool
 
