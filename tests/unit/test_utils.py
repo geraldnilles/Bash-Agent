@@ -53,6 +53,7 @@ WHITELIST = [
     "search_disabled",
     "history.json",
     "clipboard_blacklist.txt",
+    "config.json",
 ]
 
 
@@ -169,6 +170,28 @@ class TestCleanupTmpFolder(UtilsCase):
                 self.assertTrue(os.path.isfile(path), name)
                 with open(path, "r", encoding="utf-8") as f:
                     self.assertEqual(f.read(), contents[name])
+
+    def test_subagent_history_is_removed_but_main_history_survives(self):
+        # Regression: fresh-session cleanup must delete stale
+        # history_subagent_*.json (bug: they used to be preserved and
+        # accumulated across sessions), while the orchestrator's own
+        # history.json stays intact.
+        tmp = os.path.join(self.tmpdir, ".bash_agent_tmp")
+        make_file(os.path.join(".bash_agent_tmp", "history.json"), "{}")
+        make_file(os.path.join(".bash_agent_tmp",
+                               "history_subagent_deadbeef.json"), "{}")
+        make_file(os.path.join(".bash_agent_tmp",
+                               "history_subagent_01234567.json"), "{}")
+
+        cleanup_tmp_folder()
+
+        self.assertFalse(os.path.exists(
+            os.path.join(tmp, "history_subagent_deadbeef.json")))
+        self.assertFalse(os.path.exists(
+            os.path.join(tmp, "history_subagent_01234567.json")))
+        self.assertTrue(os.path.exists(
+            os.path.join(tmp, "history.json")),
+            "main history.json must survive cleanup")
 
     def test_junk_files_and_nested_dirs_are_removed(self):
         tmp = os.path.join(self.tmpdir, ".bash_agent_tmp")
