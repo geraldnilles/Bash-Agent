@@ -10,7 +10,7 @@ T-31 drives a complete fresh session end-to-end:
   turn 1 (bash echo) -> turn 2 (python writes a marker file) -> turn 3 (exit)
 
 and asserts across the whole stack:
-  * the REAL systemd sandbox ran the scripts (a file written by the python
+  * the REAL bwrap sandbox ran the scripts (a file written by the python
     block exists on disk with the exact content),
   * OUTPUT blocks landed in history with correct EXIT_CODE headers,
   * history.json was written and is reloadable by a fresh ContextManager,
@@ -25,7 +25,7 @@ a follow-up response that reads a file created by the first session.
 Offline guarantees:
   * LLM boundary faked via llm._CLIENT_CACHE seeding (FakeLLMClient),
   * capability probe patched out (Agent._check_model_capabilities),
-  * the only real subprocesses are local systemd-run invocations.
+  * the only real subprocesses are local bwrap invocations.
 
 A SIGALRM watchdog bounds every run() call so a protocol regression fails
 fast instead of hanging the harness.
@@ -56,7 +56,7 @@ from tests.helpers.fakes import (
     bash_block,
     python_block,
     chdir_repo_tmp,
-    systemd_user_bus_available,
+    bwrap_available,
     _stub_model_context_info,
 )
 
@@ -186,7 +186,7 @@ FOLLOWUP_SCRIPT = "print(open('carried.txt').read().strip())\n"
 # T-31 — Full offline agent loop
 # ---------------------------------------------------------------------------
 
-@unittest.skipUnless(systemd_user_bus_available(), "systemd-run user session unavailable")
+@unittest.skipUnless(bwrap_available(), "bwrap unavailable")
 class TestFullOfflineAgentLoop(FullLoopCase):
 
     def test_full_loop_end_to_end(self):
@@ -291,7 +291,7 @@ class TestFullOfflineAgentLoop(FullLoopCase):
 # T-32 — Resume flow end-to-end
 # ---------------------------------------------------------------------------
 
-@unittest.skipUnless(systemd_user_bus_available(), "systemd-run user session unavailable")
+@unittest.skipUnless(bwrap_available(), "bwrap unavailable")
 class TestResumeFlow(FullLoopCase):
 
     def test_resume_rebinds_uuid_and_continues(self):
@@ -376,7 +376,7 @@ class TestResumeFlow(FullLoopCase):
 # Group 43 integration — Orchestrator -> Subagent end-to-end (offline)
 # ---------------------------------------------------------------------------
 
-@unittest.skipUnless(systemd_user_bus_available(), "systemd-run user session unavailable")
+@unittest.skipUnless(bwrap_available(), "bwrap unavailable")
 class TestOrchestratorSubagentLoop(FullLoopCase):
     """
     T-43g: Drive a REAL orchestrator run whose only delegation is a `subagent`
@@ -387,7 +387,7 @@ class TestOrchestratorSubagentLoop(FullLoopCase):
       * the orchestrator (home tree hidden) runs NO warmup and delegates via
         `subagent "<task>"`,
       * the spawned subagent constructs with is_subagent=True and executes a
-        real systemd-run bash command (a file appears on disk),
+        real bwrap bash command (a file appears on disk),
       * the subagent's `exit` raises SubagentExit (not SystemExit) so the
         orchestrator continues,
       * the orchestrator receives the subagent's LAST 2 messages + folded cost,

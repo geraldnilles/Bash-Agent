@@ -6,7 +6,7 @@
 
 ## Project Overview
 
-Bash Agent is a Python CLI that orchestrates an autonomous LLM-in-the-loop agent. The LLM communicates via a custom text-based protocol (UUID-fenced blocks) and executes commands in an ephemeral `systemd-run` sandbox. The project is a single Python package (`bash_agent/`) with no external service dependencies beyond an LLM API (OpenRouter).
+Bash Agent is a Python CLI that orchestrates an autonomous LLM-in-the-loop agent. The LLM communicates via a custom text-based protocol (UUID-fenced blocks) and executes commands in an ephemeral `bwrap` (bubblewrap) sandbox. The project is a single Python package (`bash_agent/`) with no external service dependencies beyond an LLM API (OpenRouter).
 
 **Entry point:** `python3 -m bash_agent.main` or the `bagent` console script (defined in `pyproject.toml`).
 
@@ -28,7 +28,7 @@ bash_agent/
 ├── config_file.py   # Optional .bash_agent_tmp/config.json loader (model/max_tokens/reasoning_effort/orchestrator_model/subagent_model)
 ├── tokenizer.py     # Model-aware local token counting (DeepSeek BPE, tiktoken o200k family for OpenAI, o200k proxy for Gemini, LiteLLM, ~3.5 chars/token last resort)
 ├── context.py       # ContextManager — conversation history, pruning, per-role history file
-├── sandbox.py       # Sandbox — systemd-run execution wrapper (orchestrator vs subagent isolation)
+├── sandbox.py       # Sandbox — bwrap (bubblewrap) execution wrapper (orchestrator vs subagent isolation)
 ├── llm.py           # LLM provider adapter layer (OpenRouter)
 ├── prompts.py       # System prompt template generation (orchestrator + subagent prompts)
 ├── utils.py         # Misc helpers (clipboard, cleanup, vim prompt)
@@ -237,7 +237,7 @@ vendor-neutral for everything else.
 
 ### Sandbox Execution: `sandbox.py` → `class Sandbox`
 
-Wraps `systemd-run` for isolated command execution.
+Wraps `bwrap` (bubblewrap) for isolated command execution.
 
 **Constructor:** Takes `scratchpad_path`, an optional session-default `timeout` override (CLI `-t`; falls back to `config.BASH_TIMEOUT` = 60), optional `uuid`/`multimodal_capabilities` flags, and an **`is_orchestrator: bool = False`** flag. Individual `execute` / `execute_python` calls may override the timeout per-call via their `timeout=` kwarg (up to the caller's discretion; `agent.py` clamps it to `MAX_COMMAND_TIMEOUT` = 600).
 
@@ -247,21 +247,19 @@ Wraps `systemd-run` for isolated command execution.
 |---|---|---|
 | Working directory | `os.path.abspath(".")` (project root) | `os.path.abspath(".bash_agent_tmp")` |
 | `approved_write_paths` | `[project root]` | `[.bash_agent_tmp]` |
-| Home/project isolation | `ProtectHome=read-only` | **`TemporaryFileSystem=/home` + `BindPaths=.bash_agent_tmp`** (home/project tree hidden; workdir bound back in) |
+| Home/project isolation | home read-only (system `--ro-bind / /`; project dir bound rw) | **`--tmpfs /home` + `--bind .bash_agent_tmp`** (home/project tree masked; scratch bound back in) |
 | `request_write()` | normal interactive prompt | always rejected: `(False, "Orchestrator agent cannot request write access outside .bash_agent_tmp. Delegate file changes to a subagent.")` |
 
-The sandbox stores the working dir as `self._workdir`; both `execute()` and `execute_python()` build their `--working-directory=` and isolation flags from the role via `Sandbox._isolation_properties()`. **Orchestrators do NOT use `ProtectHome=yes`** — that masks ALL of `/home`, including `.bash_agent_tmp/` (which lives inside the home tree), so `--working-directory=` would fail with `status=200/CHDIR` before the script runs and every command would silently return empty output. Instead the orchestrator mounts `TemporaryFileSystem=/home` (hiding the user's home / project tree) and then binds `.bash_agent_tmp/` back in via `BindPaths=`. `execute_python()` additionally binds the project `venv/` back in read-only (`BindReadOnlyPaths=`), since the interpreter also lives under the masked tree.
+The sandbox stores the working dir as `self._workdir`; both `execute()` and `execute_python()` build their `--chdir` and isolation flags from the role via `Sandbox._bwrap_common()` / `Sandbox._role_args()`. **Orchestrators mask `/home` with `--tmpfs /home`** — but `.bash_agent_tmp/` itself lives inside the home tree, so that scratch directory is then bound back in read/write via `--bind`. `execute_python()` additionally binds the project `venv/` back in read-only (`--ro-bind`), since the interpreter also lives under the masked tree.
 
 **`execute(script_content: str, timeout: int = None) -> (exit_code, output)`**: Writes the script to a temp file in `.bash_agent_tmp/`, then runs:
 ```
-systemd-run --user --quiet --wait --collect --pipe \
-  --property=ProtectSystem=strict \
-  --property=PrivateTmp=yes \
-  {isolation: --property=ProtectHome=read-only   (subagent/direct)
-            | --property=TemporaryFileSystem=/home + --property=BindPaths={workdir}   (orchestrator)} \
-  --working-directory={self._workdir} \
-  --property=ReadWritePaths={approved_paths} \
-  /bin/bash {script_path}
+bwrap --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --tmpfs /var/tmp \
+  --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try --die-with-parent \
+  {isolation: --bind {approved_paths}                      (subagent/direct)
+            | --tmpfs /home + --bind .bash_agent_tmp       (orchestrator)} \
+  --setenv PATH {host_path} [--setenv OPENROUTER_API_KEY ...] \
+  --chdir {self._workdir} /bin/bash {script_path}
 ```
 
 **`execute_python(script_content: str, timeout: int = None) -> (exit_code, output)`**: Same as `execute()` but runs `python3` (preferring the venv's python3 if it exists) and sets `PYTHONPATH`.
@@ -421,14 +419,14 @@ task via the `subagent` built-in.
                           │
                           ▼
         Orchestrator  (is_orchestrator=True, expensive model)
-          Sandbox: home tree hidden (TemporaryFileSystem=/home) + .bash_agent_tmp bound in,
+          Sandbox: home tree masked (--tmpfs /home) + .bash_agent_tmp bound in,
                    workdir=.bash_agent_tmp, writes locked to .bash_agent_tmp
           Prompt:  get_orchestrator_system_prompt()   (NO warmup exchanges)
           Plans in .bash_agent_tmp/SCRATCHPAD.md
                           │  emits:  subagent "<task>"
                           ▼
         Subagent  (is_subagent=True, is_orchestrator=False, cheap model)
-          Sandbox: ProtectHome=read-only, workdir=project root, writes=project root
+          Sandbox: home read-only, workdir=project root, writes=project root
           Prompt:  get_system_prompt(..., is_subagent=True)
           Reads/edits/tests, then emits `exit`
                           │  raises SubagentExit()
@@ -478,7 +476,7 @@ overrides the orchestrator's model (alias of `--model` in orchestrator mode);
 - Orchestrators **skip warmup** (their sandbox cannot read the repo).
 - Subagents **never** `sys.exit`; they raise `SubagentExit`.
 - Subagent history is isolated in `history_subagent_<uuid8>.json`.
-- Orchestrator isolation uses `TemporaryFileSystem=/home` **plus** `BindPaths=.bash_agent_tmp` (`+ BindReadOnlyPaths` of the venv for `execute_python`) — **never `ProtectHome=yes`**. `ProtectHome=yes` masks the orchestrator's own working directory and breaks every command (`status=200/CHDIR`, empty output).
+- Orchestrator isolation masks `/home` with `--tmpfs /home` **plus** `--bind .bash_agent_tmp` (`+ --ro-bind` of the venv for `execute_python`) — the scratch dir MUST be bound back in, because masking `/home` wholesale also hides the orchestrator's own working directory and would break every command.
 
 ---
 
@@ -533,7 +531,7 @@ Agent.run() loop
 - The agent's working directory is the project root (where `main.py` was invoked) **for subagents / direct (standalone) mode**. An **orchestrator**'s working directory and only writable path are `.bash_agent_tmp/` (a `TemporaryFileSystem=/home` masks the repo entirely, with `.bash_agent_tmp/` bound back in).
 - `.bash_agent_tmp/` is the ONLY writable scratch space (besides the project root)
 - Subagent histories use `history_subagent_<uuid8>.json` so a nested run never overwrites the parent `history.json`
-- Temp files for sandbox execution MUST be created inside `.bash_agent_tmp/` (not host `/tmp`) because the sandbox's `PrivateTmp=yes` gives it an isolated `/tmp`
+- Temp files for sandbox execution MUST be created inside `.bash_agent_tmp/` (not host `/tmp`) because the sandbox mounts a throwaway `--tmpfs /tmp`, so a host `/tmp` path would be invisible inside the sandbox
 
 ### 3. Output Truncation
 - `OUTPUT_LIMIT` (10,000 chars) caps any single output block
@@ -547,17 +545,21 @@ Agent.run() loop
 - Old OUTPUT blocks are deleted first (biggest savings), then COMMAND blocks are truncated, then entire messages are dropped
 
 ### 5. Sandbox Properties
-- `ProtectSystem=strict`: /usr, /boot, /etc are read-only
-- `ProtectHome=read-only` for subagents / direct (standalone) mode (home read-only, project visible). Orchestrators instead use **`TemporaryFileSystem=/home` + `BindPaths=.bash_agent_tmp`** (home/project hidden, the scratch dir bound back in). **Never use `ProtectHome=yes` for orchestrators**: it also masks `.bash_agent_tmp`, causing every `systemd-run --working-directory=` call to die with `status=200/CHDIR` and return empty output.
-- `PrivateTmp=yes`: isolated /tmp and /var/tmp
-- `--working-directory=` is the project root for subagents and `.bash_agent_tmp/` for orchestrators
-- `ReadWritePaths`: dynamically expanded via `request-write` — which orchestrators are forbidden from using
-- Unique `--unit=` per invocation (`bash-agent-<pid>-<n>-<hex>.service`); on
-  client-side timeout the unit is stopped via `systemctl --user stop`
-  (`Sandbox._reap_unit`) so timed-out workloads don't leak onto the host.
-  NOTE: `--working-directory=`/`ReadWritePaths=` under `/tmp` break namespace
-  setup when combined with `PrivateTmp=yes` (exit 226) — production always
-  runs from a real project directory, so this only matters for tooling/tests.
+- `--ro-bind / /`: the whole host filesystem is read-only inside the sandbox
+- Non-orchestrator (subagent / direct standalone mode): home stays read-only
+  (from the read-only root bind) and only the project tree is bound back in
+  read/write via `--bind`. Orchestrators instead mask `/home` with
+  **`--tmpfs /home` + `--bind .bash_agent_tmp`** (home/project hidden, the
+  scratch dir bound back in). The scratch dir MUST be bound back in, because
+  masking `/home` also hides `.bash_agent_tmp` and would break every command.
+- `--tmpfs /tmp` + `--tmpfs /var/tmp`: throwaway, isolated temp filesystems
+- `--chdir` is the project root for subagents and `.bash_agent_tmp/` for orchestrators
+- writable `--bind` paths: dynamically expanded via `request-write` — which orchestrators are forbidden from using
+- `--unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try`: private
+  namespaces; `--die-with-parent` ties the container to the client process so
+  a client-side timeout tears down the WHOLE process tree (e.g. a runaway
+  `sleep 999`) — so no transient-unit reaping is needed.
+  Timeouts still surface as exit 124 with a partial-output banner.
 
 ### 6. Model / Token / Reasoning Priority (per key)
 
@@ -625,7 +627,7 @@ To add a new tool (like `vision` or `search`):
 ## Common Pitfalls When Editing
 
 - **Regex escaping in `_extract_blocks()`**: The fenced block patterns use raw strings (`r"..."`). Be careful with the UUID interpolation — it's a literal string, not a regex group.
-- **`systemd-run` permissions**: Adding `--property=` flags can break isolation. Always test with a command that tries to write to `/etc` to confirm sandboxing.
+- **`bwrap` isolation flags**: Changing the bind/mount/namespace flags can loosen (or break) isolation. Always test with a command that tries to write to `/etc` to confirm sandboxing.
 - **Context pruning off-by-one**: The system prompt is at index 0. Pruning iterates from index 1. Don't change this without understanding the trimming loop.
 - **Scratchpad one-shot injection**: `Agent.run()` calls `ContextManager.get_scratchpad_block()` once at the start of a FRESH session (skipped on `--resume` since history already carries it). The block is prepended to the first user message. It is NOT re-injected on later changes — the LLM re-reads via `cat` when it needs a refresh. `get_scratchpad_block()` applies the `SCRATCHPAD_LIMIT` truncation (80k chars) with an honest `VISIBLE_%` header.
 - **ContextManager uses a BOUND `count_tokens`**: `bash_agent/context.py` does
@@ -684,6 +686,6 @@ When making changes:
 ## Environment
 
 - **Required**: `OPENROUTER_API_KEY`
-- **Required**: Linux with `systemd` and `systemd-run` (user mode)
+- **Required**: Linux with `bubblewrap` (`bwrap`) and user-namespace support
 - **Optional**: `OPENROUTER_MODEL`
 - **Build tools**: `pipewire-utils` (for `memo`), `ffmpeg` (for `memo`), `poppler-utils` (for PDF processing in sandbox), `xclip` or `wl-paste` (for clipboard features)

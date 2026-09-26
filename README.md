@@ -13,7 +13,7 @@ Most AI coding agents suffer from the same problems:
 | Problem | Bash Agent's Solution |
 |---------|----------------------|
 | **JSON tool-calling is brittle** — escaping multi-line scripts with quotes, variables, and special characters into a single JSON string is painful for LLMs | **Fenced Markdown blocks** — the LLM writes raw, unescaped Bash or Python inside UUID-fenced blocks. No escaping, no JSON parser failures. |
-| **Docker sandboxing is heavy** — spinning up containers per command is slow and resource-intensive | **Native `systemd-run` sandbox** — transient systemd services with `ProtectSystem=strict` provide genuine isolation with near-zero overhead |
+| **Docker sandboxing is heavy** — spinning up containers per command is slow and resource-intensive | **Native `bubblewrap` sandbox** — a lightweight `bwrap` container with a read-only system view provides genuine isolation with near-zero overhead |
 | **Context windows overflow** — long agent sessions burn tokens and degrade performance | **Intelligent context pruning** — mimics a terminal scrollback buffer, aggressively trimming old output while preserving recent context |
 | **The agent goes rogue** — unrestricted file writes are dangerous | **Dynamic permission gating** — the agent must explicitly `request-write` for any file outside its working directory, and the human approves or denies |
 
@@ -42,7 +42,7 @@ The agent operates entirely through the command line. Since it has access to a r
 
 ### Prerequisites
 
-- **Linux** with `systemd` (the sandbox depends on `systemd-run`)
+- **Linux** with `bubblewrap` (the sandbox depends on `bwrap`)
 - **Python 3.8+**
 - **An OpenRouter API key** ([get one here](https://openrouter.ai/keys))
 
@@ -92,13 +92,11 @@ bagent --resume
 bagent --commit
 ```
 
-### Debuging
+### Debugging
 
-Check if the sandbox is still running after an unexpected crash:
-
-```bash
-systemctl --user list-units --type=service --state=running 'run-*.service'
-```
+With `bwrap --die-with-parent`, a crashed or timed-out command tears
+down its whole process tree automatically, so there is no stray sandbox
+process or service left behind to clean up.
 
 ---
 
@@ -113,7 +111,7 @@ systemctl --user list-units --type=service --state=running 'run-*.service'
    ---END_BASH_COMMAND-{uuid}---
    ```
 
-3. **The agent executes it** in an ephemeral `systemd-run` sandbox and returns the output:
+3. **The agent executes it** in an ephemeral `bwrap` sandbox and returns the output:
 
    ```
    ---START_BASH_OUTPUT-EXIT_CODE_0-VISIBLE_100%-{uuid}---

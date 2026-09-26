@@ -25,7 +25,7 @@ installed or which model slug is selected.
   nested refusal, warmup skipping), and
   `test_tokenizer_routing.py` —
   model-aware token estimation (`count_tokens` family routing))
-- `integration/` — real processes, still offline (systemd-run, fake-LLM loop;
+- `integration/` — real processes, still offline (bwrap, fake-LLM loop;
   includes Group 43's T-43g orchestrator→subagent end-to-end run in
   `test_full_agent_loop.py`).
 
@@ -73,15 +73,15 @@ a narrow seam (`llm._CLIENT_CACHE`, `urllib.request.urlopen`,
   **Exception:** a subagent's `exit` raises `bash_agent.agent.SubagentExit`
   instead — assert with `assertRaises(SubagentExit)`.
 - **Role-aware construction.** `Agent()` now defaults to `is_orchestrator=True`.
-  Orchestrators skip the warmup exchanges and run in a home-tree-hiding
-  sandbox (`TemporaryFileSystem=/home` + `BindPaths=.bash_agent_tmp`, NOT
-  `ProtectHome=yes` which would mask the workdir and fail with `200/CHDIR`)
+  Orchestrators skip the warmup exchanges and run in a home-tree-masking
+  sandbox (`--tmpfs /home` + `--bind .bash_agent_tmp`, so the scratch dir is
+  bound back in)
   anchored at `.bash_agent_tmp/`, so any test that expects the legacy
   full loop with repo-root access MUST pass `is_orchestrator=False`. Subagent
   tests construct nested agents with `is_subagent=True` (and a faked child)
   so no real LLM call happens.
-- Sandbox integration tests need a systemd **user** session; guard with
-  `skipUnless(shutil.which("systemd-run"), ...)` and keep each invocation well
+- Sandbox integration tests need `bwrap`; guard with
+  `skipUnless(shutil.which("bwrap"), ...)` and keep each invocation well
   under the 60s harness timeout.
 - The venv interpreter is `./venv/bin/python` (3.14). Run the suite with it,
   not the system python.
@@ -90,17 +90,18 @@ a narrow seam (`llm._CLIENT_CACHE`, `urllib.request.urlopen`,
   `timeouts_used` as tuples like `("BASH", 240)` / `("PYTHON", None)` — useful
   for asserting that a `# timeout: N` directive was actually forwarded to the
   sandbox and scrubbed from the script body.
-- **systemd-run + PrivateTmp vs /tmp CWDs**: `--working-directory=` or
-  `ReadWritePaths=` pointing under `/tmp` fails namespace setup (exit 226/200)
-  because `PrivateTmp=yes` mounts a fresh tmpfs over `/tmp` inside the
-  sandbox. Production always runs from a real project dir, so integration
-  tests must too — use `helpers.fakes.chdir_repo_tmp()` (scratch dir under the
-  repo's gitignored `.bash_agent_tmp/`), NOT `chdir_tmp()`.
-- **Timeouts leak services**: killing the `systemd-run` client does NOT kill
-  the transient unit (see bug #2 in README.md). Any test that triggers a
-  sandbox timeout must clean up after itself; mark the workload with
-  `exec -a <unique-marker> sleep 999` (a shell comment is stripped before
-  exec and leaves the process unmatchable by `pkill -f`).
+- **`--tmpfs /tmp` vs /tmp CWDs**: the sandbox mounts a throwaway tmpfs over
+  `/tmp` (and `/var/tmp`), so a working directory under those paths is
+  invisible inside the sandbox. Production always runs from a real project
+  dir, so integration tests must too — use `helpers.fakes.chdir_repo_tmp()`
+  (scratch dir under the repo's gitignored `.bash_agent_tmp/`), NOT
+  `chdir_tmp()`.
+- **Timeouts are self-cleaning**: `bwrap --die-with-parent` (plus
+  `--unshare-pid`) tears down the whole process tree on a client-side timeout
+  (see bug #2 in README.md), so a timed-out workload no longer leaks. Tests
+  may still mark the workload with `exec -a <unique-marker> sleep 999` to
+  assert the teardown, since a shell comment is stripped before exec and
+  leaves the process unmatchable by `pkill -f`.
 - **Protocol hygiene in test sources**: never write a contiguous fence marker
   literal (e.g. a full START/END token) inside code that will itself be
   transmitted through the UUID-fenced protocol — assemble expected fences

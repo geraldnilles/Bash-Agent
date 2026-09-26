@@ -1,28 +1,29 @@
 """
 Group 8 — Unit tests for bash_agent.sandbox (offline, mock-driven).
 
-T-45  Sandbox helper methods & request_write (P1)
+T-45  Sandbox helper methods, argv assembly & request_write (P1)
 
-Sandbox.py contains several pure-logic helpers that are fully testable
-without a systemd user bus:
+Sandbox.py runs agent scripts inside a bubblewrap (``bwrap``) container. Its
+pure-logic helpers are fully testable without a real sandbox:
 
-  * _unit_name()       — generates unique transient unit names
-  * _reap_unit()       — best-effort systemctl stop (must never raise)
   * request_write()    — user prompt + approved_write_paths bookkeeping
-  * execute() / execute_python() — temp file creation, cmd construction,
-    timeout/reap logic (mocked at subprocess.run)
+  * execute() / execute_python() — temp file creation, bwrap argv
+    construction, timeout handling (mocked at subprocess.run)
 
 Seam notes:
   * All external calls go through subprocess.run / tempfile.mkstemp /
     os.chmod / os.remove / os.fdopen / input() / print() — all easily patched.
-  * Systemd command assembly is deterministic given uuid/timeout/cwd;
-    we assert the exact argv list to catch regressions in property
-    ordering, env forwarding, and ReadWritePaths.
-  * The timeout path (_reap_unit called, exit_code=124, banner present)
-    is verified by raising TimeoutExpired from the mocked subprocess.run.
+  * bwrap command assembly is deterministic given uuid/timeout/cwd; we assert
+    the exact argv shape to catch regressions in namespace ordering,
+    filesystem posture (--ro-bind / /, --tmpfs /home for orchestrators),
+    env forwarding (--setenv) and the interpreter tail.
+  * The timeout path (exit_code=124, banner present, exactly one subprocess
+    run) is verified by raising TimeoutExpired from the mocked subprocess.run.
+  * There is NO transient unit to reap any more: --die-with-parent tears the
+    container down on a client-side timeout, so no unit-reaping / cleanup
+    subprocess is issued.
 """
 
-import contextlib
 import io
 import os
 import subprocess
@@ -85,17 +86,6 @@ class SandboxTestCase(unittest.TestCase):
         self.mock_getcwd = self.getcwd_patcher.start()
         self.addCleanup(self.getcwd_patcher.stop)
 
-        # Patch os.getpid for deterministic unit names
-        self.getpid_patcher = mock.patch("bash_agent.sandbox.os.getpid", return_value=12345)
-        self.mock_getpid = self.getpid_patcher.start()
-        self.addCleanup(self.getpid_patcher.stop)
-
-        # Patch uuid4 for deterministic unit names
-        self.uuid_patcher = mock.patch("bash_agent.sandbox.uuid_lib.uuid4")
-        self.mock_uuid = self.uuid_patcher.start()
-        self.mock_uuid.return_value.hex = "abcdef0123456789"
-        self.addCleanup(self.uuid_patcher.stop)
-
         # Patch os.environ.get for PATH and OPENROUTER_API_KEY
         self.environ_patcher = mock.patch("bash_agent.sandbox.os.environ.get", side_effect=lambda k, d="": {
             "PATH": "/usr/bin:/bin",
@@ -109,8 +99,10 @@ class SandboxTestCase(unittest.TestCase):
         self.mock_print = self.print_patcher.start()
         self.addCleanup(self.print_patcher.stop)
 
-        # Create sandbox instance
+        # Create sandbox instance (subagent posture: project tree writable)
         self.sb = Sandbox(scratchpad_path="/tmp/scratchpad.md", timeout=60, uuid="test-uuid-123", multimodal_capabilities=["image"])
+
+    # -- harness helpers ----------------------------------------------------
 
     def _setup_mkstemp(self, path="/home/user/.bash_agent_tmp/script.sh", fd=42):
         """Configure mkstemp to return a specific (fd, path)."""
@@ -128,45 +120,31 @@ class SandboxTestCase(unittest.TestCase):
 
     def _setup_timeout(self, stdout="partial output"):
         """Configure subprocess.run to raise TimeoutExpired."""
-        exc = subprocess.TimeoutExpired(cmd=["systemd-run"], timeout=60)
+        exc = subprocess.TimeoutExpired(cmd=["bwrap"], timeout=60)
         exc.stdout = stdout
         self.mock_run.side_effect = exc
 
+    def _cmd(self):
+        """The argv list handed to the (mocked) subprocess.run."""
+        return self.mock_run.call_args[0][0]
 
-class TestUnitName(SandboxTestCase):
-    """_unit_name() generates unique, deterministic transient unit names."""
+    @staticmethod
+    def _setenv(cmd):
+        """Return the --setenv pairs of `cmd` as a {name: value} dict."""
+        env = {}
+        for i, tok in enumerate(cmd):
+            if tok == "--setenv":
+                env[cmd[i + 1]] = cmd[i + 2]
+        return env
 
-    def test_format_contains_pid_and_uuid_and_counter(self):
-        name1 = self.sb._unit_name()
-        name2 = self.sb._unit_name()
-
-        # Format: bash-agent-{pid}-{counter}-{uuid8}.service
-        self.assertTrue(name1.startswith("bash-agent-12345-0-"))
-        self.assertTrue(name1.endswith(".service"))
-        self.assertIn("abcdef01", name1)  # first 8 chars of mocked uuid
-
-        # Counter increments
-        self.assertTrue(name2.startswith("bash-agent-12345-1-"))
-
-
-class TestReapUnit(SandboxTestCase):
-    """_reap_unit() best-effort stops a transient systemd unit."""
-
-    def test_calls_systemctl_user_stop_with_unit_name(self):
-        self.sb._reap_unit("test-unit.service")
-        self.mock_run.assert_called_once_with(
-            ["systemctl", "--user", "stop", "test-unit.service"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-        )
-
-    def test_never_raises_on_failure(self):
-        self.mock_run.side_effect = Exception("systemctl failed")
-        try:
-            self.sb._reap_unit("test-unit.service")
-        except Exception:
-            self.fail("_reap_unit raised an exception")
+    @staticmethod
+    def _bind_pairs(cmd):
+        """Return the (src, dst) pairs of every --bind in `cmd`."""
+        pairs = []
+        for i, tok in enumerate(cmd):
+            if tok == "--bind":
+                pairs.append((cmd[i + 1], cmd[i + 2]))
+        return pairs
 
 
 class TestRequestWrite(SandboxTestCase):
@@ -211,9 +189,16 @@ class TestRequestWrite(SandboxTestCase):
 
         self.assertIn("/abs/path/relative/file.txt", self.sb.approved_write_paths)
 
+    def test_orchestrator_refuses_request_write(self):
+        """Orchestrators may never request write access outside scratch."""
+        sb = Sandbox("sp", is_orchestrator=True)
+        success, msg = sb.request_write("/etc/passwd")
+        self.assertFalse(success)
+        self.assertIn("Orchestrator agent cannot request write access", msg)
+
 
 class TestExecuteBash(SandboxTestCase):
-    """execute() builds and runs systemd-run command for bash scripts."""
+    """execute() builds and runs a bwrap command for bash scripts."""
 
     def test_creates_temp_script_in_bash_agent_tmp(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script123.sh")
@@ -235,34 +220,51 @@ class TestExecuteBash(SandboxTestCase):
         # Cleanup
         self.mock_remove.assert_called_once_with("/home/user/.bash_agent_tmp/script123.sh")
 
-    def test_constructs_correct_systemd_run_command(self):
+    def test_constructs_correct_bwrap_command(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
         self._setup_success_run("output")
 
         self.sb.execute("echo hello")
 
-        # Verify the command structure
-        call_args = self.mock_run.call_args[0][0]
-        self.assertEqual(call_args[0], "systemd-run")
-        self.assertIn("--user", call_args)
-        self.assertIn("--quiet", call_args)
-        self.assertIn("--wait", call_args)
-        self.assertIn("--collect", call_args)
-        self.assertIn("--pipe", call_args)
-        self.assertTrue(any(arg.startswith("--unit=bash-agent-") for arg in call_args))
-        self.assertTrue(any(arg == "--property=ProtectSystem=strict" for arg in call_args))
-        self.assertTrue(any(arg == "--property=ProtectHome=read-only" for arg in call_args))
-        self.assertTrue(any(arg == "--property=PrivateTmp=yes" for arg in call_args))
-        # working-directory is the absolute path of current directory
-        self.assertTrue(any(arg == "--working-directory=/home/user" for arg in call_args))
-        self.assertTrue(any(arg == "--property=Environment=PATH=/usr/bin:/bin" for arg in call_args))
-        self.assertTrue(any(arg == "--property=Environment=OPENROUTER_API_KEY=sk-test-key" for arg in call_args))
-        self.assertTrue(any(arg == "--property=Environment=BASH_AGENT_UUID=test-uuid-123" for arg in call_args))
-        self.assertTrue(any(arg == "--property=Environment=BASH_AGENT_MULTIMODAL=image" for arg in call_args))
-        # approved_write_paths starts with [os.path.abspath(".")] which is "/home/user"
-        self.assertTrue(any(arg == "--property=ReadWritePaths=/home/user" for arg in call_args))
-        self.assertEqual(call_args[-2], "/bin/bash")
-        self.assertEqual(call_args[-1], "/home/user/.bash_agent_tmp/script.sh")
+        cmd = self._cmd()
+
+        # 1. Launcher + common isolation prefix (order matters)
+        self.assertEqual(cmd[0], "bwrap")
+        for flag in (
+            "--proc", "/proc",
+            "--dev", "/dev",
+            "--tmpfs", "/tmp",
+            "--tmpfs", "/var/tmp",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--unshare-cgroup-try",
+            "--die-with-parent",
+        ):
+            self.assertIn(flag, cmd)
+        # The whole host root is bound read-only.
+        self.assertIn(["--ro-bind", "/", "/"], [cmd[i:i + 3] for i in range(len(cmd) - 2)])
+
+        # 2. Role posture: the approved write path is bind-mounted read/write.
+        self.assertEqual(self._bind_pairs(cmd), [("/home/user", "/home/user")])
+        # Non-orchestrator keeps /home visible (no tmpfs over /home).
+        self.assertFalse(
+            any(cmd[i:i + 2] == ["--tmpfs", "/home"] for i in range(len(cmd) - 1))
+        )
+
+        # 3. Env contract, forwarded via --setenv.
+        env = self._setenv(cmd)
+        self.assertEqual(env["PATH"], "/usr/bin:/bin")
+        self.assertEqual(env["OPENROUTER_API_KEY"], "sk-test-key")
+        self.assertEqual(env["BASH_AGENT_UUID"], "test-uuid-123")
+        self.assertEqual(env["BASH_AGENT_MULTIMODAL"], "image")
+        # execute() forwards PATH but not PYTHONPATH.
+        self.assertNotIn("PYTHONPATH", env)
+
+        # 4. Tail: --chdir <workdir> /bin/bash <script>
+        self.assertEqual(cmd[-4:-2], ["--chdir", "/home/user"])
+        self.assertEqual(cmd[-2], "/bin/bash")
+        self.assertEqual(cmd[-1], "/home/user/.bash_agent_tmp/script.sh")
 
     def test_includes_approved_write_paths(self):
         self.sb.approved_write_paths.append("/home/user/extra")
@@ -271,10 +273,31 @@ class TestExecuteBash(SandboxTestCase):
 
         self.sb.execute("echo hello")
 
-        call_args = self.mock_run.call_args[0][0]
-        # Should have both the default cwd path and the extra path
-        self.assertIn("--property=ReadWritePaths=/home/user", call_args)
-        self.assertIn("--property=ReadWritePaths=/home/user/extra", call_args)
+        cmd = self._cmd()
+        # Every approved path is bind-mounted read/write, in order.
+        self.assertEqual(
+            self._bind_pairs(cmd),
+            [("/home/user", "/home/user"), ("/home/user/extra", "/home/user/extra")],
+        )
+
+    def test_orchestrator_masks_home_and_binds_scratch(self):
+        """Orchestrator gets --tmpfs /home + rw bind of .bash_agent_tmp only."""
+        sb = Sandbox("sp", uuid="u", is_orchestrator=True)
+        self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
+        self._setup_success_run("output")
+
+        sb.execute("echo hello")
+
+        cmd = self._cmd()
+        # /home is masked with a tmpfs...
+        self.assertIn(["--tmpfs", "/home"], [cmd[i:i + 2] for i in range(len(cmd) - 1)])
+        # ...and only the scratch dir is bound back in read/write.
+        self.assertEqual(
+            self._bind_pairs(cmd),
+            [("/home/user/.bash_agent_tmp", "/home/user/.bash_agent_tmp")],
+        )
+        # workdir for the orchestrator is .bash_agent_tmp.
+        self.assertEqual(cmd[-4:-2], ["--chdir", "/home/user/.bash_agent_tmp"])
 
     def test_returns_exit_code_and_stdout_on_success(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
@@ -303,13 +326,8 @@ class TestExecuteBash(SandboxTestCase):
         self.assertEqual(code, 124)
         self.assertIn("[SYSTEM ERROR] Command timed out after 60 seconds.", out)
         self.assertIn("partial output before timeout", out)
-        # _reap_unit should have been called
-        self.mock_run.assert_any_call(
-            ["systemctl", "--user", "stop", mock.ANY],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=10,
-        )
+        # No transient unit to reap: bwrap is the only process ever spawned.
+        self.assertEqual(self.mock_run.call_count, 1)
 
     def test_per_call_timeout_flows_into_subprocess_run(self):
         """A valid per-call timeout is forwarded to subprocess.run."""
@@ -359,7 +377,7 @@ class TestExecuteBash(SandboxTestCase):
     def test_timeout_banner_reflects_per_call_value(self):
         """On TimeoutExpired the banner shows the effective per-call value."""
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
-        exc = subprocess.TimeoutExpired(cmd=["systemd-run"], timeout=300)
+        exc = subprocess.TimeoutExpired(cmd=["bwrap"], timeout=300)
         exc.stdout = "partial output before timeout"
         self.mock_run.side_effect = exc
 
@@ -371,12 +389,12 @@ class TestExecuteBash(SandboxTestCase):
 
     def test_exception_returns_exit_1(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
-        self.mock_run.side_effect = OSError("systemd-run not found")
+        self.mock_run.side_effect = OSError("bwrap not found")
 
         code, out = self.sb.execute("echo hello")
 
         self.assertEqual(code, 1)
-        self.assertIn("systemd-run not found", out)
+        self.assertIn("bwrap not found", out)
 
     def test_cleanup_removes_temp_script_even_on_exception(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
@@ -388,7 +406,7 @@ class TestExecuteBash(SandboxTestCase):
 
 
 class TestExecutePython(SandboxTestCase):
-    """execute_python() builds and runs systemd-run command for Python scripts."""
+    """execute_python() builds and runs a bwrap command for Python scripts."""
 
     def test_uses_python_suffix_and_python3_executable(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script123.py", fd=43)
@@ -403,9 +421,9 @@ class TestExecutePython(SandboxTestCase):
         # Command ends with python3 and script path. os.getcwd() is mocked to
         # /home/user, and os.path.exists() is mocked to True, so the venv
         # interpreter is chosen deterministically.
-        call_args = self.mock_run.call_args[0][0]
-        self.assertEqual(call_args[-1], "/home/user/.bash_agent_tmp/script123.py")
-        self.assertEqual(call_args[-2], "/home/user/venv/bin/python3")
+        cmd = self._cmd()
+        self.assertEqual(cmd[-1], "/home/user/.bash_agent_tmp/script123.py")
+        self.assertEqual(cmd[-2], "/home/user/venv/bin/python3")
 
     def test_uses_venv_python_when_available(self):
         """When venv/bin/python3 exists, it should be used."""
@@ -414,15 +432,14 @@ class TestExecutePython(SandboxTestCase):
             if path == "/home/user/venv/bin/python3":
                 return True
             return False
-        
+
         with mock.patch("bash_agent.sandbox.os.path.exists", side_effect=exists_side_effect):
             self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")
             self._setup_success_run("py output")
 
             self.sb.execute_python("print('hello')")
 
-            call_args = self.mock_run.call_args[0][0]
-            self.assertEqual(call_args[-2], "/home/user/venv/bin/python3")
+            self.assertEqual(self._cmd()[-2], "/home/user/venv/bin/python3")
 
     def test_includes_PYTHONPATH_in_environment(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")
@@ -430,9 +447,24 @@ class TestExecutePython(SandboxTestCase):
 
         self.sb.execute_python("print('hello')")
 
-        call_args = self.mock_run.call_args[0][0]
-        # PYTHONPATH is set to the absolute path of the current directory
-        self.assertTrue(any(arg == "--property=Environment=PYTHONPATH=/home/user" for arg in call_args))
+        env = self._setenv(self._cmd())
+        # PYTHONPATH is set to the absolute path of the current directory.
+        self.assertEqual(env["PYTHONPATH"], "/home/user")
+        # execute_python() does NOT forward PATH.
+        self.assertNotIn("PATH", env)
+
+    def test_orchestrator_venv_is_bound_read_only(self):
+        """Orchestrator python runs need the masked-back-in project venv."""
+        sb = Sandbox("sp", uuid="u", is_orchestrator=True)
+        self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")
+        self._setup_success_run("py output")
+
+        with mock.patch("bash_agent.sandbox.os.path.isdir", return_value=True):
+            sb.execute_python("print('hello')")
+
+        cmd = self._cmd()
+        ro_binds = [cmd[i:i + 3] for i in range(len(cmd) - 2) if cmd[i] == "--ro-bind"]
+        self.assertIn(["--ro-bind", "/home/user/venv", "/home/user/venv"], ro_binds)
 
     def test_timeout_handling_same_as_bash(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")
@@ -474,7 +506,7 @@ class TestExecutePython(SandboxTestCase):
     def test_timeout_banner_reflects_per_call_value_for_python(self):
         """On TimeoutExpired the banner shows the effective per-call value."""
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")
-        exc = subprocess.TimeoutExpired(cmd=["systemd-run"], timeout=240)
+        exc = subprocess.TimeoutExpired(cmd=["bwrap"], timeout=240)
         exc.stdout = "partial py output"
         self.mock_run.side_effect = exc
 
@@ -491,9 +523,10 @@ class TestExecutePython(SandboxTestCase):
 
         self.sb.execute_python("print('hello')")
 
-        call_args = self.mock_run.call_args[0][0]
-        self.assertIn("--property=ReadWritePaths=/home/user", call_args)
-        self.assertIn("--property=ReadWritePaths=/home/user/extra", call_args)
+        self.assertEqual(
+            self._bind_pairs(self._cmd()),
+            [("/home/user", "/home/user"), ("/home/user/extra", "/home/user/extra")],
+        )
 
     def test_constructs_correct_security_posture(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")
@@ -501,24 +534,25 @@ class TestExecutePython(SandboxTestCase):
 
         self.sb.execute_python("print('hello')")
 
-        call_args = self.mock_run.call_args[0][0]
-        self.assertEqual(call_args[0], "systemd-run")
-        self.assertIn("--user", call_args)
-        self.assertIn("--quiet", call_args)
-        self.assertIn("--wait", call_args)
-        self.assertIn("--collect", call_args)
-        self.assertIn("--pipe", call_args)
-        self.assertTrue(any(arg.startswith("--unit=bash-agent-") for arg in call_args))
-        self.assertIn("--property=ProtectSystem=strict", call_args)
-        self.assertIn("--property=ProtectHome=read-only", call_args)
-        self.assertIn("--property=PrivateTmp=yes", call_args)
-        self.assertIn("--working-directory=/home/user", call_args)
-        self.assertIn("--property=Environment=OPENROUTER_API_KEY=sk-test-key", call_args)
-        self.assertIn("--property=Environment=BASH_AGENT_UUID=test-uuid-123", call_args)
-        self.assertIn("--property=Environment=BASH_AGENT_MULTIMODAL=image", call_args)
+        cmd = self._cmd()
+        # Common isolation prefix.
+        self.assertEqual(cmd[0], "bwrap")
+        self.assertIn(["--ro-bind", "/", "/"], [cmd[i:i + 3] for i in range(len(cmd) - 2)])
+        for flag in (
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+            "--tmpfs", "/var/tmp", "--unshare-pid", "--unshare-ipc",
+            "--unshare-uts", "--unshare-cgroup-try", "--die-with-parent",
+        ):
+            self.assertIn(flag, cmd)
+        # Env contract (python path).
+        env = self._setenv(cmd)
+        self.assertEqual(env["OPENROUTER_API_KEY"], "sk-test-key")
+        self.assertEqual(env["BASH_AGENT_UUID"], "test-uuid-123")
+        self.assertEqual(env["BASH_AGENT_MULTIMODAL"], "image")
         # NOTE: execute_python() does NOT forward PATH (unlike execute());
         # the interpreter is invoked by absolute path instead.
-        self.assertFalse(any(arg.startswith("--property=Environment=PATH=") for arg in call_args))
+        self.assertNotIn("PATH", env)
+        self.assertEqual(cmd[-4:-2], ["--chdir", "/home/user"])
 
     def test_returns_exit_code_and_stdout_on_success(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")
@@ -540,12 +574,12 @@ class TestExecutePython(SandboxTestCase):
 
     def test_exception_returns_exit_1(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")
-        self.mock_run.side_effect = OSError("systemd-run not found")
+        self.mock_run.side_effect = OSError("bwrap not found")
 
         code, out = self.sb.execute_python("print('hello')")
 
         self.assertEqual(code, 1)
-        self.assertIn("systemd-run not found", out)
+        self.assertIn("bwrap not found", out)
 
     def test_cleanup_removes_temp_script_even_on_exception(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")
@@ -566,9 +600,9 @@ class TestExecutePython(SandboxTestCase):
 
             self.sb.execute_python("print('hello')")
 
-            call_args = self.mock_run.call_args[0][0]
-            self.assertEqual(call_args[-3:-1], ["/usr/bin/env", "python3"])
-            self.assertEqual(call_args[-1], "/home/user/.bash_agent_tmp/script.py")
+            cmd = self._cmd()
+            self.assertEqual(cmd[-3:-1], ["/usr/bin/env", "python3"])
+            self.assertEqual(cmd[-1], "/home/user/.bash_agent_tmp/script.py")
 
 
 class TestExecuteWithMultimodal(SandboxTestCase):
@@ -581,8 +615,7 @@ class TestExecuteWithMultimodal(SandboxTestCase):
 
         sb.execute("echo hello")
 
-        call_args = self.mock_run.call_args[0][0]
-        self.assertIn("--property=Environment=BASH_AGENT_MULTIMODAL=image,audio", call_args)
+        self.assertEqual(self._setenv(self._cmd())["BASH_AGENT_MULTIMODAL"], "image,audio")
 
     def test_empty_multimodal_capabilities_forwards_empty_string(self):
         sb = Sandbox("/tmp/scratchpad.md", uuid="test-uuid", multimodal_capabilities=[])
@@ -591,8 +624,7 @@ class TestExecuteWithMultimodal(SandboxTestCase):
 
         sb.execute("echo hello")
 
-        call_args = self.mock_run.call_args[0][0]
-        self.assertIn("--property=Environment=BASH_AGENT_MULTIMODAL=", call_args)
+        self.assertEqual(self._setenv(self._cmd())["BASH_AGENT_MULTIMODAL"], "")
 
 
 if __name__ == "__main__":

@@ -87,7 +87,7 @@ Today's Date: {datetime.date.today().strftime("%Y-%m-%d")}
 ## YOUR INTERFACE
 ================================================================
 
-Your primary interface to the world is the command line of a Linux computer.  You complete complex tasks by thinking step-by-step and executing bash or python scripts within a secure sandbox.  
+Your primary interface to the world is the command line of a Linux computer.  You complete complex tasks by thinking step-by-step and executing bash or python scripts within a secure bubblewrap (bwrap) sandbox.  
 
 You can assume the user's queries and tasks are related to the files in the current working directory: `{cwd}`.
 
@@ -253,8 +253,8 @@ def get_orchestrator_system_prompt(uuid: str, scratchpad_path: str, subagent_mod
     """Build the system prompt for the top-level ORCHESTRATOR agent.
 
     The orchestrator is a high-level technical lead / project manager. It runs
-    in a STRICTLY isolated sandbox (the home tree is masked, with
-    .bash_agent_tmp/ bound back in) whose only readable and writable location
+    in a STRICTLY isolated bubblewrap sandbox (the home tree is masked via a
+    tmpfs over /home, with .bash_agent_tmp/ bound back in) whose only readable and writable location
     is .bash_agent_tmp/. It therefore cannot inspect or edit
     the project source directly; all tactical work (reading files, editing
     code, running tests) is delegated to subagents via the ``subagent``
@@ -309,7 +309,7 @@ executed and its output reported before the next.
 ## ENVIRONMENT CONSTRAINTS (READ CAREFULLY)
 ================================================================
 
-You run inside a STRICT sandbox (the user's home/project tree is hidden) with
+You run inside a STRICT bubblewrap sandbox (the user's home/project tree is hidden) with
 a working directory of `.bash_agent_tmp/`. This means:
 
 - You CANNOT read or modify the project source code, nor any file outside

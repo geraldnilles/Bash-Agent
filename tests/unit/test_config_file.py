@@ -30,7 +30,7 @@ Seams (offline only, per tests/AGENTS.md rules):
     isolates every filesystem effect — no import-time constants involved.
   * Agent precedence tests construct via helpers._make_agent, which patches
     the capability probe and reasoning-info fetch (no network) and swaps in
-    FakeSandbox afterwards (no systemd).
+    FakeSandbox afterwards (no real sandbox).
   * OPENROUTER_MODEL is removed from os.environ for determinism — the host
     may legitimately have it exported.
 

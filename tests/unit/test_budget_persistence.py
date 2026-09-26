@@ -31,7 +31,7 @@ Contract pinned here:
   * a resumed Agent loading that file sees the OUTPUT block (no dangling
     command), i.e. memory and disk agree after reload.
 
-All offline: FakeLLMClient (no network) + FakeSandbox (no systemd); the
+All offline: FakeLLMClient (no network) + FakeSandbox (no real sandbox); the
 protocol warmup is stubbed out so only the scripted turns run.
 """
 

@@ -1,34 +1,38 @@
 """
-Group 7 — Integration: real systemd-run executions (still offline).
+Group 7 — Integration: real bubblewrap (``bwrap``) executions (still offline).
 
-T-30  Real systemd-run smoke tests (P1, skipUnless systemd-run)
+T-30  Real bwrap smoke tests (P1, skipUnless bwrap)
 
 These tests drive a REAL Sandbox.execute()/execute_python() round-trip and
 prove the isolation guarantees AGENTS.md promises:
 
   * `echo hello` -> exit 0 with stdout
-  * `exit 3`     -> exit code 3 propagates through --pipe
+  * `exit 3`     -> exit code 3 propagates back through subprocess.run
   * stderr is merged into stdout (`ls /nonexistent` shows the error inline)
-  * reading /etc/hostname succeeds (ProtectSystem keeps /usr,/boot,/etc
-    read-only, not invisible); writing /etc/xyz fails
+  * reading /etc/hostname succeeds (the host root is bound read-only, so
+    /etc stays visible); writing /etc/xyz fails
   * CWD visibility: project files are listable from inside the sandbox
-  * BASH_AGENT_UUID is visible inside the sandbox via env forwarding
-  * timeout case: `sleep 999` with timeout=2 -> exit 124 + banner
+  * BASH_AGENT_UUID is visible inside the sandbox via --setenv forwarding
+  * private /tmp: host /tmp content is masked by a tmpfs
+  * timeout case: `sleep 999` with timeout=2 -> exit 124 + banner, and the
+    sandboxed process tree is torn down with it (--die-with-parent +
+    --unshare-pid) so no runaway process leaks onto the host.
   * ORCHESTRATOR isolation: commands run (exit 0) at all, the scratch
     dir is writable, python works, and the project tree is hidden.
-    (Regression for the ProtectHome=yes bug: that masked .bash_agent_tmp
-    itself, so EVERY orchestrator command returned exit 200 with empty
-    output, and the orchestrator could never read back a file.)
+    (Regression for the old isolation bug: masking the home tree wholesale
+    also hid .bash_agent_tmp itself, so EVERY orchestrator command returned
+    empty output. bwrap instead mounts a tmpfs over /home and binds
+    .bash_agent_tmp/ back in.)
 
-Hazard handled here (verified empirically): when subprocess.run times out it
-SIGKILLs the systemd-run CLIENT process. The transient service itself does
-NOT die with it — without intervention a stray `sleep 999` would survive on
-the host. We therefore launch the leak probe with a unique marker placed in
-argv[0] via `exec -a <marker> sleep 999` (a shell comment would be stripped
-before exec and leave the process unmatchable), and on timeout kill any
-surviving service by marker before asserting.
+Leak hygiene: subprocess.run SIGKILLs ONLY the bwrap client on timeout. With
+``--die-with-parent`` the container dies with it and, because the workload
+runs in its own PID namespace (``--unshare-pid``), the kernel reaps every
+process inside it. We still launch the leak probe with a unique marker in
+argv[0] via ``exec -a <marker> sleep 999`` and verify afterwards that no
+matching process survived.
 
-Skipped automatically when no systemd user session / systemd-run binary.
+Skipped automatically when the ``bwrap`` binary is absent or unprivileged
+user namespaces are unavailable.
 """
 import os
 import subprocess
@@ -36,13 +40,13 @@ import unittest
 
 from bash_agent.sandbox import Sandbox
 
-from tests.helpers.fakes import chdir_repo_tmp, systemd_user_bus_available
+from tests.helpers.fakes import chdir_repo_tmp, bwrap_available
 
 
 
-@unittest.skipUnless(systemd_user_bus_available(), "systemd-run user session unavailable")
+@unittest.skipUnless(bwrap_available(), "bwrap unavailable")
 class TestRealSandboxSmoke(unittest.TestCase):
-    """T-30 — real Sandbox round-trips against the local systemd user bus."""
+    """T-30 — real Sandbox round-trips against the local bubblewrap install."""
 
     def setUp(self):
         self._chdir_cm = chdir_repo_tmp()
@@ -75,7 +79,7 @@ class TestRealSandboxSmoke(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_read_only_etc_allowed_write_denied(self):
-        # Reading protected paths is allowed under ProtectSystem=strict...
+        # Reading protected paths is allowed (host root is bound read-only)...
         code, out = self.sb.execute("cat /etc/hostname")
         self.assertEqual(code, 0)
         self.assertTrue(out.strip())
@@ -99,7 +103,8 @@ class TestRealSandboxSmoke(unittest.TestCase):
         self.assertEqual(out.strip(), "test-uuid-123")
 
     def test_private_tmp_isolation(self):
-        # PrivateTmp=yes means host /tmp content must not be visible.
+        # bwrap mounts a throwaway tmpfs over /tmp, so host /tmp content
+        # must not be visible inside the sandbox.
         sentinel = "/tmp/bash_agent_private_tmp_probe"
         with open(sentinel, "w") as f:
             f.write("host-side\n")
@@ -130,32 +135,33 @@ class TestRealSandboxSmoke(unittest.TestCase):
             # exec -a puts the marker in argv[0]: a bash comment would
             # be stripped before exec, leaving the process unmatchable.
             code, out = sb.execute(f"exec -a {marker} sleep 999")
-        finally:
-            # subprocess.run SIGKILLs only the systemd-run client; the
-            # transient unit survives. Kill anything still matching our
-            # unique marker so the host stays clean regardless of outcome.
-            subprocess.run(
-                ["pkill", "-9", "-f", marker],
-                capture_output=True,
+            # --die-with-parent + --unshare-pid must tear the whole sandbox
+            # process tree down when bwrap is killed on the client timeout.
+            survivors = subprocess.run(
+                ["pkill", "-0", "-f", marker], capture_output=True
             )
+        finally:
+            # Belt-and-braces cleanup so the host stays clean regardless.
+            subprocess.run(["pkill", "-9", "-f", marker], capture_output=True)
 
         self.assertEqual(code, 124)
         self.assertIn("[SYSTEM ERROR] Command timed out after 2 seconds.", out)
+        # No runaway process survived the sandbox teardown.
+        self.assertNotEqual(
+            survivors.returncode, 0,
+            msg="sandboxed process leaked past the timeout teardown",
+        )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-@unittest.skipUnless(systemd_user_bus_available(), "systemd-run user session unavailable")
+@unittest.skipUnless(bwrap_available(), "bwrap unavailable")
 class TestOrchestratorSandboxIsolation(unittest.TestCase):
     """T-30b — real round-trips for is_orchestrator=True.
 
-    Regression guard for the ``ProtectHome=yes`` bug: the orchestrator's
-    working directory (``.bash_agent_tmp/``) lives INSIDE the home tree, so
-    ``ProtectHome=yes`` masked it and every orchestrator command died with
-    ``status=200/CHDIR`` before running — returning exit 200 and empty output.
-    The fix masks ``/home`` with a tmpfs and binds ``.bash_agent_tmp/`` back in.
+    Regression guard for the old isolation bug: the orchestrator's working
+    directory (``.bash_agent_tmp/``) lives INSIDE the home tree, so masking
+    the home tree wholesale also hid it and every orchestrator command
+    returned empty output. The bwrap fix masks ``/home`` with a tmpfs and
+    binds ``.bash_agent_tmp/`` back in read/write.
     """
 
     def setUp(self):
@@ -200,3 +206,7 @@ class TestOrchestratorSandboxIsolation(unittest.TestCase):
         finally:
             if os.path.exists(sentinel):
                 os.remove(sentinel)
+
+
+if __name__ == "__main__":
+    unittest.main()

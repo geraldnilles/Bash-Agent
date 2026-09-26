@@ -8,9 +8,9 @@ Implements:
   T-00d  FakeSandbox
 
 Also provides _make_agent() helper used by downstream tests (T-01 etc.)
-to construct an Agent without network or systemd side effects.
+to construct an Agent without network or sandbox side effects.
 
-All helpers are pure offline fakes — no network, no systemd.
+All helpers are pure offline fakes — no network, no sandbox.
 """
 from __future__ import annotations
 
@@ -615,7 +615,7 @@ def _stub_model_context_info(self):
 
 def _make_agent(uuid_str: Optional[str] = None, **agent_kwargs) -> Any:
     """
-    Construct a bash_agent.agent.Agent without network or systemd effects.
+    Construct a bash_agent.agent.Agent without network or sandbox effects.
 
     - Patches Agent._check_model_capabilities to avoid urllib probe
     - Swaps in a FakeSandbox after construction
@@ -700,11 +700,12 @@ def chdir_repo_tmp(prefix: str = "t30"):
     REPO's .bash_agent_tmp/ folder (gitignored, auto-cleanable) instead of
     /tmp.
 
-    Why this exists (T-30): systemd-run with PrivateTmp=yes mounts a fresh
-    tmpfs over /tmp inside the sandbox, so --working-directory= or
-    ReadWritePaths= pointing under /tmp cannot resolve -> namespace setup
-    fails (exit 226/200). Production always runs from a real project dir, so
-    integration tests must too. The directory is removed on exit.
+    Why this exists (T-30): bwrap mounts a fresh tmpfs over /tmp (and
+    /var/tmp) inside the sandbox, so a ``--chdir`` or writable ``--bind``
+    pointing under /tmp cannot resolve to the host directory the test created
+    -> the workload would chdir into an ephemeral empty tmpfs. Production
+    always runs from a real project dir, so integration tests must too. The
+    directory is removed on exit.
     """
     import shutil as _shutil
 
@@ -727,20 +728,26 @@ def chdir_repo_tmp(prefix: str = "t30"):
 __all__.append("chdir_repo_tmp")
 
 
-def systemd_user_bus_available() -> bool:
+def bwrap_available() -> bool:
     """
-    True when systemd-run exists AND a user-session round-trip succeeds.
-    Used as skipUnless guard by all Group 7 integration tests.
+    True when the ``bwrap`` (bubblewrap) binary exists AND a real namespace
+    round-trip succeeds. Used as skipUnless guard by all Group 7 integration
+    tests.
+
+    The probe runs the minimal isolation prefix production uses (bind the host
+    root read-only, mount a private ``/proc`` and ``/dev``) and executes
+    ``/bin/true``. This catches sandboxes where the binary is installed but
+    unprivileged user namespaces are disabled (rc != 0).
     """
     import shutil as _shutil
     import subprocess as _sp
 
-    if not _shutil.which("systemd-run"):
+    if not _shutil.which("bwrap"):
         return False
     try:
         r = _sp.run(
-            ["systemd-run", "--user", "--quiet", "--wait", "--collect",
-             "--pipe", "/bin/true"],
+            ["bwrap", "--ro-bind", "/", "/", "--proc", "/proc",
+             "--dev", "/dev", "/bin/true"],
             capture_output=True, text=True, timeout=15,
         )
         return r.returncode == 0
@@ -748,4 +755,4 @@ def systemd_user_bus_available() -> bool:
         return False
 
 
-__all__.append("systemd_user_bus_available")
+__all__.append("bwrap_available")

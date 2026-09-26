@@ -1,12 +1,32 @@
+"""Execution sandbox backed by bubblewrap (``bwrap``).
+
+Agent-generated BASH/PYTHON scripts are executed inside a bubblewrap
+container:
+
+* ``--ro-bind / /`` makes the whole host filesystem read-only; the one
+  approved write directory (the project tree for subagents, or
+  ``.bash_agent_tmp/`` for the orchestrator) is then bind-mounted back in
+  read/write with ``--bind``.
+* A private ``/proc``, ``/dev`` and throwaway ``/tmp`` / ``/var/tmp`` keep
+  the workload from observing or mutating host state.
+* ``--unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try`` give
+  the workload its own namespaces.
+
+Unlike the previous ``systemd-run`` implementation, there is **no transient
+unit to reap**: ``--die-with-parent`` ties the sandbox to the client process,
+so when a client-side timeout kills ``bwrap`` the whole process tree (e.g. a
+runaway ``sleep 999``) is torn down with it -- no ``systemctl`` cleanup
+required.
+"""
+
 import os
 import subprocess
 import tempfile
-import itertools
-import uuid as uuid_lib
 from bash_agent.config import BASH_TIMEOUT
 
+
 class Sandbox:
-    def __init__(self, scratchpad_path: str, timeout: int = None, uuid: str = None, multimodal_capabilities: list = None, is_orchestrator: bool = False):
+    def __init__(self, scratchpad_path: str = None, timeout: int = None, uuid: str = None, multimodal_capabilities: list = None, is_orchestrator: bool = False):
         self.is_orchestrator = is_orchestrator
         self._workdir = os.path.abspath(".bash_agent_tmp" if is_orchestrator else ".")
         if is_orchestrator:
@@ -19,61 +39,59 @@ class Sandbox:
         self.timeout = timeout if timeout is not None else BASH_TIMEOUT
         self.uuid = uuid
         self.multimodal_capabilities = multimodal_capabilities or []
-        self._unit_counter = itertools.count()
 
-    def _isolation_properties(self, with_venv: bool = False) -> list:
-        """systemd properties that enforce the sandbox's filesystem isolation.
+    def _bwrap_common(self) -> list:
+        """Common bubblewrap argv prefix shared by every invocation.
 
-        Non-orchestrators simply keep the user's home read-only
-        (``ProtectHome=read-only``): the project tree stays visible.
+        The host root is bound read-only, then throwaway private
+        pseudo-filesystems are mounted over ``/proc``, ``/dev``, ``/tmp`` and
+        ``/var/tmp``.  Namespace isolation is applied and ``--die-with-parent``
+        guarantees the container dies with its client process -- which is what
+        provides clean process-tree teardown on a client-side timeout.
+        """
+        return [
+            "bwrap",
+            "--ro-bind", "/", "/",
+            "--proc", "/proc",
+            "--dev", "/dev",
+            "--tmpfs", "/tmp",
+            "--tmpfs", "/var/tmp",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--unshare-cgroup-try",
+            "--die-with-parent",
+        ]
+
+    def _role_args(self, with_venv: bool = False) -> list:
+        """Filesystem-isolation argv that depends on the agent's role.
+
+        Non-orchestrators keep the user's home read-only (the ``--ro-bind / /``
+        default): only the project tree is punched back in as writable, so the
+        rest of ``/home`` stays visible but read-only.
 
         Orchestrators must see and write ONLY ``.bash_agent_tmp/`` -- but that
-        directory lives *inside* the home tree.  ``ProtectHome=yes`` masks all
-        of ``/home`` (including the orchestrator's own working directory), so
-        ``systemd-run --working-directory=...`` dies with an exit-200/CHDIR
-        failure *before the script ever runs* -- every orchestrator command
-        silently returns an empty string.  Instead we mount a tmpfs over
-        ``/home`` (hiding the user's home / project tree) and then bind the
-        working directory back into place.  ``execute_python()`` additionally
-        needs the project venv interpreter, which also lives under the masked
-        tree, so it is bound back in read-only via ``with_venv=True``.
+        directory lives *inside* the home tree.  A tmpfs is mounted over
+        ``/home`` (masking the user's home / project tree) and the working
+        directory is bind-mounted back in read/write.
+        ``execute_python()`` additionally needs the project venv interpreter,
+        which also lives under the masked tree, so it is bound back in
+        read-only via ``with_venv=True``.
         """
         if not self.is_orchestrator:
-            return ["--property=ProtectHome=read-only"]
+            args = []
+            for path in self.approved_write_paths:
+                args += ["--bind", path, path]
+            return args
 
-        props = [
-            # Hide the user's home / project tree...
-            "--property=TemporaryFileSystem=/home",
-            # ...then punch the one writable directory back in.
-            f"--property=BindPaths={self._workdir}",
-        ]
+        args = ["--tmpfs", "/home"]
+        for path in self.approved_write_paths:
+            args += ["--bind", path, path]
         if with_venv:
             venv_dir = os.path.join(os.getcwd(), "venv")
             if os.path.isdir(venv_dir):
-                props.append(f"--property=BindReadOnlyPaths={venv_dir}")
-        return props
-
-    def _unit_name(self) -> str:
-        """Unique transient unit name so timeouts can stop exactly this run."""
-        return f"bash-agent-{os.getpid()}-{next(self._unit_counter)}-{uuid_lib.uuid4().hex[:8]}.service"
-
-    def _reap_unit(self, unit_name: str) -> None:
-        """
-        Stop the transient unit after a client-side timeout.
-
-        Killing the systemd-run client process does NOT stop the service it
-        started: without this, a timed-out workload (e.g. sleep 999) keeps
-        running on the host forever. Best-effort: never raise from here.
-        """
-        try:
-            subprocess.run(
-                ["systemctl", "--user", "stop", unit_name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-            )
-        except Exception:
-            pass
+                args += ["--ro-bind", venv_dir, venv_dir]
+        return args
 
     def _resolve_timeout(self, timeout=None):
         """Resolve per-call timeout to a valid positive int (>=1),
@@ -105,7 +123,7 @@ class Sandbox:
         # Create a local temp directory that the sandbox can see
         local_tmp = os.path.abspath(".bash_agent_tmp")
         os.makedirs(local_tmp, exist_ok=True)
-        
+
         # Force tempfile to use our local directory instead of the host's /tmp
         fd, script_path = tempfile.mkstemp(suffix=".sh", dir=local_tmp, text=True)
         with os.fdopen(fd, 'w') as f:
@@ -114,56 +132,44 @@ class Sandbox:
 
         host_path = os.environ.get("PATH", "")
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
-        unit_name = self._unit_name()
 
         cmd = [
-            "systemd-run", "--user", "--quiet", "--wait", "--collect", "--pipe",
-            f"--unit={unit_name}",
-            "--property=ProtectSystem=strict",
-            "--property=PrivateTmp=yes",
-            *self._isolation_properties(),
-            # Start the bash session in the project directory (orchestrator:
-            # confined to .bash_agent_tmp/).
-            f"--working-directory={self._workdir}",
-            f"--property=Environment=PATH={host_path}"
+            *self._bwrap_common(),
+            *self._role_args(),
+            # Environment: bwrap inherits the parent env by default, so we only
+            # (re)set the variables the previous implementation forwarded.
+            "--setenv", "PATH", host_path,
         ]
 
         if openrouter_key:
-            cmd.append(f"--property=Environment=OPENROUTER_API_KEY={openrouter_key}")
+            cmd += ["--setenv", "OPENROUTER_API_KEY", openrouter_key]
 
         if self.uuid:
-            cmd.append(f"--property=Environment=BASH_AGENT_UUID={self.uuid}")
-        cmd.append(f"--property=Environment=BASH_AGENT_MULTIMODAL={','.join(self.multimodal_capabilities)}")
-        
-        for path in self.approved_write_paths:
-            cmd.append(f"--property=ReadWritePaths={path}")
-            
-        cmd.extend(["/bin/bash", script_path])
+            cmd += ["--setenv", "BASH_AGENT_UUID", self.uuid]
+        cmd += ["--setenv", "BASH_AGENT_MULTIMODAL", ",".join(self.multimodal_capabilities)]
 
+        # Start the bash session in the project directory (orchestrator:
+        # confined to .bash_agent_tmp/).
+        cmd += ["--chdir", self._workdir, "/bin/bash", script_path]
 
         try:
             result = subprocess.run(
-                cmd, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.STDOUT, 
-                text=True, 
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
                 timeout=effective_timeout
             )
             output = result.stdout
             exit_code = result.returncode
-            
-            # --- DEBUG PRINT ---
-            # Uncomment this if 127 persists so we can see Bash's exact complaint:
-            # print(f"\n[DEBUG] Exit: {exit_code} | Output: {output.strip()}")
 
         except subprocess.TimeoutExpired as e:
-            # The client was killed, but the transient service is still
-            # running -- stop it so timed-out workloads do not leak.
-            self._reap_unit(unit_name)
+            # --die-with-parent already tore down the sandboxed process tree
+            # when bwrap was killed, so there is nothing left to reap.
             # Because we routed stderr to stdout, all partial output is in e.stdout
             partial_out = e.stdout if e.stdout else ""
             output = f"[SYSTEM ERROR] Command timed out after {effective_timeout} seconds.\nPartial Output:\n{partial_out}"
-            exit_code = 124 # Standard timeout exit code
+            exit_code = 124  # Standard timeout exit code
 
         except Exception as e:
             output = str(e)
@@ -179,58 +185,52 @@ class Sandbox:
         effective_timeout = self._resolve_timeout(timeout)
         local_tmp = os.path.abspath(".bash_agent_tmp")
         os.makedirs(local_tmp, exist_ok=True)
-        
+
         # Suffix is .py instead of .sh
         fd, script_path = tempfile.mkstemp(suffix=".py", dir=local_tmp, text=True)
         with os.fdopen(fd, 'w') as f:
             f.write(script_content)
         os.chmod(script_path, 0o700)
 
-        unit_name = self._unit_name()
         cmd = [
-            "systemd-run", "--user", "--quiet", "--wait", "--collect", "--pipe",
-            f"--unit={unit_name}",
-            "--property=ProtectSystem=strict",
-            "--property=PrivateTmp=yes",
-            *self._isolation_properties(with_venv=True),
-            f"--working-directory={self._workdir}",
-            f"--property=Environment=PYTHONPATH={self._workdir}",
+            *self._bwrap_common(),
+            *self._role_args(with_venv=True),
+            # bwrap inherits the parent env; set exactly the variables the
+            # previous implementation forwarded for the python path.
+            "--setenv", "PYTHONPATH", self._workdir,
         ]
-        
+
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
         if openrouter_key:
-            cmd.append(f"--property=Environment=OPENROUTER_API_KEY={openrouter_key}")
+            cmd += ["--setenv", "OPENROUTER_API_KEY", openrouter_key]
 
         if self.uuid:
-            cmd.append(f"--property=Environment=BASH_AGENT_UUID={self.uuid}")
-        cmd.append(f"--property=Environment=BASH_AGENT_MULTIMODAL={','.join(self.multimodal_capabilities)}")
+            cmd += ["--setenv", "BASH_AGENT_UUID", self.uuid]
+        cmd += ["--setenv", "BASH_AGENT_MULTIMODAL", ",".join(self.multimodal_capabilities)]
 
-        for path in self.approved_write_paths:
-            cmd.append(f"--property=ReadWritePaths={path}")
-            
-        # Execute python3 instead of bash
-        # Determine which python executable to use
+        # Execute python3 instead of bash.
+        # Determine which python executable to use.
         venv_python = os.path.join(os.getcwd(), "venv", "bin", "python3")
 
+        cmd += ["--chdir", self._workdir]
         if os.path.exists(venv_python):
-            cmd.extend([venv_python, script_path])
+            cmd += [venv_python, script_path]
         else:
-            cmd.extend(["/usr/bin/env", "python3", script_path])
+            cmd += ["/usr/bin/env", "python3", script_path]
 
         try:
             result = subprocess.run(
-                cmd, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.STDOUT, 
-                text=True, 
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
                 timeout=effective_timeout
             )
             output = result.stdout
             exit_code = result.returncode
-            
+
         except subprocess.TimeoutExpired as e:
-            # Stop the orphaned transient service (see _reap_unit).
-            self._reap_unit(unit_name)
+            # --die-with-parent handles teardown (see execute()).
             partial_out = e.stdout if e.stdout else ""
             output = f"[SYSTEM ERROR] Python command timed out after {effective_timeout} seconds.\nPartial Output:\n{partial_out}"
             exit_code = 124
@@ -244,4 +244,3 @@ class Sandbox:
                 os.remove(script_path)
 
         return exit_code, output
-

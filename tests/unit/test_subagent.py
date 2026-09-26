@@ -10,11 +10,11 @@ T-43f Orchestrator skips warmup exchanges (P1)
 
 These tests pin the multi-agent contract:
 
-  * When is_orchestrator=True the Sandbox hides the home tree via
-    TemporaryFileSystem=/home (NOT ProtectHome=yes, which would mask the
-    orchestrator's own working directory and make every command fail with
-    exit 200/CHDIR), binds .bash_agent_tmp/ back in read-write, anchors its
-    working directory inside .bash_agent_tmp/, restricts approved write paths
+  * When is_orchestrator=True the Sandbox masks the home tree via a tmpfs
+    over /home (masking without binding .bash_agent_tmp/ back in would also
+    hide the orchestrator's own working directory), binds .bash_agent_tmp/
+    back in read-write, anchors its working directory inside
+    .bash_agent_tmp/, restricts approved write paths
     to .bash_agent_tmp/, and rejects request-write() with a delegation hint.
   * A subagent calling `exit` raises SubagentExit (caught by the orchestrator)
     instead of terminating the whole process via sys.exit.
@@ -68,8 +68,18 @@ class SandboxIsolationTests(unittest.TestCase):
         self._stdout_cm.__exit__(None, None, None)
         self._chdir_cm.__exit__(None, None, None)
 
-    def _props(self, cmd):
-        return [a for a in cmd if a.startswith("--property=")]
+    @staticmethod
+    def _has_seq(cmd, seq):
+        n = len(seq)
+        return any(cmd[i:i + n] == seq for i in range(len(cmd) - n + 1))
+
+    @staticmethod
+    def _bind_pairs(cmd):
+        pairs = []
+        for i, tok in enumerate(cmd):
+            if tok == "--bind":
+                pairs.append((cmd[i + 1], cmd[i + 2]))
+        return pairs
 
     def _run_execute(self, sandbox, script="true"):
         calls = []
@@ -85,20 +95,15 @@ class SandboxIsolationTests(unittest.TestCase):
     def test_orchestrator_sandbox_posture(self):
         sb = Sandbox("sp", uuid="u", is_orchestrator=True)
         cmd = self._run_execute(sb)
-        props = self._props(cmd)
-        # The home tree is hidden with a tmpfs -- NOT ProtectHome=yes, which
-        # would also mask .bash_agent_tmp (nested under /home) and make every
-        # command die with status=200/CHDIR before running.
-        self.assertIn("--property=TemporaryFileSystem=/home", props)
-        self.assertNotIn("--property=ProtectHome=yes", props)
-        self.assertNotIn("--property=ProtectHome=read-only", props)
+        # The home tree is hidden with a tmpfs -- NOT by masking the whole
+        # namespace (which would also hide .bash_agent_tmp, nested under
+        # /home, and make every command die with status=200/CHDIR).
+        self.assertTrue(self._has_seq(cmd, ["--tmpfs", "/home"]))
         # The one directory the orchestrator may use is bound back in writable.
-        self.assertIn(
-            f"--property=BindPaths={os.path.abspath('.bash_agent_tmp')}", props
-        )
-        self.assertIn(
-            f"--working-directory={os.path.abspath('.bash_agent_tmp')}", cmd
-        )
+        scratch = os.path.abspath(".bash_agent_tmp")
+        self.assertEqual(self._bind_pairs(cmd), [(scratch, scratch)])
+        # ...and it is the working directory too.
+        self.assertTrue(self._has_seq(cmd, ["--chdir", scratch]))
         self.assertEqual(
             sb.approved_write_paths, [os.path.abspath(".bash_agent_tmp")]
         )
@@ -106,8 +111,12 @@ class SandboxIsolationTests(unittest.TestCase):
     def test_default_sandbox_is_not_orchestrator(self):
         sb = Sandbox("sp", uuid="u")
         cmd = self._run_execute(sb)
-        props = self._props(cmd)
-        self.assertIn("--property=ProtectHome=read-only", props)
+        # A subagent keeps /home visible (no tmpfs mask) and only punches
+        # the project tree back in as writable.
+        self.assertFalse(self._has_seq(cmd, ["--tmpfs", "/home"]))
+        self.assertEqual(
+            self._bind_pairs(cmd), [(os.path.abspath("."), os.path.abspath("."))]
+        )
         self.assertEqual(sb.approved_write_paths, [os.path.abspath(".")])
 
     def test_orchestrator_request_write_rejected(self):

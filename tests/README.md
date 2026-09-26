@@ -12,7 +12,7 @@
 (`unit/test_utils.py`, `unit/test_prompts.py`, `unit/test_main_cli.py`,
 `unit/test_vision.py`, `unit/test_transcribe.py`, `unit/test_memo.py`,
 `unit/test_search_helpers.py`), and the full integration group
-> (`integration/test_sandbox_systemd.py`, `integration/test_full_agent_loop.py`)
+> (`integration/test_sandbox_bwrap.py`, `integration/test_full_agent_loop.py`)
 > are live; run them with the command below.
 
 ---
@@ -33,7 +33,7 @@ codebase is mocked or faked:
 | OpenRouter embeddings | `llm.create_embedding()` | Fake client returning fixed vectors |
 | OpenRouter rerank endpoint | `search.rerank_documents()` | Patch `requests.post` |
 
-The only *real* external process the suite may invoke is `systemd-run`
+The only *real* external process the suite may invoke is `bwrap`
 (integration tests), which is local and requires no network.
 
 ### 2. Standard library only
@@ -87,7 +87,7 @@ tests/
 │   └── test_main_cli.py
 └── integration/         # Real processes, still offline
     ├── __init__.py
-    ├── test_sandbox_systemd.py     # Real systemd-run executions
+    ├── test_sandbox_bwrap.py       # Real bwrap executions
     └── test_full_agent_loop.py     # Full Agent.run() driven by a fake LLM
 ```
 
@@ -100,7 +100,7 @@ deliberate commits — never as a side effect of adding tests.
 
 | # | Status | Location | Description | Pinned by |
 |---|--------|----------|-------------|-----------|
-| 2 | **FIXED** | `sandbox.Sandbox.execute/_execute_python` | On `BASH_TIMEOUT`, `subprocess.run` SIGKILLs only the `systemd-run` *client*; the transient service kept running on the host forever (verified empirically: a timed-out `sleep 999` survived). **Fixed** by giving every invocation a unique `--unit=` name and calling `systemctl --user stop <unit>` on the `TimeoutExpired` path (`Sandbox._reap_unit`). Verified: a real timed-out run now returns 124 and leaves no stray process. Integration tests still self-clean defensively (`exec -a <marker>`); see `integration/test_sandbox_systemd.py::test_timeout_maps_to_124`. | `integration/test_sandbox_systemd.py` (T-30) |
+| 2 | **FIXED** | `sandbox.Sandbox.execute/_execute_python` | On `BASH_TIMEOUT`, `subprocess.run` SIGKILLs only the `bwrap` *client*; the sandboxed workload kept running on the host (verified empirically: a timed-out `sleep 999` survived). **Fixed** by `bwrap --die-with-parent` (plus `--unshare-pid`): the container dies with the client and the kernel reaps every process inside it, so no unit reaping is needed. Verified: a real timed-out run now returns 124 and leaves no stray process. Integration tests still self-clean defensively (`exec -a <marker>`); see `integration/test_sandbox_bwrap.py::test_timeout_maps_to_124`. | `integration/test_sandbox_bwrap.py` (T-30) |
 | 4 | **FIXED** | `agent._get_lowest_reasoning_effort` | The "reasoning disabled" mode ("none") was unreachable for a model whose reasoning is NOT mandatory but whose catalog `supported_efforts` omits "none". That list enumerates levels available *while reasoning is ON*, so the lowest level came back as e.g. "low" and a requested `--reasoning-effort none` was silently bumped upward. **Fixed** by treating "none" as implicitly available whenever `reasoning_mandatory` is False. | `unit/test_agent_reasoning_effort.py` (T-44) |
 | 3 | **FIXED** | `search.get_all_files` | gitignore-style directory patterns (`build/`) were matched with bare `fnmatch`, which has no trailing-slash or ancestor semantics, so files under ignored trees were still indexed and embedded (wasted API cost). **Fixed** by normalizing trailing slashes in `get_ignore_patterns()` and pruning by basename, relpath, AND ancestor components during the walk. | `unit/test_search_helpers.py` (T-41) |
 | 1 | **FIXED** | `agent._extract_blocks` | Cross-type fence pairs (e.g. `START_BASH`/`END_PYTHON`) could glue onto a later same-type END fence, producing one spanning garbage "script" containing fences and prose that would be executed as code. Both strict and relaxed patterns now use a tempered body forbidding command-fence markers inside a block body. | `unit/test_agent_blocks.py::TestCrossTypeFenceMismatch` (T-05) |
@@ -113,10 +113,10 @@ deliberate commits — never as a side effect of adding tests.
 # Everything
 ./venv/bin/python -m unittest discover -s tests -v
 
-# Unit tests only (fast, no systemd dependency)
+# Unit tests only (fast, no bwrap dependency)
 ./venv/bin/python -m unittest discover -s tests/unit -v
 
-# Integration tests only (requires a systemd user session)
+# Integration tests only (requires bubblewrap)
 ./venv/bin/python -m unittest discover -s tests/integration -v
 
 # Single module
@@ -125,7 +125,7 @@ deliberate commits — never as a side effect of adding tests.
 
 Environment requirements:
 - Python ≥ 3.12 (declared in `pyproject.toml`; the source uses PEP 701 nested f-strings)
-- `systemd-run` available for integration tests (auto-skipped otherwise via
+- `bwrap` (bubblewrap) available for integration tests (auto-skipped otherwise via
   `@unittest.skipUnless`)
 - No API keys required; tests must pass with `OPENROUTER_API_KEY`
   **unset**

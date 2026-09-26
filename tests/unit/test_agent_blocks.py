@@ -13,7 +13,7 @@ feed well-formed blocks built by the T-00b helpers through the production
 regex parser and assert exact extraction semantics.
 
 All tests are offline (pure regex over a string) and run through the
-_make_agent() helper so no network probe or systemd round-trip occurs.
+_make_agent() helper so no network probe or real sandbox round-trip occurs.
 """
 import unittest
 import uuid

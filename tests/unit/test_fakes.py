@@ -351,7 +351,7 @@ class TestFakeLLMClient(unittest.TestCase):
 # T-00d — FakeSandbox
 # ---------------------------------------------------------------------------
 class TestFakeSandbox(unittest.TestCase):
-    """T-00d: FakeSandbox decouples unit tests from systemd."""
+    """T-00d: FakeSandbox decouples unit tests from the real sandbox."""
 
     def test_execute_returns_canned_result(self):
         sb = FakeSandbox(execute_result=(0, "hello"))

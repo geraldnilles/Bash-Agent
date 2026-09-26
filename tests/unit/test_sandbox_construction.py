@@ -1,5 +1,5 @@
 """
-Group 6 — Sandbox unit tests (no systemd involved).
+Group 6 — Sandbox unit tests (no sandbox invocation involved).
 
 T-27  Construction defaults & write-path bookkeeping (P1)
 T-28  Command assembly inspection (P1)
@@ -12,13 +12,15 @@ These tests pin the Sandbox surface that the LLM-facing protocol depends on:
   * request_write() driven by patched builtins.input appends the *abspath*
     only on approval and always returns a (bool, message) tuple — the same
     contract agent.py unpacks as `success, msg = sandbox.request_write(path)`.
-  * The argv assembled for systemd-run carries the full security posture
-    (ProtectSystem=strict, ProtectHome=read-only, PrivateTmp=yes), the
-    working-directory flag, env forwarding (PATH always; OPENROUTER_API_KEY
-    only when set; BASH_AGENT_UUID / BASH_AGENT_MULTIMODAL), one
-    ReadWritePaths property per approved path, and a /bin/bash <script> or
-    <venv-python|/usr/bin/env python3> <script>.py tail. If someone drops a
-    security property, these tests go red before users do.
+  * The argv assembled for bubblewrap carries the full isolation posture:
+    the host root bound read-only (--ro-bind / /), a private /proc, /dev and
+    throwaway /tmp + /var/tmp, namespace isolation (--unshare-*), robust
+    teardown (--die-with-parent), the working directory via --chdir, env
+    forwarding via --setenv (PATH for bash only; PYTHONPATH for python only;
+    OPENROUTER_API_KEY only when set; BASH_AGENT_UUID / BASH_AGENT_MULTIMODAL),
+    one read/write --bind per approved path, and a /bin/bash <script> or
+    <venv-python|/usr/bin/env python3> <script>.py tail. If someone drops an
+    isolation flag, these tests go red before users do.
   * Temp-script hygiene: the mkstemp'd script under .bash_agent_tmp/ has
     mode 0700 while it exists, is removed after every call (success or
     timeout), and TimeoutExpired maps to exit code 124 with the
@@ -26,7 +28,7 @@ These tests pin the Sandbox surface that the LLM-facing protocol depends on:
     code the LLM reads to decide retries.
 
 All tests are offline: subprocess.run is replaced with recorders/fakes, so
-systemd-run is never invoked. Real-sandbox behavior is covered separately by
+bwrap is never invoked. Real-sandbox behavior is covered separately by
 Group 7 integration tests (T-30).
 
 Every test runs inside a throwaway CWD (chdir_tmp) and captures stdout so
@@ -101,15 +103,44 @@ class SandboxCase(unittest.TestCase):
 
     # -- assertion helpers --------------------------------------------------
 
-    def _props(self, cmd):
-        return [a for a in cmd if a.startswith("--property=")]
+    @staticmethod
+    def _setenv(cmd):
+        """Return the --setenv pairs of `cmd` as a {name: value} dict."""
+        env = {}
+        for i, tok in enumerate(cmd):
+            if tok == "--setenv":
+                env[cmd[i + 1]] = cmd[i + 2]
+        return env
 
-    def _assert_security_posture(self, cmd):
-        """The three isolation properties AGENTS.md promises must be present."""
-        props = self._props(cmd)
-        self.assertIn("--property=ProtectSystem=strict", props)
-        self.assertIn("--property=ProtectHome=read-only", props)
-        self.assertIn("--property=PrivateTmp=yes", props)
+    @staticmethod
+    def _bind_pairs(cmd):
+        """Return the (src, dst) pairs of every --bind in `cmd`."""
+        pairs = []
+        for i, tok in enumerate(cmd):
+            if tok == "--bind":
+                pairs.append((cmd[i + 1], cmd[i + 2]))
+        return pairs
+
+    @staticmethod
+    def _has_seq(cmd, seq):
+        """True when the consecutive token sequence `seq` appears in `cmd`."""
+        n = len(seq)
+        return any(cmd[i:i + n] == seq for i in range(len(cmd) - n + 1))
+
+    def _assert_isolation_posture(self, cmd):
+        """The isolation flags AGENTS.md promises must be present."""
+        self.assertEqual(cmd[0], "bwrap")
+        # Host root read-only.
+        self.assertTrue(self._has_seq(cmd, ["--ro-bind", "/", "/"]))
+        # Private pseudo-filesystems + throwaway tmp.
+        self.assertTrue(self._has_seq(cmd, ["--proc", "/proc"]))
+        self.assertTrue(self._has_seq(cmd, ["--dev", "/dev"]))
+        self.assertTrue(self._has_seq(cmd, ["--tmpfs", "/tmp"]))
+        self.assertTrue(self._has_seq(cmd, ["--tmpfs", "/var/tmp"]))
+        # Namespace isolation + teardown.
+        for flag in ("--unshare-pid", "--unshare-ipc", "--unshare-uts",
+                     "--unshare-cgroup-try", "--die-with-parent"):
+            self.assertIn(flag, cmd)
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +154,7 @@ class TestConstructionDefaults(SandboxCase):
         self.assertEqual(sb.approved_write_paths, [os.path.abspath(".")])
         self.assertIsNone(sb.uuid)
         self.assertEqual(sb.multimodal_capabilities, [])
+        self.assertFalse(sb.is_orchestrator)
 
     def test_explicit_values_are_stored(self):
         sb = Sandbox(
@@ -135,6 +167,11 @@ class TestConstructionDefaults(SandboxCase):
         self.assertEqual(sb.uuid, "uid-123")
         self.assertEqual(sb.multimodal_capabilities, ["image"])
         self.assertEqual(sb.approved_write_paths, [os.path.abspath(".")])
+
+    def test_orchestrator_is_confined_to_scratch(self):
+        sb = Sandbox("scratchpad-path-unused", is_orchestrator=True)
+        self.assertTrue(sb.is_orchestrator)
+        self.assertEqual(sb.approved_write_paths, [os.path.abspath(".bash_agent_tmp")])
 
 
 class TestRequestWriteBookkeeping(SandboxCase):
@@ -174,6 +211,12 @@ class TestRequestWriteBookkeeping(SandboxCase):
         self.assertEqual(msg, "Write access denied. User message: tell me why first")
         self.assertNotIn("/etc", sb.approved_write_paths)
 
+    def test_orchestrator_never_gets_write_access(self):
+        sb = Sandbox("scratchpad-path-unused", is_orchestrator=True)
+        ok, msg = sb.request_write("/etc")
+        self.assertFalse(ok)
+        self.assertIn("Orchestrator agent cannot request write access", msg)
+
 
 # ---------------------------------------------------------------------------
 # T-28 — Command assembly inspection
@@ -189,29 +232,23 @@ class TestBashCommandAssembly(SandboxCase):
         self.assertEqual(len(calls), 1)
         cmd = calls[0]["cmd"]
 
-        # Launcher flags
-        self.assertEqual(cmd[0], "systemd-run")
-        for flag in ("--user", "--quiet", "--wait", "--collect", "--pipe"):
-            self.assertIn(flag, cmd)
+        # Isolation posture.
+        self._assert_isolation_posture(cmd)
 
-        # Security posture
-        self._assert_security_posture(cmd)
+        # Non-orchestrator: the project tree is the one writable bind.
+        self.assertEqual(self._bind_pairs(cmd), [(os.path.abspath("."), os.path.abspath("."))])
+        # ...and /home is NOT masked for a subagent.
+        self.assertFalse(self._has_seq(cmd, ["--tmpfs", "/home"]))
 
-        # Working directory pinned to the project root
-        self.assertIn(f"--working-directory={os.path.abspath('.')}", cmd)
+        # Working directory pinned to the project root.
+        self.assertTrue(self._has_seq(cmd, ["--chdir", os.path.abspath(".")]))
 
-        # Env forwarding: PATH always, UUID/multimodal from constructor state
-        props = self._props(cmd)
-        self.assertIn(f"--property=Environment=PATH={os.environ.get('PATH', '')}", props)
-        self.assertIn("--property=Environment=BASH_AGENT_UUID=UID-1", props)
-        self.assertIn("--property=Environment=BASH_AGENT_MULTIMODAL=image", props)
-
-        # One ReadWritePaths per approved write path, in order
-        rw = [p for p in props if p.startswith("--property=ReadWritePaths=")]
-        self.assertEqual(
-            rw,
-            [f"--property=ReadWritePaths={p}" for p in sb.approved_write_paths],
-        )
+        # Env forwarding: PATH always, UUID/multimodal from constructor state.
+        env = self._setenv(cmd)
+        self.assertEqual(env["PATH"], os.environ.get("PATH", ""))
+        self.assertEqual(env["BASH_AGENT_UUID"], "UID-1")
+        self.assertEqual(env["BASH_AGENT_MULTIMODAL"], "image")
+        self.assertNotIn("PYTHONPATH", env)
 
         # Tail: /bin/bash <script under .bash_agent_tmp/*.sh>
         script = cmd[-1]
@@ -220,6 +257,19 @@ class TestBashCommandAssembly(SandboxCase):
         self.assertTrue(
             script.startswith(os.path.join(os.path.abspath("."), ".bash_agent_tmp"))
         )
+
+    def test_orchestrator_masks_home_and_binds_scratch(self):
+        sb = Sandbox("sp", uuid="u", is_orchestrator=True)
+        calls, _, _ = self._run_execute(sb, "true")
+        cmd = calls[0]["cmd"]
+
+        self._assert_isolation_posture(cmd)
+        # /home is masked, then only the scratch dir is punched back in rw.
+        self.assertTrue(self._has_seq(cmd, ["--tmpfs", "/home"]))
+        scratch = os.path.abspath(".bash_agent_tmp")
+        self.assertEqual(self._bind_pairs(cmd), [(scratch, scratch)])
+        # Orchestrator workdir is the scratch dir.
+        self.assertTrue(self._has_seq(cmd, ["--chdir", scratch]))
 
     def test_run_kwargs_pin_timeout_and_merged_stderr(self):
         sb = Sandbox("sp", uuid="u", timeout=13)
@@ -234,12 +284,11 @@ class TestBashCommandAssembly(SandboxCase):
             k: v for k, v in os.environ.items() if k != "OPENROUTER_API_KEY"
         }
 
-        # Unset -> no key property at all
+        # Unset -> no key forwarded at all
         with mock.patch.dict(os.environ, dict(env_without_key), clear=True):
             sb = Sandbox("sp", uuid="u")
             calls, _, _ = self._run_execute(sb)
-            props = self._props(calls[0]["cmd"])
-            self.assertFalse(any("OPENROUTER_API_KEY" in p for p in props))
+            self.assertNotIn("OPENROUTER_API_KEY", self._setenv(calls[0]["cmd"]))
 
         # Set -> forwarded verbatim
         with mock.patch.dict(
@@ -248,9 +297,8 @@ class TestBashCommandAssembly(SandboxCase):
             clear=True,
         ):
             calls, _, _ = self._run_execute(sb)
-            props = self._props(calls[0]["cmd"])
-            self.assertIn(
-                "--property=Environment=OPENROUTER_API_KEY=sk-test", props
+            self.assertEqual(
+                self._setenv(calls[0]["cmd"])["OPENROUTER_API_KEY"], "sk-test"
             )
 
 
@@ -261,12 +309,14 @@ class TestPythonCommandAssembly(SandboxCase):
         calls, _, _ = self._run_execute_python(sb, "print('x')")
         cmd = calls[0]["cmd"]
 
-        self._assert_security_posture(cmd)
+        self._assert_isolation_posture(cmd)
 
-        props = self._props(cmd)
-        self.assertIn(f"--property=Environment=PYTHONPATH={os.path.abspath('.')}", props)
-        self.assertIn("--property=Environment=BASH_AGENT_UUID=UID-2", props)
-        self.assertIn("--property=Environment=BASH_AGENT_MULTIMODAL=", props)
+        env = self._setenv(cmd)
+        self.assertEqual(env["PYTHONPATH"], os.path.abspath("."))
+        self.assertEqual(env["BASH_AGENT_UUID"], "UID-2")
+        self.assertEqual(env["BASH_AGENT_MULTIMODAL"], "")
+        # execute_python() does not forward PATH.
+        self.assertNotIn("PATH", env)
 
         # Tail: /usr/bin/env python3 <script>.py
         script = cmd[-1]
@@ -288,6 +338,22 @@ class TestPythonCommandAssembly(SandboxCase):
         cmd = calls[0]["cmd"]
         self.assertEqual(cmd[-2], venv_py)
         self.assertTrue(cmd[-1].endswith(".py"))
+
+    def test_orchestrator_venv_bound_read_only(self):
+        # A project venv is visible to the orchestrator read-only so the
+        # interpreter keeps working even though /home is masked.
+        venv_bin = os.path.join(self.tmpdir, "venv", "bin")
+        os.makedirs(venv_bin, exist_ok=True)
+        with open(os.path.join(venv_bin, "python3"), "w") as f:
+            f.write("#!/bin/sh\n")
+
+        sb = Sandbox("sp", uuid="u", is_orchestrator=True)
+        calls, _, _ = self._run_execute_python(sb)
+        cmd = calls[0]["cmd"]
+
+        venv_dir = os.path.join(os.path.abspath("."), "venv")
+        self.assertTrue(self._has_seq(cmd, ["--ro-bind", venv_dir, venv_dir]))
+        self.assertTrue(self._has_seq(cmd, ["--tmpfs", "/home"]))
 
 
 # ---------------------------------------------------------------------------
