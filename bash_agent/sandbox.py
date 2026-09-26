@@ -29,6 +29,30 @@ import tempfile
 from bash_agent.config import BASH_TIMEOUT
 
 
+# Resolve the project root from the PACKAGE LOCATION rather than the launch
+# cwd.  ``bagent -o`` may be launched from any directory, but the orchestrator
+# sandbox re-exposes the project ``venv/`` and ``bash_agent/`` package source
+# (which the ``--tmpfs /home`` masking would otherwise hide).  Deriving those
+# paths from ``__file__`` keeps them correct regardless of cwd.
+_PKG_DIR = os.path.dirname(os.path.abspath(__file__))   # <project>/bash_agent
+_PROJECT_ROOT = os.path.dirname(_PKG_DIR)               # <project>
+
+
+def _resolve_venv_dir() -> str:
+    """Return the project ``venv/`` directory, resolved from the package
+    location with a cwd-based fallback for unusual layouts.
+
+    The orchestrator re-exposes this directory READ-ONLY so CLI tools such as
+    ``vision`` stay on ``PATH`` even though ``--tmpfs /home`` masks the real
+    home tree.  Resolution must NOT depend on the launch cwd (``bagent -o`` can
+    be started anywhere), which is why ``_PROJECT_ROOT`` is preferred.
+    """
+    candidate = os.path.join(_PROJECT_ROOT, "venv")
+    if os.path.isdir(candidate):
+        return candidate
+    return os.path.join(os.getcwd(), "venv")
+
+
 class Sandbox:
     def __init__(self, scratchpad_path: str = None, timeout: int = None, uuid: str = None, multimodal_capabilities: list = None, is_orchestrator: bool = False):
         self.is_orchestrator = is_orchestrator
@@ -84,7 +108,11 @@ class Sandbox:
         * the project ``venv/`` -- so CLI tools installed there (e.g.
           ``vision``) remain on ``PATH``; and
         * the ``bash_agent/`` package source -- required because the editable
-          install's finder maps ``bash_agent`` to ``<cwd>/bash_agent``.
+          install's finder maps ``bash_agent`` to the package directory.
+
+        Both paths are resolved from the PACKAGE LOCATION (``_PROJECT_ROOT`` /
+        ``_PKG_DIR``, derived from ``__file__``) rather than the launch cwd, so
+        an orchestrator started from a foreign directory still punches them in.
 
         Both binds are READ-ONLY; nothing outside ``.bash_agent_tmp/`` ever
         becomes writable.  The ``with_venv`` argument is retained only for
@@ -105,10 +133,14 @@ class Sandbox:
         # which the /home tmpfs would otherwise hide).  Both are bound
         # READ-ONLY and are required for BOTH execute() (bash) and
         # execute_python(), so this is intentionally NOT gated on with_venv.
-        venv_dir = os.path.join(os.getcwd(), "venv")
+        # NOTE: paths are resolved from the PACKAGE location, not os.getcwd(),
+        # because an orchestrator may be launched from any directory.  A
+        # cwd-based bind would silently vanish for a foreign launch directory,
+        # leaving /home an empty tmpfs and ``vision`` undiscoverable.
+        venv_dir = _resolve_venv_dir()
         if os.path.isdir(venv_dir):
             args += ["--ro-bind", venv_dir, venv_dir]
-        pkg_dir = os.path.join(os.getcwd(), "bash_agent")
+        pkg_dir = _PKG_DIR
         if os.path.isdir(pkg_dir):
             args += ["--ro-bind", pkg_dir, pkg_dir]
         return args
@@ -150,7 +182,15 @@ class Sandbox:
             f.write(script_content)
         os.chmod(script_path, 0o700)
 
+        # Prepend the resolved venv ``bin`` so CLI tools such as ``vision``
+        # are discoverable even when the orchestrator was launched from a
+        # foreign directory; keep the inherited host PATH afterwards so system
+        # tools still resolve.  ``--setenv PATH`` below remains the single
+        # place PATH is set inside the sandbox.
         host_path = os.environ.get("PATH", "")
+        venv_bin = os.path.join(_resolve_venv_dir(), "bin")
+        if os.path.isdir(venv_bin):
+            host_path = venv_bin + ":" + host_path
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
 
         cmd = [
@@ -217,7 +257,13 @@ class Sandbox:
             *self._role_args(with_venv=True),
             # bwrap inherits the parent env; set exactly the variables the
             # previous implementation forwarded for the python path.
-            "--setenv", "PYTHONPATH", self._workdir,
+            # Resolve ``bash_agent`` imports reliably even when launched from a
+            # foreign cwd: the workdir alone is not the package location, so
+            # additionally expose the project root (the editable finder maps
+            # ``bash_agent`` -> _PKG_DIR, which lives under _PROJECT_ROOT).
+            "--setenv", "PYTHONPATH", os.pathsep.join(
+                p for p in (self._workdir, _PROJECT_ROOT) if p
+            ),
         ]
 
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
@@ -230,7 +276,10 @@ class Sandbox:
 
         # Execute python3 instead of bash.
         # Determine which python executable to use.
-        venv_python = os.path.join(os.getcwd(), "venv", "bin", "python3")
+        venv_python = os.path.join(_resolve_venv_dir(), "bin", "python3")
+        if not os.path.exists(venv_python):
+            # Fallback to a cwd-relative venv for unusual layouts.
+            venv_python = os.path.join(os.getcwd(), "venv", "bin", "python3")
 
         cmd += ["--chdir", self._workdir]
         if os.path.exists(venv_python):

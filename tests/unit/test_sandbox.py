@@ -31,7 +31,12 @@ import tempfile
 import unittest
 from unittest import mock
 
-from bash_agent.sandbox import Sandbox
+from bash_agent.sandbox import (
+    Sandbox,
+    _PKG_DIR,
+    _PROJECT_ROOT,
+    _resolve_venv_dir,
+)
 
 
 class SandboxTestCase(unittest.TestCase):
@@ -254,7 +259,12 @@ class TestExecuteBash(SandboxTestCase):
 
         # 3. Env contract, forwarded via --setenv.
         env = self._setenv(cmd)
-        self.assertEqual(env["PATH"], "/usr/bin:/bin")
+        # execute() prepends the package-location venv bin so CLI tools
+        # (e.g. ``vision``) resolve regardless of the launch cwd.
+        self.assertEqual(
+            env["PATH"],
+            os.path.join(_resolve_venv_dir(), "bin") + ":/usr/bin:/bin",
+        )
         self.assertEqual(env["OPENROUTER_API_KEY"], "sk-test-key")
         self.assertEqual(env["BASH_AGENT_UUID"], "test-uuid-123")
         self.assertEqual(env["BASH_AGENT_MULTIMODAL"], "image")
@@ -302,11 +312,11 @@ class TestExecuteBash(SandboxTestCase):
         # venv + package source are re-exposed READ-ONLY even for BASH, so
         # CLI tools like `vision` and package imports keep working.
         ro_binds = [cmd[i:i + 3] for i in range(len(cmd) - 2) if cmd[i] == "--ro-bind"]
-        # os.getcwd is patched to /home/user in this harness.
-        self.assertIn(["--ro-bind", "/home/user/venv", "/home/user/venv"], ro_binds)
-        self.assertIn(
-            ["--ro-bind", "/home/user/bash_agent", "/home/user/bash_agent"], ro_binds
-        )
+        # Paths resolve from the PACKAGE location (not the launch cwd),
+        # so they survive a foreign working directory.
+        venv_dir = _resolve_venv_dir()
+        self.assertIn(["--ro-bind", venv_dir, venv_dir], ro_binds)
+        self.assertIn(["--ro-bind", _PKG_DIR, _PKG_DIR], ro_binds)
 
     def test_returns_exit_code_and_stdout_on_success(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
@@ -427,12 +437,14 @@ class TestExecutePython(SandboxTestCase):
         args, kwargs = self.mock_mkstemp.call_args
         self.assertEqual(kwargs["suffix"], ".py")
 
-        # Command ends with python3 and script path. os.getcwd() is mocked to
-        # /home/user, and os.path.exists() is mocked to True, so the venv
-        # interpreter is chosen deterministically.
+        # Command ends with python3 and script path. os.path.exists() is
+        # mocked to True, and the interpreter is resolved from the
+        # package-location venv, so it is chosen deterministically.
         cmd = self._cmd()
         self.assertEqual(cmd[-1], "/home/user/.bash_agent_tmp/script123.py")
-        self.assertEqual(cmd[-2], "/home/user/venv/bin/python3")
+        self.assertEqual(
+            cmd[-2], os.path.join(_resolve_venv_dir(), "bin", "python3")
+        )
 
     def test_uses_venv_python_when_available(self):
         """When venv/bin/python3 exists, it should be used."""
@@ -457,8 +469,12 @@ class TestExecutePython(SandboxTestCase):
         self.sb.execute_python("print('hello')")
 
         env = self._setenv(self._cmd())
-        # PYTHONPATH is set to the absolute path of the current directory.
-        self.assertEqual(env["PYTHONPATH"], "/home/user")
+        # PYTHONPATH carries the workdir plus the project root so
+        # ``bash_agent`` imports resolve from any launch cwd.
+        self.assertEqual(
+            env["PYTHONPATH"],
+            os.pathsep.join(("/home/user", _PROJECT_ROOT)),
+        )
         # execute_python() does NOT forward PATH.
         self.assertNotIn("PATH", env)
 
@@ -473,7 +489,8 @@ class TestExecutePython(SandboxTestCase):
 
         cmd = self._cmd()
         ro_binds = [cmd[i:i + 3] for i in range(len(cmd) - 2) if cmd[i] == "--ro-bind"]
-        self.assertIn(["--ro-bind", "/home/user/venv", "/home/user/venv"], ro_binds)
+        venv_dir = _resolve_venv_dir()
+        self.assertIn(["--ro-bind", venv_dir, venv_dir], ro_binds)
 
     def test_timeout_handling_same_as_bash(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.py")

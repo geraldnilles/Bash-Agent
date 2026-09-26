@@ -43,7 +43,12 @@ import unittest
 from unittest import mock
 
 from bash_agent import config
-from bash_agent.sandbox import Sandbox
+from bash_agent.sandbox import (
+    Sandbox,
+    _PKG_DIR,
+    _PROJECT_ROOT,
+    _resolve_venv_dir,
+)
 
 from tests.helpers.fakes import chdir_tmp
 
@@ -245,7 +250,13 @@ class TestBashCommandAssembly(SandboxCase):
 
         # Env forwarding: PATH always, UUID/multimodal from constructor state.
         env = self._setenv(cmd)
-        self.assertEqual(env["PATH"], os.environ.get("PATH", ""))
+        # PATH prepends the package-location venv bin (CLI-tool discovery)
+        # ahead of the inherited host PATH.
+        self.assertEqual(
+            env["PATH"],
+            os.path.join(_resolve_venv_dir(), "bin")
+            + ":" + os.environ.get("PATH", ""),
+        )
         self.assertEqual(env["BASH_AGENT_UUID"], "UID-1")
         self.assertEqual(env["BASH_AGENT_MULTIMODAL"], "image")
         self.assertNotIn("PYTHONPATH", env)
@@ -278,10 +289,11 @@ class TestBashCommandAssembly(SandboxCase):
             calls, _, _ = self._run_execute(sb, "true")
         cmd = calls[0]["cmd"]
 
-        venv_dir = os.path.join(os.path.abspath("."), "venv")
-        pkg_dir = os.path.join(os.path.abspath("."), "bash_agent")
+        # Paths resolve from the PACKAGE location, so a foreign launch cwd
+        # (chdir_tmp here) does not suppress the binds.
+        venv_dir = _resolve_venv_dir()
         self.assertTrue(self._has_seq(cmd, ["--ro-bind", venv_dir, venv_dir]))
-        self.assertTrue(self._has_seq(cmd, ["--ro-bind", pkg_dir, pkg_dir]))
+        self.assertTrue(self._has_seq(cmd, ["--ro-bind", _PKG_DIR, _PKG_DIR]))
 
     def test_run_kwargs_pin_timeout_and_merged_stderr(self):
         sb = Sandbox("sp", uuid="u", timeout=13)
@@ -316,15 +328,23 @@ class TestBashCommandAssembly(SandboxCase):
 
 class TestPythonCommandAssembly(SandboxCase):
     def test_fallback_interpreter_without_project_venv(self):
-        # chdir_tmp gives us a bare dir: no ./venv/bin/python3 present.
+        # chdir_tmp gives us a bare dir, and the resolver is pointed at a
+        # non-existent venv, so no interpreter is found.
         sb = Sandbox("sp", uuid="UID-2", multimodal_capabilities=[])
-        calls, _, _ = self._run_execute_python(sb, "print('x')")
+        missing_venv = os.path.join(self.tmpdir, "no-such-venv")
+        with mock.patch(
+            "bash_agent.sandbox._resolve_venv_dir", return_value=missing_venv
+        ):
+            calls, _, _ = self._run_execute_python(sb, "print('x')")
         cmd = calls[0]["cmd"]
 
         self._assert_isolation_posture(cmd)
 
         env = self._setenv(cmd)
-        self.assertEqual(env["PYTHONPATH"], os.path.abspath("."))
+        self.assertEqual(
+            env["PYTHONPATH"],
+            os.pathsep.join((os.path.abspath("."), _PROJECT_ROOT)),
+        )
         self.assertEqual(env["BASH_AGENT_UUID"], "UID-2")
         self.assertEqual(env["BASH_AGENT_MULTIMODAL"], "")
         # execute_python() does not forward PATH.
@@ -346,7 +366,12 @@ class TestPythonCommandAssembly(SandboxCase):
             f.write("#!/bin/sh\n")  # never executed; argv inspection only
 
         sb = Sandbox("sp", uuid="u")
-        calls, _, _ = self._run_execute_python(sb)
+        # Resolution is package-location based; point it at the tmp venv.
+        with mock.patch(
+            "bash_agent.sandbox._resolve_venv_dir",
+            return_value=os.path.join(self.tmpdir, "venv"),
+        ):
+            calls, _, _ = self._run_execute_python(sb)
         cmd = calls[0]["cmd"]
         self.assertEqual(cmd[-2], venv_py)
         self.assertTrue(cmd[-1].endswith(".py"))
@@ -360,10 +385,13 @@ class TestPythonCommandAssembly(SandboxCase):
             f.write("#!/bin/sh\n")
 
         sb = Sandbox("sp", uuid="u", is_orchestrator=True)
-        calls, _, _ = self._run_execute_python(sb)
+        venv_dir = os.path.join(self.tmpdir, "venv")
+        with mock.patch(
+            "bash_agent.sandbox._resolve_venv_dir", return_value=venv_dir
+        ):
+            calls, _, _ = self._run_execute_python(sb)
         cmd = calls[0]["cmd"]
 
-        venv_dir = os.path.join(os.path.abspath("."), "venv")
         self.assertTrue(self._has_seq(cmd, ["--ro-bind", venv_dir, venv_dir]))
         self.assertTrue(self._has_seq(cmd, ["--tmpfs", "/home"]))
 
