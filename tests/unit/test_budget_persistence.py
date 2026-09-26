@@ -200,5 +200,46 @@ class TestBudgetExhaustionPersistsOutput(BudgetPersistenceCase):
         self.assertEqual(state["history"][-1]["role"], "user")
 
 
+    def test_cost_breakdown_printed_on_budget_exhaustion(self):
+        """The budget-exhaustion break must print the cost breakdown."""
+        fixed = new_uid()
+        responses = [
+            make_fake_response(content=bash_block(fixed, "echo one"),
+                               cost=0.05, prompt_tokens=10, completion_tokens=5),
+            make_fake_response(content=bash_block(fixed, "echo two"),
+                               cost=0.06, prompt_tokens=10, completion_tokens=5),
+        ]
+        self.seed_llm(responses)
+        agent = _make_agent(uuid_str=fixed, budget=0.10, model="deepseek/deepseek-v3")
+        agent.sandbox = FakeSandbox(execute_result=(0, "SCRIPT-RAN-OK"))
+        with contextlib.suppress(SystemExit):
+            agent.run("budget breakdown path")
+
+        # Budget really was exhausted -> the loop broke.
+        self.assertGreaterEqual(agent.session_cost, 0.10)
+        out = self.stdout_buf.getvalue()
+        self.assertIn("COST BREAKDOWN", out)
+        self.assertIn("TOTAL SESSION SPEND:", out)
+
+    def test_cost_breakdown_not_printed_for_subagent_budget_break(self):
+        """A subagent hitting its budget must NOT print the breakdown."""
+        fixed = new_uid()
+        responses = [
+            make_fake_response(content=bash_block(fixed, "echo one"),
+                               cost=0.05, prompt_tokens=10, completion_tokens=5),
+            make_fake_response(content=bash_block(fixed, "echo two"),
+                               cost=0.06, prompt_tokens=10, completion_tokens=5),
+        ]
+        self.seed_llm(responses)
+        agent = _make_agent(uuid_str=fixed, budget=0.10, model="deepseek/deepseek-v3")
+        agent.is_subagent = True
+        agent.sandbox = FakeSandbox(execute_result=(0, "SCRIPT-RAN-OK"))
+        with contextlib.suppress(SystemExit):
+            agent.run("subagent budget path")
+
+        self.assertGreaterEqual(agent.session_cost, 0.10)
+        self.assertNotIn("COST BREAKDOWN", self.stdout_buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

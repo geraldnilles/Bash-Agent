@@ -229,6 +229,54 @@ class SubagentLifecycleTests(unittest.TestCase):
         # Cost folded into the parent.
         self.assertAlmostEqual(agent.session_cost, 0.0123, places=9)
         self.assertEqual(created["task"], "inspect files")
+        # T-43d: the run is retained in the per-agent ledger so the end-of-
+        # session breakdown can report each subagent's individual spend.
+        self.assertEqual(len(agent.subagent_runs), 1)
+        run = agent.subagent_runs[0]
+        self.assertEqual(run["uuid"], "abcdef1234567890")
+        self.assertEqual(run["task"], "inspect files")
+        self.assertAlmostEqual(run["cost"], 0.0123, places=9)
+
+    def test_print_cost_breakdown_with_subagent(self):
+        agent = _make_agent()
+        agent.is_orchestrator = True
+        agent.subagent_model = "some/model"
+        agent.budget = 1.0
+        agent.session_cost = 0.0
+        history = [
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "final answer"},
+            {"role": "user", "content": "output block"},
+        ]
+        self._run_subagent(agent, history, 0.0123)
+        # Simulate the orchestrator's own turn spend.
+        agent._orchestrator_cost = 0.05
+        agent.session_cost = 0.05 + 0.0123
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            agent._print_cost_breakdown()
+        out = buf.getvalue()
+        self.assertIn("COST BREAKDOWN", out)
+        self.assertIn("Orchestrator (own turns):   $0.0500", out)
+        self.assertIn("Subagents: 1 spawned", out)
+        self.assertIn("abcdef12", out)
+        self.assertIn("spent $0.0123", out)
+        self.assertIn("task=\"inspect files\"", out)
+        self.assertIn("TOTAL SESSION SPEND:        $0.0623", out)
+
+    def test_print_cost_breakdown_no_subagents(self):
+        agent = _make_agent()
+        agent.session_cost = 0.0031
+        agent._orchestrator_cost = 0.0031
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            agent._print_cost_breakdown()
+        out = buf.getvalue()
+        self.assertIn("COST BREAKDOWN", out)
+        self.assertIn("No subagents spawned.", out)
+        self.assertIn("Orchestrator (own turns):   $0.0031", out)
 
     def _spawn_capture(self, agent, script):
         """Spawn a fully-faked subagent and return the kwargs it received."""

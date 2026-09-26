@@ -432,9 +432,15 @@ class Agent:
         else:
             self.budget = DEFAULT_BUDGET
         self.session_cost = 0.0
+        # Orchestrator's OWN turn spend, tracked separately from subagent spend
+        # (subagent cost is folded into session_cost but kept in subagent_runs
+        #  so it can be subtracted out for the per-agent breakdown).
+        self._orchestrator_cost = 0.0
         self.last_step_cost = 0.0
         self.last_step_input_tokens = 0
         self.last_step_provider = None
+        # Ledger of subagent spend: one record per spawned subagent.
+        self.subagent_runs = []
 
         # Check for custom role definition in ROLE.md (only if not resuming)
         if not history_loaded:
@@ -703,6 +709,7 @@ class Agent:
                     _sfx.chime_sync()
                 except Exception:
                     pass
+            self._print_cost_breakdown()
             sys.exit(0)
 
         if script == "reset":
@@ -740,6 +747,8 @@ class Agent:
                     _sfx.chime_sync()
                 except Exception:
                     pass
+            if not self.is_subagent:
+                self._print_cost_breakdown()
             sys.exit(0)
 
         return False, ""
@@ -892,6 +901,14 @@ class Agent:
             pass
         finally:
             self.session_cost += subagent_inst.session_cost
+            # Retain per-subagent spend for the end-of-session breakdown; the
+            # subagent instance itself is discarded after this method returns.
+            self.subagent_runs.append({
+                'uuid': subagent_inst.uuid,
+                'task': subagent_task,
+                'budget': effective_budget,
+                'cost': subagent_inst.session_cost,
+            })
 
         # Return the subagent's last 2 conversation messages as the summary.
         recent_msgs = subagent_inst.context.history[-2:]
@@ -909,6 +926,44 @@ class Agent:
             + "\n\n".join(summary_blocks)
         )
         return True, self._format_output(0, subagent_summary, cmd_type)
+
+    def _print_cost_breakdown(self) -> None:
+        """Print a per-agent USD cost breakdown for the finished session.
+
+        Subagent spend is folded into ``session_cost`` at spawn time, so the
+        orchestrator's own-turn total is recovered by subtracting every
+        recorded subagent cost. Prints a single aligned block to stdout; safe
+        to call from any termination path.
+        """
+        subagent_total = sum(r['cost'] for r in self.subagent_runs)
+        # Orchestrator own-turn spend comes from the dedicated counter. Defensive
+        # fallback: if it was never populated (e.g. legacy state) but the session
+        # has spend, derive own cost by subtracting recorded subagent spend.
+        own_cost = self._orchestrator_cost
+        if own_cost == 0.0 and self.session_cost > 0.0:
+            own_cost = self.session_cost - subagent_total
+
+        print()
+        print("==================== COST BREAKDOWN ====================")
+        print(f"Orchestrator (own turns):   ${own_cost:.4f}")
+        if self.subagent_runs:
+            print(f"Subagents: {len(self.subagent_runs)} spawned, "
+                  f"total ${subagent_total:.4f}")
+            for run in self.subagent_runs:
+                task = (run['task'] or "").replace("\n", " ").strip()
+                if len(task) > 60:
+                    task = task[:57] + "..."
+                budget = run['budget']
+                budget_str = f"${budget:.4f}" if budget is not None else "unbounded"
+                print(f"  - {run['uuid'][:8]}  spent ${run['cost']:.4f}  "
+                      f"budget {budget_str}  task=\"{task}\"")
+        else:
+            print("No subagents spawned.")
+        print("------------------------------------------------------")
+        print(f"TOTAL SESSION SPEND:        ${self.session_cost:.4f}")
+        print(f"Session budget:             ${self.budget:.4f}  "
+              f"(remaining ${self.remaining_budget():.4f})")
+        print("======================================================")
 
     def _execute_script(self, cmd_type: str, script: str) -> str:
         """
@@ -1134,6 +1189,11 @@ class Agent:
             self.last_step_input_tokens = usage.get("prompt_tokens", 0) or 0
             self.last_step_cost = step_cost
             self.session_cost += step_cost
+            # Track this agent's own-turn spend. Subagents' own-turn costs are
+            # captured via the parent's subagent_runs ledger, so only the
+            # orchestrator/standalone counters are incremented here.
+            if not self.is_subagent:
+                self._orchestrator_cost += step_cost
 
             provider_info = resp_dict.get("provider")
             if isinstance(provider_info, dict):
@@ -1437,9 +1497,13 @@ class Agent:
                             _sfx.chime_sync()
                         except Exception:
                             pass
+                    if not self.is_subagent:
+                        self._print_cost_breakdown()
                     break
 
         except KeyboardInterrupt:
             self._log_debug_history()
             print("\n[System] Session terminated by user (Ctrl+C). Exiting.")
+            if not self.is_subagent:
+                self._print_cost_breakdown()
             sys.exit(0)
