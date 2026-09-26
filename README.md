@@ -163,6 +163,10 @@ subagent "Find all instances of deprecated API calls in src/ and report back"
 ---END_BASH_COMMAND-{uuid}---
 ```
 
+A subagent's budget can be set per delegation with `--budget <USD>` (alias
+`-b`), e.g. `subagent --budget 0.05 "..."`. By default it is 25% of the
+overall session budget (capped at what remains).
+
 Each subagent runs with full project read/write access in the standard sandbox,
 performs the task, then `exit`s. The orchestrator receives the subagent's last
 two messages (plus its cost, folded into the session budget) and continues
@@ -272,7 +276,32 @@ The entire conversation history is persisted to `.bash_agent_tmp/history.json`.
 bagent -m "Refactor the entire codebase" --budget 0.50   # $0.50 USD max
 ```
 
-When the budget is exhausted, the agent stops gracefully.
+When the budget is exhausted, the agent stops gracefully, and the per-turn
+`[Session Stats]` line reports how much has been spent and how much remains
+(`Budget: $used/$total ($left left)`).
+
+The default budget depends on the mode:
+
+- **Orchestrator mode** (`-o`) defaults to **$0.20**, because the orchestrator
+  pays for its own planning turns *and* every subagent it delegates to.
+- **Standalone mode** defaults to **$0.10**.
+
+An explicit `-b`/`--budget` always wins.
+
+#### Subagent budgets
+
+In orchestrator mode each `subagent` delegation gets a budget of **25% of the
+overall session budget** by default (clamped to whatever remains, floored at
+$0.01). Override it per delegation with `--budget` (alias `-b`) on the
+`subagent` command:
+
+```
+subagent --budget 0.05 "Run the flaky integration test and report the failure"
+```
+
+...or set a global default for every subagent with `--subagent-budget`. An
+orchestrator is budget-aware: its system prompt states the total, used, and
+remaining budget so it can keep the sum of its delegations within what is left.
 
 ### Context-Window Token Budget
 
@@ -306,7 +335,8 @@ Absolute counts accept an optional `K`/`M` suffix (metric: `256K` = 256,000 toke
 | `--max-tokens <n>` | Override max output tokens (default: 8192) |
 | `--token-budget <spec>` | Context-window token budget: absolute tokens (e.g. `327680`, `256K`, `1.5M`) or a percentage of the model's context window ending in `%` (e.g. `25%`). Defaults to 25% of the model window. |
 | `-t, --timeout <n>` | Session default command timeout in seconds (default: 60). A single BASH/PYTHON block may override this up to 600s via a first-line `# timeout: N` directive. |
-| `-b, --budget <n>` | Session cost budget in USD (default: $0.10) |
+| `-b, --budget <n>` | Session cost budget in USD (default: $0.20 in orchestrator mode, $0.10 standalone) |
+| `--subagent-budget <n>` | Default USD budget per spawned subagent (orchestrator mode). Default: 25% of the overall budget; a per-command `subagent --budget N` overrides it. |
 | `-r, --resume` | Restore previous session and continue |
 | `--commit` | Resume and auto-generate a git commit message |
 | `-c, --copy-project` | Copy project files to clipboard (for sharing with other AIs) |

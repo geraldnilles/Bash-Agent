@@ -71,7 +71,21 @@ BASH_TIMEOUT = 60 # seconds
 MAX_COMMAND_TIMEOUT = 600
 
 # Session Budget
+# Fallback session cost limit (USD) for a standalone / subagent session that
+# did not receive an explicit budget. A top-level ORCHESTRATOR gets the larger
+# DEFAULT_ORCHESTRATOR_BUDGET because it must pay for both its own planning
+# turns and every subagent it delegates to.
 DEFAULT_BUDGET = 0.10 # USD
+# Session cost limit (USD) applied when a top-level orchestrator is started
+# without an explicit --budget / constructor budget.
+DEFAULT_ORCHESTRATOR_BUDGET = 0.20 # USD
+# Fraction of the OVERALL parent budget granted to a spawned subagent by
+# default (25%). An orchestrator can override this per delegation with the
+# `subagent --budget <USD>` command flag, or globally with --subagent-budget.
+DEFAULT_SUBAGENT_BUDGET_FRACTION = 0.25
+# Absolute floor (USD) applied to any derived subagent budget so a tiny or
+# already-nearly-exhausted parent budget still lets a subagent make progress.
+MIN_SUBAGENT_BUDGET = 0.01 # USD
 
 # Console Colors
 COLOR_CMD = "\033[96m"    # Cyan for Bash Commands

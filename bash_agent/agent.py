@@ -12,7 +12,7 @@ import shlex
 from typing import List, Dict
 
 from bash_agent.prompts import get_system_prompt, get_orchestrator_system_prompt
-from bash_agent.config import DEFAULT_MODEL, DEFAULT_AUDIO_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_SUBAGENT_MODEL, SUBAGENT_HISTORY_PREFIX, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, DEFAULT_BUDGET, BASH_TIMEOUT, MAX_COMMAND_TIMEOUT
+from bash_agent.config import DEFAULT_MODEL, DEFAULT_AUDIO_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_SUBAGENT_MODEL, SUBAGENT_HISTORY_PREFIX, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, DEFAULT_BUDGET, DEFAULT_ORCHESTRATOR_BUDGET, DEFAULT_SUBAGENT_BUDGET_FRACTION, MIN_SUBAGENT_BUDGET, BASH_TIMEOUT, MAX_COMMAND_TIMEOUT
 from bash_agent.token_budget import parse_token_budget, resolve_budget
 from bash_agent.utils import cleanup_tmp_folder, copy_project_to_clipboard, get_clipboard_content, get_vim_prompt
 from bash_agent.config_file import load_config
@@ -227,7 +227,7 @@ class SubagentExit(Exception):
 
 
 class Agent:
-    def __init__(self, keep_tmp=False, debug=False, model=None, reasoning_effort=None, max_tokens=None, token_budget=None, timeout=None, resume=False, budget=None, audio=False, is_orchestrator=True, is_subagent=False, subagent_model=None):
+    def __init__(self, keep_tmp=False, debug=False, model=None, reasoning_effort=None, max_tokens=None, token_budget=None, timeout=None, resume=False, budget=None, audio=False, is_orchestrator=True, is_subagent=False, subagent_model=None, subagent_budget=None):
         self.uuid = str(uuid.uuid4())
         self.debug = debug
         # Role flags drive sandbox isolation, prompt selection, and lifecycle.
@@ -252,6 +252,21 @@ class Agent:
             or self.file_config.get("subagent_model")
             or DEFAULT_SUBAGENT_MODEL
         )
+
+        # Global default subagent budget (USD). When unset (None), a spawned
+        # subagent receives DEFAULT_SUBAGENT_BUDGET_FRACTION (25%) of THIS
+        # parent's overall budget. Priority for a single delegation:
+        #   per-command `subagent --budget N` > self.subagent_budget > 25% default.
+        # An explicit value is only consulted for an actual orchestrator (a
+        # standalone/subagent never spawns), but storing it is harmless.
+        if subagent_budget is not None:
+            try:
+                subagent_budget = float(subagent_budget)
+            except (TypeError, ValueError):
+                subagent_budget = None
+            if subagent_budget is not None and subagent_budget <= 0:
+                subagent_budget = None
+        self.subagent_budget = subagent_budget
 
         # Model priority:
         #   * explicit `model` arg always wins
@@ -402,6 +417,25 @@ class Agent:
         # Track attached audio emitted by the sandbox (e.g., via transcribe)
         self._pending_multimodal_audio = []
         
+        # Session cost budget (USD) and accounting state. Resolved BEFORE the
+        # system prompt is built so the orchestrator prompt can advertise its
+        # budget/remaining funds at construction time.
+        # Default when unset: a top-level ORCHESTRATOR gets the larger
+        # DEFAULT_ORCHESTRATOR_BUDGET (it pays for its own turns AND every
+        # subagent it delegates to); a standalone agent / subagent falls back
+        # to DEFAULT_BUDGET (subagents normally receive an explicit budget from
+        # their parent).
+        if budget is not None:
+            self.budget = budget
+        elif is_orchestrator and not is_subagent:
+            self.budget = DEFAULT_ORCHESTRATOR_BUDGET
+        else:
+            self.budget = DEFAULT_BUDGET
+        self.session_cost = 0.0
+        self.last_step_cost = 0.0
+        self.last_step_input_tokens = 0
+        self.last_step_provider = None
+
         # Check for custom role definition in ROLE.md (only if not resuming)
         if not history_loaded:
             custom_role = None
@@ -415,12 +449,16 @@ class Agent:
                     custom_role = f.read().strip()
             if self.is_orchestrator:
                 # Orchestrator runs confined to .bash_agent_tmp/ and delegates
-                # all tactical work to subagents.
+                # all tactical work to subagents. Thread the budget into the
+                # prompt so the model is budget-aware from the first turn.
                 system_prompt = get_orchestrator_system_prompt(
                     self.uuid,
                     self.context.scratchpad_path,
                     subagent_model=self.subagent_model or DEFAULT_SUBAGENT_MODEL,
                     multimodal_capabilities=self.multimodal_capabilities,
+                    budget=self.budget,
+                    session_cost=self.session_cost,
+                    subagent_budget=self.get_default_subagent_budget() if self.is_orchestrator else None,
                 )
             else:
                 system_prompt = get_system_prompt(
@@ -432,11 +470,37 @@ class Agent:
                     is_subagent=self.is_subagent,
                 )
             self.context.add_message("system", system_prompt)
-        self.budget = budget if budget is not None else DEFAULT_BUDGET
-        self.session_cost = 0.0
-        self.last_step_cost = 0.0
-        self.last_step_input_tokens = 0
-        self.last_step_provider = None
+
+    def remaining_budget(self):
+        """USD remaining in this session's budget (never negative).
+
+        Returns 0.0 when no budget is set (unbounded sessions) so callers can
+        treat "no budget" and "budget exhausted" uniformly for display.
+        """
+        if not self.budget:
+            return 0.0
+        return max(0.0, self.budget - self.session_cost)
+
+    def get_default_subagent_budget(self):
+        """Default USD budget handed to a spawned subagent (no per-command flag).
+
+        Precedence for the *requested* amount:
+            self.subagent_budget (--subagent-budget / ctor) > 25% of the
+            OVERALL parent budget (DEFAULT_SUBAGENT_BUDGET_FRACTION).
+
+        The requested amount is then clamped to the parent's remaining budget
+        and floored at MIN_SUBAGENT_BUDGET, so a subagent can never spend more
+        than its parent has left. Returns None when the parent itself has no
+        budget (an unbounded parent spawns an unbounded subagent).
+        """
+        if not self.budget:
+            return None
+        remaining = self.remaining_budget()
+        if self.subagent_budget is not None:
+            requested = self.subagent_budget
+        else:
+            requested = DEFAULT_SUBAGENT_BUDGET_FRACTION * self.budget
+        return max(MIN_SUBAGENT_BUDGET, min(requested, remaining))
 
     def _get_models_catalog(self):
         """Return the parsed OpenRouter /models catalog (list of model dicts).
@@ -698,8 +762,9 @@ class Agent:
             )
 
         # Parse the task prompt: strip the leading `subagent` token, tolerate
-        # an optional `-m` flag, then shlex-split the remainder so quoted
-        # prompts survive intact.
+        # an optional leading `-m`, and support an optional per-delegation
+        # budget override (`--budget N` / `-b N`). Then shlex-split the
+        # remainder so quoted prompts survive intact.
         rest = script[len("subagent"):].strip()
         tokens = []
         if rest:
@@ -711,6 +776,66 @@ class Agent:
                 )
         if tokens and tokens[0] == "-m":
             tokens = tokens[1:]
+
+        # Extract an optional `--budget N` / `-b N` override. Values are parsed
+        # as a positive float; anything else is a hard error (mirrors the
+        # invalid-syntax handling above).
+        override_budget = None
+        cleaned = []
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok in ("--budget", "-b"):
+                if i + 1 >= len(tokens):
+                    return True, self._format_output(
+                        1,
+                        f"The `{tok}` flag for the `subagent` command requires a "
+                        "positive USD value, e.g. `subagent --budget 0.05 \"task\"`.",
+                        cmd_type,
+                    )
+                raw_val = tokens[i + 1]
+                try:
+                    override_budget = float(raw_val)
+                except (TypeError, ValueError):
+                    return True, self._format_output(
+                        1,
+                        f"Invalid --budget value for the `subagent` command: "
+                        f"{raw_val!r} (expected a positive USD number).",
+                        cmd_type,
+                    )
+                if override_budget <= 0:
+                    return True, self._format_output(
+                        1,
+                        f"Invalid --budget value for the `subagent` command: "
+                        f"{raw_val!r} (must be > 0).",
+                        cmd_type,
+                    )
+                i += 2
+                continue
+            if tok.startswith("--budget=") or tok.startswith("-b="):
+                raw_val = tok.split("=", 1)[1]
+                try:
+                    override_budget = float(raw_val)
+                except (TypeError, ValueError):
+                    return True, self._format_output(
+                        1,
+                        f"Invalid --budget value for the `subagent` command: "
+                        f"{raw_val!r} (expected a positive USD number).",
+                        cmd_type,
+                    )
+                if override_budget <= 0:
+                    return True, self._format_output(
+                        1,
+                        f"Invalid --budget value for the `subagent` command: "
+                        f"{raw_val!r} (must be > 0).",
+                        cmd_type,
+                    )
+                i += 1
+                continue
+            cleaned.append(tok)
+            i += 1
+        tokens = cleaned
+
         subagent_task = " ".join(tokens).strip()
         if not subagent_task:
             return True, self._format_output(
@@ -720,7 +845,36 @@ class Agent:
                 cmd_type,
             )
 
+        # Resolve the subagent's USD budget. Precedence:
+        #   per-command --budget > self.subagent_budget (--subagent-budget) >
+        #   25% of the OVERALL parent budget.
+        # A *requested* amount (explicit per-command override or the global
+        # --subagent-budget) is clamped to the parent's remaining budget and
+        # floored at MIN_SUBAGENT_BUDGET, but ONLY when the parent has a finite
+        # budget. An unbudgeted parent (budget None/0) honors an explicit/global
+        # request as-is; with no request at all the subagent is unbounded (None).
+        if override_budget is not None:
+            requested = override_budget
+        elif self.subagent_budget is not None:
+            requested = self.subagent_budget
+        elif self.budget:
+            requested = DEFAULT_SUBAGENT_BUDGET_FRACTION * self.budget
+        else:
+            requested = None
+
+        if requested is None:
+            effective_budget = None
+        elif self.budget:
+            effective_budget = max(
+                MIN_SUBAGENT_BUDGET,
+                min(requested, self.remaining_budget()),
+            )
+        else:
+            effective_budget = requested
+
         print(f"\n[System] Spawning subagent with task: {subagent_task}")
+        if effective_budget is not None:
+            print(f"[System] Subagent budget: ${effective_budget:.2f}")
 
         subagent_inst = Agent(
             keep_tmp=True,
@@ -729,7 +883,7 @@ class Agent:
             is_orchestrator=False,
             is_subagent=True,
             timeout=getattr(self.sandbox, "timeout", None),
-            budget=max(0.01, self.budget - self.session_cost) if self.budget else None,
+            budget=effective_budget,
         )
 
         try:
@@ -1165,7 +1319,15 @@ class Agent:
             )
         else:
             context_readout += f" ({current_tokens:,}/{self.context.context_limit:,} tokens)"
-        print(f"{COLOR_COST}[Session Stats] {context_readout} | {step_info} | {total_info} | Provider: {self.last_step_provider or 'N/A'}{COLOR_RESET}")
+        # Budget readout: only meaningful when a finite budget is set. Guarded
+        # so a 0/unset budget never renders a bogus "$0.00/$0.00".
+        budget_info = ""
+        if self.budget and self.budget > 0:
+            budget_info = (
+                f" | Budget: ${self.session_cost:.2f}/${self.budget:.2f} "
+                f"(${self.remaining_budget():.2f} left)"
+            )
+        print(f"{COLOR_COST}[Session Stats] {context_readout} | {step_info} | {total_info}{budget_info} | Provider: {self.last_step_provider or 'N/A'}{COLOR_RESET}")
 
         if self.budget > 0 and self.session_cost >= self.budget:
             print(f"\n[Budget] Session cost ${self.session_cost:.2f} has reached the budget of ${self.budget:.2f}. Ending session.")

@@ -96,7 +96,8 @@ class TestParseArgDefaults(unittest.TestCase):
         self.assertIsNone(args.max_tokens)
         self.assertIsNone(args.token_budget)
         self.assertIsNone(args.timeout)
-        self.assertEqual(args.budget, 0.10)
+        self.assertIsNone(args.budget)  # sentinel: mode-dependent default resolved in Agent
+        self.assertIsNone(args.subagent_budget)
         self.assertFalse(args.commit)
         self.assertFalse(args.resume)
         self.assertFalse(args.copy_project)
@@ -141,7 +142,7 @@ class TestPlainRun(unittest.TestCase):
         res["agent_cls"].assert_called_once_with(
             keep_tmp=False, debug=False, model=None,
             reasoning_effort=None, max_tokens=None, token_budget=None,
-            timeout=None, resume=False, budget=0.10, audio=False, is_orchestrator=False, subagent_model=None)
+            timeout=None, resume=False, budget=None, audio=False, is_orchestrator=False, subagent_model=None, subagent_budget=None)
         res["agent_cls"].return_value.run.assert_called_once_with(
             "list files")
 
@@ -151,7 +152,7 @@ class TestPlainRun(unittest.TestCase):
         res["agent_cls"].assert_called_once_with(
             keep_tmp=False, debug=False, model=None,
             reasoning_effort=None, max_tokens=None, token_budget=None,
-            timeout=None, resume=False, budget=0.10, audio=True, is_orchestrator=False, subagent_model=None)
+            timeout=None, resume=False, budget=None, audio=True, is_orchestrator=False, subagent_model=None, subagent_budget=None)
 
     def test_short_orchestrator_flag_enables_orchestrator_mode(self):
         # -o opts back into the orchestrator/subagent hierarchy.
@@ -203,6 +204,11 @@ class TestPlainRun(unittest.TestCase):
         _, kwargs = res["agent_cls"].call_args
         self.assertEqual(kwargs["budget"], 1.25)
         self.assertEqual(kwargs["timeout"], 90)
+
+    def test_subagent_budget_forwarded(self):
+        res = run_cli(["bagent", "-m", "go", "--subagent-budget", "0.05"])
+        _, kwargs = res["agent_cls"].call_args
+        self.assertEqual(kwargs["subagent_budget"], 0.05)
 
     def test_token_budget_forwarded(self):
         res = run_cli(["bagent", "-m", "go", "--token-budget", "256K"])

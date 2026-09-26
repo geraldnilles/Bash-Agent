@@ -73,6 +73,27 @@ class TestConfigConstants(unittest.TestCase):
         self.assertIsInstance(config.DEFAULT_BUDGET, float)
         self.assertGreater(config.DEFAULT_BUDGET, 0.0)
 
+    def test_default_orchestrator_budget_is_float(self):
+        config = self._import_config_with_empty_env()
+        self.assertIsInstance(config.DEFAULT_ORCHESTRATOR_BUDGET, float)
+        self.assertEqual(config.DEFAULT_ORCHESTRATOR_BUDGET, 0.20)
+        # Orchestrator budget must exceed the standalone fallback (it pays for
+        # its own turns AND every subagent it delegates to).
+        self.assertGreater(config.DEFAULT_ORCHESTRATOR_BUDGET,
+                           config.DEFAULT_BUDGET)
+
+    def test_default_subagent_budget_fraction(self):
+        config = self._import_config_with_empty_env()
+        self.assertIsInstance(config.DEFAULT_SUBAGENT_BUDGET_FRACTION, float)
+        self.assertEqual(config.DEFAULT_SUBAGENT_BUDGET_FRACTION, 0.25)
+        self.assertGreater(config.DEFAULT_SUBAGENT_BUDGET_FRACTION, 0.0)
+        self.assertLess(config.DEFAULT_SUBAGENT_BUDGET_FRACTION, 1.0)
+
+    def test_min_subagent_budget_is_positive_float(self):
+        config = self._import_config_with_empty_env()
+        self.assertIsInstance(config.MIN_SUBAGENT_BUDGET, float)
+        self.assertGreater(config.MIN_SUBAGENT_BUDGET, 0.0)
+
     def test_console_colors_are_ansi_sequences(self):
         config = self._import_config_with_empty_env()
         for name in ["COLOR_CMD", "COLOR_OUT", "COLOR_PY_CMD", "COLOR_COST", "COLOR_RESET"]:
@@ -163,6 +184,8 @@ class TestConfigExportedSymbols(unittest.TestCase):
             "HISTORY_FILE", "CONTEXT_LIMIT",
             "OUTPUT_LIMIT", "MAX_PIXELS", "MAX_CODE_BLOCKS",
             "BASH_TIMEOUT", "MAX_COMMAND_TIMEOUT", "DEFAULT_BUDGET",
+            "DEFAULT_ORCHESTRATOR_BUDGET", "DEFAULT_SUBAGENT_BUDGET_FRACTION",
+            "MIN_SUBAGENT_BUDGET",
             "COLOR_CMD", "COLOR_OUT", "COLOR_PY_CMD", "COLOR_COST", "COLOR_RESET",
             "DEFAULT_REASONING_EFFORT", "DEFAULT_MAX_TOKENS",
             "MODEL_PROVIDERS",

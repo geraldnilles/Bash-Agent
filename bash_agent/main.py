@@ -45,7 +45,8 @@ def parse_args():
     )
     parser.add_argument("-t", "--timeout", type=int, default=None, help="Session default command timeout in seconds (default: 60). A single BASH/PYTHON block may override this up to 600s via a first-line `# timeout: N` directive.")
     parser.add_argument("--no-sfx", action="store_true", help="Disable subtle sound effects (also BAGENT_SFX=0 / BAGENT_NO_SFX=1)")
-    parser.add_argument("-b", "--budget", type=float, default=0.10, help="Total session cost budget in USD (default: 0.10)")
+    parser.add_argument("-b", "--budget", type=float, default=None, help="Total session cost budget in USD. Default: 0.20 in orchestrator mode (-o), 0.10 otherwise.")
+    parser.add_argument("--subagent-budget", type=float, default=None, help="Default USD budget for each subagent spawned via the `subagent` command (orchestrator mode). Default: 25%% of the overall budget; per-command `subagent --budget N` overrides this.")
     parser.add_argument("--commit", action="store_true", help="Resume the last session and create a git commit message for the changes.")
     parser.add_argument("-r","--resume", action="store_true", help="Restore the history from the last agent conversation and append the new prompt.")
     parser.add_argument("-c", "--copy-project", action="store_true",
@@ -159,7 +160,7 @@ def main():
     effective_model = args.model
     if is_orchestrator and args.orchestrator_model:
         effective_model = args.orchestrator_model
-    agent = Agent(keep_tmp=args.keep_tmp, debug=args.debug, model=effective_model, reasoning_effort=args.reasoning_effort, max_tokens=args.max_tokens, token_budget=args.token_budget, timeout=args.timeout, resume=args.resume, budget=args.budget, audio=args.audio, is_orchestrator=is_orchestrator, subagent_model=args.subagent_model)
+    agent = Agent(keep_tmp=args.keep_tmp, debug=args.debug, model=effective_model, reasoning_effort=args.reasoning_effort, max_tokens=args.max_tokens, token_budget=args.token_budget, timeout=args.timeout, resume=args.resume, budget=args.budget, audio=args.audio, is_orchestrator=is_orchestrator, subagent_model=args.subagent_model, subagent_budget=args.subagent_budget)
     agent.run(initial_task)
 
 if __name__ == "__main__":

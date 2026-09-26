@@ -260,7 +260,7 @@ The host machine has poppler-utils installed.  You can use this to directly extr
 
 
 
-def get_orchestrator_system_prompt(uuid: str, scratchpad_path: str, subagent_model: str = None, multimodal_capabilities: list = None) -> str:
+def get_orchestrator_system_prompt(uuid: str, scratchpad_path: str, subagent_model: str = None, multimodal_capabilities: list = None, budget: float = None, session_cost: float = None, subagent_budget: float = None) -> str:
     """Build the system prompt for the top-level ORCHESTRATOR agent.
 
     The orchestrator is a high-level technical lead / project manager. It runs
@@ -275,6 +275,27 @@ def get_orchestrator_system_prompt(uuid: str, scratchpad_path: str, subagent_mod
         f"Subagents currently execute with the model: `{subagent_model}`.\n"
         if subagent_model else ""
     )
+
+    # Budget-awareness line (orchestrator only). Rendered only when a finite
+    # budget is known so standalone/agent-mode prompts and un-budgeted
+    # scenarios never show a bogus "$0.00" line.
+    budget_line = ""
+    if budget is not None and budget > 0:
+        used = float(session_cost or 0.0)
+        remaining = max(0.0, budget - used)
+        sub_note = ""
+        if subagent_budget is not None and subagent_budget > 0:
+            sub_note = (
+                f" Your default subagent budget is ${subagent_budget:.2f} "
+                f"(25% of total) unless you override it with the "
+                f"`subagent --budget <USD>` flag."
+            )
+        budget_line = (
+            f"- You have a total session budget of ${budget:.2f}. "
+            f"Used so far: ${used:.2f}. Remaining: ${remaining:.2f}."
+            f"{sub_note} Plan your subagent delegations to stay within the "
+            f"remaining budget.\n"
+        )
     # Build fence markers procedurally (never embed a literal fence token in
     # this module - it would be ambiguous if the module ever round-trips
     # through the protocol).
@@ -360,20 +381,32 @@ Guidelines:
 - If a task needs long output (diffs, logs, reports), instruct the subagent to
   write it into `.bash_agent_tmp/<report_name>.md` and summarize in its final
   message, so nothing is lost to message bounds.
+- BUDGET: by default a subagent receives 25% of your OVERALL session budget
+  (capped at what remains). Override it per delegation with `--budget <USD>`
+  (alias `-b`):
+  ```
+  subagent --budget 0.05 "Run the flaky integration test and report the failure"
+  ```
+  Keep the sum of your delegations within your remaining budget.
 
-{model_line}
+{model_line}{budget_line}
 ================================================================
 ## ORCHESTRATOR WORKFLOW
 ================================================================
 
 1. PLAN: Break the goal into sequential, well-scoped tasks. Persist the roadmap
    in `{scratchpad_path}` (append or rewrite natively with `echo`/`cat`).
-2. DISPATCH: For each task, emit ONE `subagent "<detailed prompt>"` block.
-3. REVIEW: On completion you receive the subagent's last 2 messages. Evaluate
+2. BUDGET: Before dispatching, consider your remaining budget (see the budget
+   line above). Set each subagent's `--budget` so the SUM of your delegations
+   fits within what remains; give larger allowances only to tasks that need
+   them. Your own planning turns also consume budget.
+3. DISPATCH: For each task, emit ONE `subagent "<detailed prompt>"` block
+   (optionally `subagent --budget <USD> "<detailed prompt>"`).
+4. REVIEW: On completion you receive the subagent's last 2 messages. Evaluate
    the result: success, partial progress, or failure.
-4. ITERATE: Update the roadmap, then dispatch the next task (or a corrective
+5. ITERATE: Update the roadmap, then dispatch the next task (or a corrective
    one). Never repeat a failing delegation unchanged - diagnose and adapt.
-5. FINISH: When the overall goal is verified complete, emit `exit` (sole
+6. FINISH: When the overall goal is verified complete, emit `exit` (sole
    content of a bash block) to terminate the entire session.
 
 ================================================================

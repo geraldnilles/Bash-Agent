@@ -44,7 +44,7 @@ bash_agent/
 
 ### Entry Point: `main.py`
 
-Parses all CLI flags (`-m`, `-p`, `--resume`, `--commit`, `-o`/`--orchestrator`, `--subagent-model`, `--orchestrator-model`, etc.), resolves the initial task (from args, clipboard, or stdin), instantiates `Agent`, and calls `agent.run(initial_task)`.
+Parses all CLI flags (`-m`, `-p`, `--resume`, `--commit`, `-o`/`--orchestrator`, `-b`/`--budget`, `--subagent-budget`, `--subagent-model`, `--orchestrator-model`, etc.), resolves the initial task (from args, clipboard, or stdin), instantiates `Agent`, and calls `agent.run(initial_task)`.
 
 **Role/hierarchy flags (orchestrator vs single-agent):**
 - `-o` / `--orchestrator` → `is_orchestrator=True` (opt-in orchestrator/subagent hierarchy). Omitted (the default), `is_orchestrator=False` runs a standalone single-agent with normal project write access and the warmup exchanges.
@@ -85,7 +85,7 @@ This is the heart of the project. The `Agent` class:
 | `parse_and_execute(agent_msg)` | Coordination pipeline: extracts blocks via `_extract_blocks()`, dispatches each to `_handle_special_command()` or `_execute_script()`, enforces `MAX_CODE_BLOCKS` limit, and commits results via `_commit_execution_feedback()`. Returns `(executed: bool, feedback: str)`. |
 | `_extract_blocks(response_text)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Returns `(blocks, None)` on success, or `([], warning_message)` when no blocks or malformed UUID fences are found. |
 | `_handle_special_command(cmd_type, script)` | Intercepts built-in agent commands (`subagent`, `exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Returns `(handled: bool, formatted_output: str)`. Commands that terminate the session (`exit`, `copy-to-clipboard`) call `sys.exit()` in-process — EXCEPT for a subagent, where `exit` raises `SubagentExit` instead (so the orchestrator regains control). Dispatches `subagent`/`subagent ...` to `_handle_subagent_command()`. |
-| `_handle_subagent_command(cmd_type, script)` | Handles the `subagent "<task>"` built-in. Rejects nested subagents (only an orchestrator may spawn). Parses the prompt with `shlex.split` (tolerating a leading `-m`). Spawns a nested `Agent(is_orchestrator=False, is_subagent=True, model=subagent_model or DEFAULT_SUBAGENT_MODEL)`, runs it, catches `SubagentExit`, and folds its `session_cost` into the parent's. Returns the subagent's **last 2** history messages (multimodal content replaced with `[Multimodal content omitted]`) inside a `=== SUBAGENT <uuid8> COMPLETED ===\nCost: $...` summary block. |
+| `_handle_subagent_command(cmd_type, script)` | Handles the `subagent "<task>"` built-in. Rejects nested subagents (only an orchestrator may spawn). Parses the prompt with `shlex.split` (tolerating a leading `-m`) and an optional per-delegation budget override `--budget N` / `-b N` (positive float; invalid/missing value -> error block). Spawns a nested `Agent(is_orchestrator=False, is_subagent=True, model=subagent_model or DEFAULT_SUBAGENT_MODEL, budget=<resolved>)`, where `<resolved>` is `--budget` > `self.subagent_budget` (`--subagent-budget`) > 25% of the overall parent budget, clamped to remaining and floored at 0.01. Runs it, catches `SubagentExit`, and folds its `session_cost` into the parent's. Returns the subagent's **last 2** history messages (multimodal content replaced with `[Multimodal content omitted]`) inside a `=== SUBAGENT <uuid8> COMPLETED ===\nCost: $...` summary block. |
 | `_execute_script(cmd_type, script)` | Executes a bash or python script via `Sandbox.execute()` / `Sandbox.execute_python()`. First calls the pure helper `extract_timeout_directive(script)` which parses an optional first-line `# timeout: N` directive (N in [60, 600]) — a valid directive is scrubbed from the script and forwarded as the per-call `timeout=` kwarg; malformed/misplaced directives leave the ORIGINAL script intact (no data loss) and run verbatim with the default timeout (no teaching note). When the command actually times out (sandbox exit 124), appends a retry nudge (see `_build_timeout_nudge()`) reminding the model to use a first-line `# timeout: N` directive to extend the limit. Clamping of a valid out-of-range directive produces an advisory note. Scans sandbox output for `---START_ATTACHED_IMAGE-{uuid}---` and `---START_ATTACHED_AUDIO-{uuid}---` fences, strips base64 payloads, collects them in `self._pending_multimodal_images` / `self._pending_multimodal_audio`, and returns formatted output. On non-zero exit whose output references a `/tmp/` file with a file-not-found style error, appends a reminder that `/tmp/` is wiped each turn and `.bash_agent_tmp/` should be used instead (see `_build_tmp_file_warning()`). |
 | `extract_timeout_directive(script)` | Pure string helper (no Agent/sandbox needed): parses an optional first-line `# timeout: N` directive from a BASH/PYTHON block body. Returns `(scrubbed_script, effective_seconds_or_None, note)`. Valid directives (case-insensitive key, positive base-10 int, first-line-only) are scrubbed; values are clamped to [BASH_TIMEOUT=60, MAX_COMMAND_TIMEOUT=600] with an advisory note when clamped. Malformed/misplaced directives (line 2+, space-before-colon, non-integer value, etc.) return the ORIGINAL script (no data loss) and are ignored silently — a mistyped directive is low-stakes and runs verbatim with the default timeout. Absent directives return `(script, None, None)`. |
 | `_commit_execution_feedback(outputs)` | Bundles output blocks into a user message and appends to context. Builds structured multimodal content when `self._pending_multimodal_images` or `self._pending_multimodal_audio` is non-empty. |
@@ -122,7 +122,7 @@ When `finish_reason == "tool_calls"` occurs, the behavior is intentionally diffe
 2. `continue`s the `_get_llm_response()` loop with NO follow-up request and NO history cleanup — the correction is **permanently kept** in the conversation so the next LLM call sees what went wrong and replies with proper BASH/PYTHON blocks.
 Unlike the `length` recovery, nothing here is temporary: the failed attempt and the warning remain in `history.json`.
 
-**Budget tracking:** After each LLM call, cost is extracted from the API response (OpenRouter provides it natively). When `session_cost >= budget`, the loop exits. The check runs AFTER the turn's command has executed and its OUTPUT committed, and history is saved just before the check — so a budget break never strands an executed command without its output on disk (see `ContextManager` persistence note).
+**Budget tracking:** After each LLM call, cost is extracted from the API response (OpenRouter provides it natively). When `session_cost >= budget`, the loop exits. The check runs AFTER the turn's command has executed and its OUTPUT committed, and history is saved just before the check — so a budget break never strands an executed command without its output on disk (see `ContextManager` persistence note). The default budget is **mode-dependent**: a top-level orchestrator (`-o`) defaults to `DEFAULT_ORCHESTRATOR_BUDGET` ($0.20), everything else to `DEFAULT_BUDGET` ($0.10); an explicit `-b/--budget` (or constructor `budget=`) always wins. `Agent.remaining_budget()` returns the non-negative remainder; the `[Session Stats]` line reports `Budget: $used/$total ($left left)` whenever a finite budget is set, and the orchestrator system prompt advertises the total/used/remaining budget.
 
 ---
 
@@ -144,7 +144,10 @@ All tunable constants. **Modify this file to change defaults.**
 | `MAX_CODE_BLOCKS` | 1 | `agent.py` — max code blocks executed per LLM response |
 | `BASH_TIMEOUT` | 60 seconds | `sandbox.py` — default session/block timeout. A single block may extend this up to `MAX_COMMAND_TIMEOUT` via a first-line `# timeout: N` directive in the block body. |
 | `MAX_COMMAND_TIMEOUT` | 600 seconds | `agent.py` / `sandbox.py` — hard ceiling for the optional per-command `# timeout: N` directive. Values above this are clamped down (with an advisory note). |
-| `DEFAULT_BUDGET` | 0.10 USD | `agent.py` — session cost limit |
+| `DEFAULT_BUDGET` | 0.10 USD | `agent.py` — session cost limit for a standalone agent / subagent that received no explicit budget |
+| `DEFAULT_ORCHESTRATOR_BUDGET` | 0.20 USD | `config.py` — session cost limit applied to a top-level orchestrator (`-o`) with no explicit `--budget`/`budget=` |
+| `DEFAULT_SUBAGENT_BUDGET_FRACTION` | 0.25 | `config.py` — default share of the OVERALL parent budget granted to a spawned subagent, unless overridden by `--subagent-budget` or a per-command `subagent --budget N` |
+| `MIN_SUBAGENT_BUDGET` | 0.01 USD | `config.py` — absolute floor for any derived subagent budget |
 | `DEFAULT_REASONING_EFFORT` | `"low"` | `agent.py` — reasoning effort for OpenRouter |
 | `DEFAULT_MAX_TOKENS` | 8192 | `agent.py` — max output tokens |
 | `MAX_PIXELS` | 2,000,000 | `vision.py` — max image resolution |
@@ -448,11 +451,15 @@ task via the `subagent` built-in.
 | `is_orchestrator` | `True` | Selects home-tree-hiding isolation (`TemporaryFileSystem=/home` + `BindPaths=.bash_agent_tmp`), `.bash_agent_tmp` workdir, locked writes, orchestrator prompt, and skips warmup. `Agent(is_orchestrator=False)` restores the legacy single agent. |
 | `is_subagent` | `False` | Marks a nested worker. Its `exit` raises `SubagentExit` (not `sys.exit`), it uses the subagent prompt section, and it persists to its own history file. |
 | `subagent_model` | `None` | Explicit subagent slug (CLI `--subagent-model`) → else `config.json subagent_model` → else `DEFAULT_SUBAGENT_MODEL`. |
+| `subagent_budget` | `None` | Global default USD budget per spawned subagent (CLI `--subagent-budget`). When `None` a subagent gets `DEFAULT_SUBAGENT_BUDGET_FRACTION` (25%) of the overall budget; a per-command `subagent --budget N` still wins. |
 
 CLI: `-o` / `--orchestrator` enables the hierarchy (direct/standalone is
 the default); `--orchestrator-model`
 overrides the orchestrator's model (alias of `--model` in orchestrator mode);
-`--subagent-model` sets the worker model.
+`--subagent-model` sets the worker model; `--subagent-budget <USD>` sets the
+  default per-subagent budget (25% of the overall budget when omitted);
+  `-b/--budget <USD>` sets the overall budget (0.20 in orchestrator mode,
+  0.10 otherwise, when omitted).
 
 ### Lifecycle and cost
 
@@ -462,9 +469,17 @@ overrides the orchestrator's model (alias of `--model` in orchestrator mode);
   `Subagents cannot spawn nested subagents` error block.
 - The task is parsed from the block with `shlex.split` (quotes survive; an
   optional leading `-m` is tolerated) and a missing prompt is an error.
+- An optional per-delegation budget override is accepted as `--budget <USD>`
+  (alias `-b <USD>`, also `--budget=<USD>` / `-b=<USD>`); the value must be a
+  positive number or the command returns an error block.
 - The subagent runs in-process via a nested `Agent(is_orchestrator=False,
   is_subagent=True, keep_tmp=True, model=self.subagent_model or
-  DEFAULT_SUBAGENT_MODEL, budget=self.budget - self.session_cost)`.
+  DEFAULT_SUBAGENT_MODEL, budget=<resolved>)`. The resolved budget defaults to
+  `DEFAULT_SUBAGENT_BUDGET_FRACTION` (25%) of the OVERALL parent budget,
+  clamped to the parent's remaining budget and floored at `MIN_SUBAGENT_BUDGET`
+  (0.01). Precedence: per-command `subagent --budget N` (`-b N`) >
+  `--subagent-budget` (`self.subagent_budget`) > 25% default. An unbudgeted
+  parent spawns an unbudgeted subagent.
 - A `SubagentExit` from the child is caught; the child's `session_cost` is added
   to the parent's in a `finally` so cost is always aggregated.
 - The orchestrator's command output is the child's **last 2** conversation

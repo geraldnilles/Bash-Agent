@@ -90,5 +90,33 @@ class TestOrchestratorStructure(OrchestratorPromptCase):
         self.assertIn(SCRATCHPAD, self.build())
 
 
+class TestOrchestratorBudgetLine(OrchestratorPromptCase):
+    """The orchestrator prompt is budget-aware when a budget is supplied."""
+
+    def test_budget_line_present_with_values(self):
+        prompt = self.build(budget=0.20, session_cost=0.05,
+                            subagent_budget=0.05)
+        self.assertIn("total session budget of $0.20", prompt)
+        self.assertIn("Used so far: $0.05", prompt)
+        self.assertIn("Remaining: $0.15", prompt)
+        self.assertIn("default subagent budget is $0.05", prompt)
+
+    def test_budget_line_absent_without_budget(self):
+        prompt = self.build()
+        self.assertNotIn("total session budget", prompt)
+
+    def test_budget_line_absent_for_zero_budget(self):
+        prompt = self.build(budget=0.0)
+        self.assertNotIn("total session budget", prompt)
+
+    def test_subagent_command_documents_budget_flag(self):
+        prompt = self.build(budget=0.20)
+        self.assertIn("--budget", prompt)
+
+    def test_workflow_has_budget_step(self):
+        prompt = self.build(budget=0.20)
+        self.assertIn("BUDGET: Before dispatching", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
