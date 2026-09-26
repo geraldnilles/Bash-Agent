@@ -33,7 +33,7 @@ def parse_args():
     parser.add_argument("-k", "--keep-tmp", action="store_true", help="Keep the contents of .bash_agent_tmp/ folder")
     parser.add_argument("-d", "--debug", action="store_true", help="to /tmp/bash_agent_log.txt on every LLM ping")
     parser.add_argument("--model", type=str, default=None, help="OpenRouter model name (overrides OPENROUTER_MODEL env var)")
-    parser.add_argument("--no-orchestrator", "--direct", dest="no_orchestrator", action="store_true", help="Run in standalone single-agent mode (legacy behavior) instead of the default orchestrator/subagent hierarchy")
+    parser.add_argument("-o", "--orchestrator", dest="orchestrator", action="store_true", help="Enable orchestrator/subagent hierarchy mode (default: standalone single-agent/direct mode)")
     parser.add_argument("--subagent-model", type=str, default=None, help="OpenRouter model slug used by subagents spawned via the `subagent` command")
     parser.add_argument("--orchestrator-model", type=str, default=None, help="OpenRouter model slug for the top-level orchestrator (alias for --model when orchestrating)")
     parser.add_argument("--audio", action="store_true", help="Use the audio-enabled default model (xiaomi/mimo-v2.5) instead of the standard default. Ignored when --model/config.json/OPENROUTER_MODEL select a model.")
@@ -151,9 +151,9 @@ def main():
     
     if args.no_sfx:
         os.environ["BAGENT_NO_SFX"] = "1"
-    # Multi-agent mode: default is orchestrator + subagent delegation; the
-    # legacy single-agent behavior is opt-in via --no-orchestrator/--direct.
-    is_orchestrator = not args.no_orchestrator
+    # Single-agent (direct) mode is the default; the orchestrator/subagent
+    # hierarchy is opt-in via -o/--orchestrator.
+    is_orchestrator = args.orchestrator
     # --orchestrator-model is an explicit override for the orchestrator's model
     # (equivalent to --model while orchestrating).
     effective_model = args.model

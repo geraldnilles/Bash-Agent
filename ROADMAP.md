@@ -21,9 +21,11 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
 ---
 
 ## ✅ Completed
-- **Sub Agents / Hierarchical Orchestrator Mode:** the top-level agent now runs
-  as a planning **Orchestrator** that delegates tactical work to **Subagents**
-  via the built-in `subagent "<task>"` command (sole content of a bash block).
+- **Sub Agents / Hierarchical Orchestrator Mode:** with the opt-in `-o` /
+  `--orchestrator` flag, the top-level agent runs as a planning **Orchestrator**
+  that delegates tactical work to **Subagents** via the built-in
+  `subagent "<task>"` command (sole content of a bash block). Without the flag
+  the agent runs in the default standalone single-agent (direct) mode.
   - Only the top-level orchestrator may spawn; a subagent trying to spawn a
     nested subagent is refused.
   - The orchestrator runs in a STRICT, delegated sandbox (home/project tree
@@ -39,8 +41,8 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
     `subagent_model`, while the orchestrator uses `--orchestrator-model`.
   - The main benefit is context control: tactical noise stays in the subagent's
     context, and only a compact summary flows back to the orchestrator.
-  - Legacy single-agent behavior remains available via `--no-orchestrator` /
-    `--direct`.
+  - Single-agent / direct mode is the **DEFAULT**, and the orchestrator
+    hierarchy is opt-in via `-o` / `--orchestrator`.
 - **Dynamic Command Timeout:** a single BASH/PYTHON block can now raise its own
   grace period up to 600s via an optional first-line directive `# timeout: N`
   (N in [60, 600]). The default remains 60s (CLI `-t` or `config.BASH_TIMEOUT`).

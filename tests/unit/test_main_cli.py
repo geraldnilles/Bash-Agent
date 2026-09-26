@@ -102,6 +102,9 @@ class TestParseArgDefaults(unittest.TestCase):
         self.assertFalse(args.copy_project)
         self.assertIsNone(args.include)  # --files is an alias for --include
         self.assertIsNone(args.ignore)
+        # Direct/standalone mode is the default; orchestrator is opt-in.
+        self.assertFalse(args.orchestrator)
+        self.assertFalse(hasattr(args, "no_orchestrator"))
 
     def test_flag_mapping(self):
         args = self.parse("-m", "do things",
@@ -138,7 +141,7 @@ class TestPlainRun(unittest.TestCase):
         res["agent_cls"].assert_called_once_with(
             keep_tmp=False, debug=False, model=None,
             reasoning_effort=None, max_tokens=None, token_budget=None,
-            timeout=None, resume=False, budget=0.10, audio=False, is_orchestrator=True, subagent_model=None)
+            timeout=None, resume=False, budget=0.10, audio=False, is_orchestrator=False, subagent_model=None)
         res["agent_cls"].return_value.run.assert_called_once_with(
             "list files")
 
@@ -148,7 +151,31 @@ class TestPlainRun(unittest.TestCase):
         res["agent_cls"].assert_called_once_with(
             keep_tmp=False, debug=False, model=None,
             reasoning_effort=None, max_tokens=None, token_budget=None,
-            timeout=None, resume=False, budget=0.10, audio=True, is_orchestrator=True, subagent_model=None)
+            timeout=None, resume=False, budget=0.10, audio=True, is_orchestrator=False, subagent_model=None)
+
+    def test_short_orchestrator_flag_enables_orchestrator_mode(self):
+        # -o opts back into the orchestrator/subagent hierarchy.
+        res = run_cli(["bagent", "-m", "go", "-o"])
+        self.assertIsNone(res["exit"])
+        _, kwargs = res["agent_cls"].call_args
+        self.assertTrue(kwargs["is_orchestrator"])
+
+    def test_long_orchestrator_flag_enables_orchestrator_mode(self):
+        res = run_cli(["bagent", "-m", "go", "--orchestrator"])
+        self.assertIsNone(res["exit"])
+        _, kwargs = res["agent_cls"].call_args
+        self.assertTrue(kwargs["is_orchestrator"])
+
+    def test_orchestrator_model_alone_does_not_enable_orchestrator_mode(self):
+        # --orchestrator-model is only honored while orchestrating; it must
+        # NOT implicitly turn orchestrator mode on (mode stays direct).
+        res = run_cli(["bagent", "-m", "go", "--orchestrator-model",
+                       "vendor/orch-model"])
+        self.assertIsNone(res["exit"])
+        _, kwargs = res["agent_cls"].call_args
+        self.assertFalse(kwargs["is_orchestrator"])
+        # Direct mode keeps --model as the effective model (not the override).
+        self.assertIsNone(kwargs["model"])
 
     def test_no_input_source_yields_run_none(self):
         # No -m/-p/-x: initial_task stays None; agent still runs.
