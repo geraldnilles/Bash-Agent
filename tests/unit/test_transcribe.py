@@ -307,6 +307,27 @@ class TestMainBasicCall(TranscribeMainCase):
         self.assertEqual(self.captured["model"], transcribe.MODEL_ID)
         self.assertEqual(glob.glob(os.path.join(self.tmpdir, "*.mp3")), [])
 
+    def test_fallback_model_defaults_to_audio_model(self):
+        """Text-only fallback (no audio modality) uses config.DEFAULT_AUDIO_MODEL.
+
+        The main model not supporting audio input is exactly when this path
+        runs, so the default must be a known audio-capable slug shared with
+        `bagent --audio` rather than a hard-coded one-off.
+        """
+        from bash_agent.config import DEFAULT_AUDIO_MODEL
+        self.assertEqual(transcribe.MODEL_ID, DEFAULT_AUDIO_MODEL)
+
+        result = self.run_main(["transcribe", self.wav_path])
+        self.assertIsNone(result["exit"], msg=result["stderr"])
+        self.assertEqual(self.captured["model"], DEFAULT_AUDIO_MODEL)
+
+    def test_explicit_model_overrides_fallback_default(self):
+        """-m/--model still wins over the DEFAULT_AUDIO_MODEL default."""
+        result = self.run_main(
+            ["transcribe", "-m", "custom/audio-model", self.wav_path])
+        self.assertIsNone(result["exit"], msg=result["stderr"])
+        self.assertEqual(self.captured["model"], "custom/audio-model")
+
     def test_missing_audio_file_exits_1(self):
         result = self.run_main(["transcribe", "/nonexistent/audio.opus"])
         self.assertIsInstance(result["exit"], SystemExit)

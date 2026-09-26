@@ -205,7 +205,7 @@ vision -p "Extract all SQL table names from this ERD" schema.png
 
 ### Audio Transcription
 
-Pass `--audio` to run the agent on the audio-enabled default model (`xiaomi/mimo-v2.5`, defined as `DEFAULT_AUDIO_MODEL` in `config.py`) instead of the standard text default. An explicit `--model`, a `config.json` `model` entry, or the `OPENROUTER_MODEL` env var still take precedence.
+Pass `--audio` to run the agent on the audio-enabled default model (`DEFAULT_AUDIO_MODEL` in `config.py`) instead of the standard text default. An explicit `--model`, a `config.json` `model` entry, or the `OPENROUTER_MODEL` env var still take precedence.
 
 If your chosen model supports native audio input, the agent can attach audio files directly to the conversation:
 
@@ -213,7 +213,7 @@ If your chosen model supports native audio input, the agent can attach audio fil
 transcribe meeting_recording.opus
 ```
 
-For text-only models (or when invoked standalone), the `transcribe` command falls back to a separate audio-capable OpenRouter model and prints the resulting text transcription. You can add a specific prompt or provide context files:
+For text-only models (or when invoked standalone), the `transcribe` command falls back to a separate audio-capable OpenRouter model — `DEFAULT_AUDIO_MODEL` from `config.py`, overridable with `-m/--model` — and prints the resulting text transcription. You can add a specific prompt or provide context files:
 
 ```bash
 transcribe -p "List all action items from this meeting" status_call.mp3

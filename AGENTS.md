@@ -134,7 +134,7 @@ All tunable constants. **Modify this file to change defaults.**
 | Constant | Default | Where Used |
 |----------|---------|------------|
 | `DEFAULT_MODEL` | `"deepseek/deepseek-v4-pro"` | `agent.py` — fallback model |
-| `DEFAULT_AUDIO_MODEL` | `"xiaomi/mimo-v2.5"` | `agent.py` / `main.py` — fallback model when `--audio` is passed (audio-capable input) |
+| `DEFAULT_AUDIO_MODEL` | `"xiaomi/mimo-v2.6-flash"` | `agent.py` / `main.py` / `transcribe.py` — fallback model when `--audio` is passed (audio-capable input) and the audio-capable default used by `transcribe.py`'s text-only LLM fallback |
 | `DEFAULT_ORCHESTRATOR_MODEL` | `"deepseek/deepseek-v4.1-flash"` | `agent.py` — fallback model for a top-level orchestration agent (when not overridden by `--model`/`--orchestrator-model`, `config.json`, or `OPENROUTER_MODEL`) |
 | `DEFAULT_SUBAGENT_MODEL` | `"deepseek/deepseek-v4.1-flash"` | `agent.py` — fallback model for spawned subagents (overridable via `--subagent-model` or `config.json` `subagent_model`) |
 | `SUBAGENT_HISTORY_PREFIX` | `"history_subagent_"` | `agent.py` — prefix for each subagent's dedicated history file (`history_subagent_<uuid8>.json`) so a nested run never overwrites the parent `history.json`. These are *ephemeral*: `cleanup_tmp_folder()` deletes them on a fresh session (preserved only under `--resume`/`--keep-tmp`). |
@@ -394,7 +394,7 @@ Standalone CLI (`transcribe` command). Sends audio files to an LLM for transcrip
 3. When `BASH_AGENT_MULTIMODAL` includes `audio` and a session UUID is present, emits a fenced base64 MP3 payload (`---START_ATTACHED_AUDIO-{uuid}---`) on stdout instead of calling the API.
 4. `agent.py:_execute_script()` scans all sandbox output for these fences, strips the base64 from the visible output/context, and collects them in `self._pending_multimodal_audio`.
 5. If audio was collected, the user message is built as a structured content array with `input_audio` blocks; otherwise it stays plain text.
-6. When the env vars are absent (standalone CLI or text-only model), base64-encodes and sends to the LLM with a transcription prompt (or custom prompt via `-p`)
+6. When the env vars are absent (standalone CLI or text-only model), base64-encodes and sends to the LLM with a transcription prompt (or custom prompt via `-p`). The fallback model defaults to `config.DEFAULT_AUDIO_MODEL` (module constant `transcribe.MODEL_ID`, surfaced as the `-m/--model` default) — the same audio-capable slug selected by `bagent --audio`; an explicit `-m/--model` overrides it.
 7. Optional: includes context files (`-c file1.md file2.md -- audio.opus`)
 
 ---

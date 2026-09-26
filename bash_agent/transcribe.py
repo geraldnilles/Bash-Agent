@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-Transcribe audio via OpenRouter using an audio-capable model
-(google/gemini-3-flash-preview by default).
+Transcribe audio via OpenRouter using an audio-capable model.
 Converts audio to text via an LLM with audio input capabilities.
+
+When the active (main) model does not itself accept audio input, the
+text-only fallback below sends the clip to ``config.DEFAULT_AUDIO_MODEL``
+(the same canonical audio-capable default selected by ``bagent --audio``).
+An explicit ``-m/--model`` still overrides it.
 """
 import os
 import sys
@@ -14,8 +18,12 @@ import tempfile
 from bash_agent import config
 from bash_agent import llm
 
-# Constants
-MODEL_ID = "google/gemini-3-flash-preview"
+# Default model for the text-only LLM fallback path taken when the active
+# model cannot consume audio input (i.e. BASH_AGENT_MULTIMODAL lacks "audio").
+# Reuse the canonical audio-capable default from config.py so the fallback
+# stays in lock-step with `bagent --audio`. Overridable via -m/--model.
+MODEL_ID = config.DEFAULT_AUDIO_MODEL
+#MODEL_ID = "google/gemini-3-flash-preview"
 #MODEL_ID = "xiaomi/mimo-v2.5"
 #MODEL_ID = "mistralai/voxtral-small-24b-2507"
 #MODEL_ID = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
