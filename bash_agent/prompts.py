@@ -253,8 +253,9 @@ def get_orchestrator_system_prompt(uuid: str, scratchpad_path: str, subagent_mod
     """Build the system prompt for the top-level ORCHESTRATOR agent.
 
     The orchestrator is a high-level technical lead / project manager. It runs
-    in a STRICTLY isolated sandbox (ProtectHome=yes) whose only readable and
-    writable location is .bash_agent_tmp/. It therefore cannot inspect or edit
+    in a STRICTLY isolated sandbox (the home tree is masked, with
+    .bash_agent_tmp/ bound back in) whose only readable and writable location
+    is .bash_agent_tmp/. It therefore cannot inspect or edit
     the project source directly; all tactical work (reading files, editing
     code, running tests) is delegated to subagents via the ``subagent``
     built-in command.
@@ -308,8 +309,8 @@ executed and its output reported before the next.
 ## ENVIRONMENT CONSTRAINTS (READ CAREFULLY)
 ================================================================
 
-You run inside a STRICT sandbox (`ProtectHome=yes`) with a working directory
-of `.bash_agent_tmp/`. This means:
+You run inside a STRICT sandbox (the user's home/project tree is hidden) with
+a working directory of `.bash_agent_tmp/`. This means:
 
 - You CANNOT read or modify the project source code, nor any file outside
   `.bash_agent_tmp/`.

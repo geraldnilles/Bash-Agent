@@ -11,8 +11,8 @@ class Sandbox:
         self._workdir = os.path.abspath(".bash_agent_tmp" if is_orchestrator else ".")
         if is_orchestrator:
             # Orchestrator is confined entirely to .bash_agent_tmp/: it may
-            # write ONLY there and (via ProtectHome=yes) cannot read the user's
-            # home / project tree at all. Tactical file work is delegated.
+            # write ONLY there and cannot read the user's home / project tree.
+            # Tactical file work is delegated to subagents.
             self.approved_write_paths = [os.path.abspath(".bash_agent_tmp")]
         else:
             self.approved_write_paths = [os.path.abspath(".")]
@@ -20,6 +20,38 @@ class Sandbox:
         self.uuid = uuid
         self.multimodal_capabilities = multimodal_capabilities or []
         self._unit_counter = itertools.count()
+
+    def _isolation_properties(self, with_venv: bool = False) -> list:
+        """systemd properties that enforce the sandbox's filesystem isolation.
+
+        Non-orchestrators simply keep the user's home read-only
+        (``ProtectHome=read-only``): the project tree stays visible.
+
+        Orchestrators must see and write ONLY ``.bash_agent_tmp/`` -- but that
+        directory lives *inside* the home tree.  ``ProtectHome=yes`` masks all
+        of ``/home`` (including the orchestrator's own working directory), so
+        ``systemd-run --working-directory=...`` dies with an exit-200/CHDIR
+        failure *before the script ever runs* -- every orchestrator command
+        silently returns an empty string.  Instead we mount a tmpfs over
+        ``/home`` (hiding the user's home / project tree) and then bind the
+        working directory back into place.  ``execute_python()`` additionally
+        needs the project venv interpreter, which also lives under the masked
+        tree, so it is bound back in read-only via ``with_venv=True``.
+        """
+        if not self.is_orchestrator:
+            return ["--property=ProtectHome=read-only"]
+
+        props = [
+            # Hide the user's home / project tree...
+            "--property=TemporaryFileSystem=/home",
+            # ...then punch the one writable directory back in.
+            f"--property=BindPaths={self._workdir}",
+        ]
+        if with_venv:
+            venv_dir = os.path.join(os.getcwd(), "venv")
+            if os.path.isdir(venv_dir):
+                props.append(f"--property=BindReadOnlyPaths={venv_dir}")
+        return props
 
     def _unit_name(self) -> str:
         """Unique transient unit name so timeouts can stop exactly this run."""
@@ -84,13 +116,12 @@ class Sandbox:
         openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
         unit_name = self._unit_name()
 
-        protect_home_val = "yes" if self.is_orchestrator else "read-only"
         cmd = [
             "systemd-run", "--user", "--quiet", "--wait", "--collect", "--pipe",
             f"--unit={unit_name}",
             "--property=ProtectSystem=strict",
-            f"--property=ProtectHome={protect_home_val}",
             "--property=PrivateTmp=yes",
+            *self._isolation_properties(),
             # Start the bash session in the project directory (orchestrator:
             # confined to .bash_agent_tmp/).
             f"--working-directory={self._workdir}",
@@ -156,13 +187,12 @@ class Sandbox:
         os.chmod(script_path, 0o700)
 
         unit_name = self._unit_name()
-        protect_home_val = "yes" if self.is_orchestrator else "read-only"
         cmd = [
             "systemd-run", "--user", "--quiet", "--wait", "--collect", "--pipe",
             f"--unit={unit_name}",
             "--property=ProtectSystem=strict",
-            f"--property=ProtectHome={protect_home_val}",
             "--property=PrivateTmp=yes",
+            *self._isolation_properties(with_venv=True),
             f"--working-directory={self._workdir}",
             f"--property=Environment=PYTHONPATH={self._workdir}",
         ]

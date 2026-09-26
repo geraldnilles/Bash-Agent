@@ -14,6 +14,11 @@ prove the isolation guarantees AGENTS.md promises:
   * CWD visibility: project files are listable from inside the sandbox
   * BASH_AGENT_UUID is visible inside the sandbox via env forwarding
   * timeout case: `sleep 999` with timeout=2 -> exit 124 + banner
+  * ORCHESTRATOR isolation: commands run (exit 0) at all, the scratch
+    dir is writable, python works, and the project tree is hidden.
+    (Regression for the ProtectHome=yes bug: that masked .bash_agent_tmp
+    itself, so EVERY orchestrator command returned exit 200 with empty
+    output, and the orchestrator could never read back a file.)
 
 Hazard handled here (verified empirically): when subprocess.run times out it
 SIGKILLs the systemd-run CLIENT process. The transient service itself does
@@ -140,3 +145,58 @@ class TestRealSandboxSmoke(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(systemd_user_bus_available(), "systemd-run user session unavailable")
+class TestOrchestratorSandboxIsolation(unittest.TestCase):
+    """T-30b — real round-trips for is_orchestrator=True.
+
+    Regression guard for the ``ProtectHome=yes`` bug: the orchestrator's
+    working directory (``.bash_agent_tmp/``) lives INSIDE the home tree, so
+    ``ProtectHome=yes`` masked it and every orchestrator command died with
+    ``status=200/CHDIR`` before running — returning exit 200 and empty output.
+    The fix masks ``/home`` with a tmpfs and binds ``.bash_agent_tmp/`` back in.
+    """
+
+    def setUp(self):
+        self._chdir_cm = chdir_repo_tmp()
+        self.tmpdir = self._chdir_cm.__enter__()
+        self.sb = Sandbox("unused-scratchpad-path", uuid="orch-uuid", is_orchestrator=True)
+
+    def tearDown(self):
+        self._chdir_cm.__exit__(None, None, None)
+
+    def test_orchestrator_commands_actually_run(self):
+        # The headline regression: this used to return (200, "").
+        code, out = self.sb.execute("echo orchestrator-alive")
+        self.assertEqual(code, 0, msg=f"orchestrator sandbox failed: {out!r}")
+        self.assertIn("orchestrator-alive", out)
+
+    def test_orchestrator_can_write_and_read_scratch_dir(self):
+        code, out = self.sb.execute(
+            "printf 'hello-from-orch' > hello.txt && cat hello.txt && rm -f hello.txt"
+        )
+        self.assertEqual(code, 0, msg=f"scratch write/read failed: {out!r}")
+        self.assertIn("hello-from-orch", out)
+
+    def test_orchestrator_python_round_trip(self):
+        code, out = self.sb.execute_python("print('orch-py-ok')")
+        self.assertEqual(code, 0, msg=f"orchestrator python failed: {out!r}")
+        self.assertIn("orch-py-ok", out)
+
+    def test_orchestrator_cannot_see_project_tree(self):
+        repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+        sentinel = os.path.join(repo_root, "orch_hidden_probe.txt")
+        with open(sentinel, "w") as f:
+            f.write("project\n")
+        try:
+            code, out = self.sb.execute(
+                f"if [ -e {sentinel} ]; then echo VISIBLE; else echo HIDDEN; fi"
+            )
+            self.assertEqual(code, 0)
+            self.assertIn("HIDDEN", out)
+        finally:
+            if os.path.exists(sentinel):
+                os.remove(sentinel)

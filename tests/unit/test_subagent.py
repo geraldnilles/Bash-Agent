@@ -10,10 +10,12 @@ T-43f Orchestrator skips warmup exchanges (P1)
 
 These tests pin the multi-agent contract:
 
-  * When is_orchestrator=True the Sandbox enforces ProtectHome=yes, anchors
-    its working directory inside .bash_agent_tmp/, restricts approved write
-    paths to .bash_agent_tmp/, and rejects request-write() with a delegation
-    hint.
+  * When is_orchestrator=True the Sandbox hides the home tree via
+    TemporaryFileSystem=/home (NOT ProtectHome=yes, which would mask the
+    orchestrator's own working directory and make every command fail with
+    exit 200/CHDIR), binds .bash_agent_tmp/ back in read-write, anchors its
+    working directory inside .bash_agent_tmp/, restricts approved write paths
+    to .bash_agent_tmp/, and rejects request-write() with a delegation hint.
   * A subagent calling `exit` raises SubagentExit (caught by the orchestrator)
     instead of terminating the whole process via sys.exit.
   * The orchestrator's `subagent` command runs a nested Agent and returns the
@@ -84,8 +86,16 @@ class SandboxIsolationTests(unittest.TestCase):
         sb = Sandbox("sp", uuid="u", is_orchestrator=True)
         cmd = self._run_execute(sb)
         props = self._props(cmd)
-        self.assertIn("--property=ProtectHome=yes", props)
+        # The home tree is hidden with a tmpfs -- NOT ProtectHome=yes, which
+        # would also mask .bash_agent_tmp (nested under /home) and make every
+        # command die with status=200/CHDIR before running.
+        self.assertIn("--property=TemporaryFileSystem=/home", props)
+        self.assertNotIn("--property=ProtectHome=yes", props)
         self.assertNotIn("--property=ProtectHome=read-only", props)
+        # The one directory the orchestrator may use is bound back in writable.
+        self.assertIn(
+            f"--property=BindPaths={os.path.abspath('.bash_agent_tmp')}", props
+        )
         self.assertIn(
             f"--working-directory={os.path.abspath('.bash_agent_tmp')}", cmd
         )

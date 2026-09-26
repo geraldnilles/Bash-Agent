@@ -150,8 +150,8 @@ You approve or deny interactively.
 
 By default the agent runs as a **two-tier hierarchy**. The top-level agent is an
 **Orchestrator**: a high-level planner that runs in a strict sandbox
-(`ProtectHome=yes`, working directory locked to `.bash_agent_tmp/`, `request-write`
-disabled) and therefore cannot touch your project code directly. It delegates
+(home/project tree hidden, working directory locked to `.bash_agent_tmp/`,
+`request-write` disabled) and therefore cannot touch your project code directly. It delegates
 every tactical task — reading files, editing code, running tests — to focused
 **Subagents** via the built-in `subagent` command:
 

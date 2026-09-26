@@ -1189,8 +1189,8 @@ class Agent:
         resumed sessions (see self.resumed_session).
 
         Skipped entirely for ORCHESTRATORS: the warmup scripts list the project
-        root, which is unreadable under the orchestrator's ProtectHome=yes
-        sandbox, so running them would only produce confusing errors.
+        root, which is hidden under the orchestrator's sandbox, so running
+        them would only produce confusing errors.
         """
         if self.is_orchestrator:
             return

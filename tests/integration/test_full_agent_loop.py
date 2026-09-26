@@ -384,7 +384,7 @@ class TestOrchestratorSubagentLoop(FullLoopCase):
     whose exit unwinds back into the orchestrator.
 
     Proves the whole hierarchy offline:
-      * the orchestrator (ProtectHome=yes) runs NO warmup and delegates via
+      * the orchestrator (home tree hidden) runs NO warmup and delegates via
         `subagent "<task>"`,
       * the spawned subagent constructs with is_subagent=True and executes a
         real systemd-run bash command (a file appears on disk),

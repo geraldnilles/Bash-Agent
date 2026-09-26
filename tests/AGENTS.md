@@ -73,8 +73,10 @@ a narrow seam (`llm._CLIENT_CACHE`, `urllib.request.urlopen`,
   **Exception:** a subagent's `exit` raises `bash_agent.agent.SubagentExit`
   instead — assert with `assertRaises(SubagentExit)`.
 - **Role-aware construction.** `Agent()` now defaults to `is_orchestrator=True`.
-  Orchestrators skip the warmup exchanges and run in a `ProtectHome=yes`
-  sandbox anchored at `.bash_agent_tmp/`, so any test that expects the legacy
+  Orchestrators skip the warmup exchanges and run in a home-tree-hiding
+  sandbox (`TemporaryFileSystem=/home` + `BindPaths=.bash_agent_tmp`, NOT
+  `ProtectHome=yes` which would mask the workdir and fail with `200/CHDIR`)
+  anchored at `.bash_agent_tmp/`, so any test that expects the legacy
   full loop with repo-root access MUST pass `is_orchestrator=False`. Subagent
   tests construct nested agents with `is_subagent=True` (and a faked child)
   so no real LLM call happens.

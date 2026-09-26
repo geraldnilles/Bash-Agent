@@ -80,7 +80,7 @@ This is the heart of the project. The `Agent` class:
 |--------|---------|
 | `__init__()` | Sets up UUID, model, sandbox, context, budget, and **role flags** (`is_orchestrator=True`, `is_subagent=False`, `subagent_model=None`). The role flags drive sandbox isolation (`Sandbox(is_orchestrator=...)`), prompt selection (`get_orchestrator_system_prompt` vs `get_system_prompt(..., is_subagent=...)`), and lifecycle. Model precedence: explicit `model` arg > (subagent) `subagent_model`/`config.json subagent_model`/`DEFAULT_SUBAGENT_MODEL` > (orchestrator) `config.json orchestrator_model` > `config.json model` > `OPENROUTER_MODEL` env > (audio) `DEFAULT_AUDIO_MODEL` > (orchestrator) `DEFAULT_ORCHESTRATOR_MODEL` > `DEFAULT_MODEL`. Subagents persist to their OWN `ContextManager` history file (`history_subagent_<uuid8>.json`). Handles `--resume`. Resolves the model's context ceiling — by default a quarter of the model's `context_length`, overridable via the `token_budget`/`--token-budget` arg — and passes it to `ContextManager`, threading the model slug as well so content accounting uses that model's tokenizer (see `_fetch_model_context_limit` / `token_budget.py`). |
 | `run(initial_task)` | The main loop. Sends prompts, parses responses, executes commands. |
-| `_run_warmup_exchanges()` | Protocol warmup: on FRESH sessions only (`--resume` skips it) **and only for non-orchestrators** (an orchestrator under `ProtectHome=yes` cannot `ls` the repo, so warmup early-returns when `is_orchestrator`). Pre-fills history with two scripted assistant turns from the `WARMUP_TURNS` constant (a PYTHON version check plus a listing of all installed 3rd-party PyPI packages, then a BASH `ls -la`). Each template is parsed via the production `_extract_blocks()` (raises if it ever fails to parse) and executed via `_execute_script()`, so the injected transcript is byte-for-byte identical in format to a live exchange. Called from `run()` right after the initial task is committed. |
+| `_run_warmup_exchanges()` | Protocol warmup: on FRESH sessions only (`--resume` skips it) **and only for non-orchestrators** (an orchestrator's sandbox hides the repo, so warmup early-returns when `is_orchestrator`). Pre-fills history with two scripted assistant turns from the `WARMUP_TURNS` constant (a PYTHON version check plus a listing of all installed 3rd-party PyPI packages, then a BASH `ls -la`). Each template is parsed via the production `_extract_blocks()` (raises if it ever fails to parse) and executed via `_execute_script()`, so the injected transcript is byte-for-byte identical in format to a live exchange. Called from `run()` right after the initial task is committed. |
 | `parse_and_execute(agent_msg)` | Coordination pipeline: extracts blocks via `_extract_blocks()`, dispatches each to `_handle_special_command()` or `_execute_script()`, enforces `MAX_CODE_BLOCKS` limit, and commits results via `_commit_execution_feedback()`. Returns `(executed: bool, feedback: str)`. |
 | `_extract_blocks(response_text)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Returns `(blocks, None)` on success, or `([], warning_message)` when no blocks or malformed UUID fences are found. |
 | `_handle_special_command(cmd_type, script)` | Intercepts built-in agent commands (`subagent`, `exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Returns `(handled: bool, formatted_output: str)`. Commands that terminate the session (`exit`, `copy-to-clipboard`) call `sys.exit()` in-process — EXCEPT for a subagent, where `exit` raises `SubagentExit` instead (so the orchestrator regains control). Dispatches `subagent`/`subagent ...` to `_handle_subagent_command()`. |
@@ -246,17 +246,18 @@ Wraps `systemd-run` for isolated command execution.
 |---|---|---|
 | Working directory | `os.path.abspath(".")` (project root) | `os.path.abspath(".bash_agent_tmp")` |
 | `approved_write_paths` | `[project root]` | `[.bash_agent_tmp]` |
-| `ProtectHome=` | `read-only` | **`yes`** (home/project tree unreadable) |
+| Home/project isolation | `ProtectHome=read-only` | **`TemporaryFileSystem=/home` + `BindPaths=.bash_agent_tmp`** (home/project tree hidden; workdir bound back in) |
 | `request_write()` | normal interactive prompt | always rejected: `(False, "Orchestrator agent cannot request write access outside .bash_agent_tmp. Delegate file changes to a subagent.")` |
 
-The sandbox stores the working dir as `self._workdir` and computes `protect_home_val` dynamically, so both `execute()` and `execute_python()` build the `--working-directory=` and `--property=ProtectHome=` flags from the role.
+The sandbox stores the working dir as `self._workdir`; both `execute()` and `execute_python()` build their `--working-directory=` and isolation flags from the role via `Sandbox._isolation_properties()`. **Orchestrators do NOT use `ProtectHome=yes`** — that masks ALL of `/home`, including `.bash_agent_tmp/` (which lives inside the home tree), so `--working-directory=` would fail with `status=200/CHDIR` before the script runs and every command would silently return empty output. Instead the orchestrator mounts `TemporaryFileSystem=/home` (hiding the user's home / project tree) and then binds `.bash_agent_tmp/` back in via `BindPaths=`. `execute_python()` additionally binds the project `venv/` back in read-only (`BindReadOnlyPaths=`), since the interpreter also lives under the masked tree.
 
 **`execute(script_content: str, timeout: int = None) -> (exit_code, output)`**: Writes the script to a temp file in `.bash_agent_tmp/`, then runs:
 ```
 systemd-run --user --quiet --wait --collect --pipe \
   --property=ProtectSystem=strict \
-  --property=ProtectHome={read-only | yes} \
   --property=PrivateTmp=yes \
+  {isolation: --property=ProtectHome=read-only   (subagent/direct)
+            | --property=TemporaryFileSystem=/home + --property=BindPaths={workdir}   (orchestrator)} \
   --working-directory={self._workdir} \
   --property=ReadWritePaths={approved_paths} \
   /bin/bash {script_path}
@@ -315,7 +316,7 @@ Generates the massive system prompt that defines the agent's behavior. Key funct
 
 **`get_orchestrator_system_prompt(uuid, scratchpad_path, subagent_model=None)`**:
 - Returns the dedicated prompt for a top-level **Orchestrator** (`Agent(is_orchestrator=True)`).
-- Defines the persona (technical lead / project manager that delegates rather than edits), the `ProtectHome=yes` / `.bash_agent_tmp`-only environment constraints, the `request-write` lockout, and the `subagent "<task>"` built-in (with a concrete example).
+- Defines the persona (technical lead / project manager that delegates rather than edits), the home/project-tree-hidden / `.bash_agent_tmp`-only environment constraints, the `request-write` lockout, and the `subagent "<task>"` built-in (with a concrete example).
 - Documents the orchestrator workflow: PLAN (persist the roadmap in `SCRATCHPAD.md`) → DISPATCH one `subagent` block per turn → REVIEW the last-2-messages summary → ITERATE → FINISH with `exit`.
 - Optionally states the subagent model via `subagent_model`.
 - Fence markers are assembled procedurally from `_S`/`_E`/`_U`/`_fence` helpers so no literal UUID-fenced sample is embedded in the source (keeps the protocol unambiguous).
@@ -419,7 +420,8 @@ task via the `subagent` built-in.
                           │
                           ▼
         Orchestrator  (is_orchestrator=True, expensive model)
-          Sandbox: ProtectHome=yes, workdir=.bash_agent_tmp, writes locked to .bash_agent_tmp
+          Sandbox: home tree hidden (TemporaryFileSystem=/home) + .bash_agent_tmp bound in,
+                   workdir=.bash_agent_tmp, writes locked to .bash_agent_tmp
           Prompt:  get_orchestrator_system_prompt()   (NO warmup exchanges)
           Plans in .bash_agent_tmp/SCRATCHPAD.md
                           │  emits:  subagent "<task>"
@@ -440,7 +442,7 @@ task via the `subagent` built-in.
 
 | Constructor arg | Default | Effect |
 |---|---|---|
-| `is_orchestrator` | `True` | Selects `ProtectHome=yes`, `.bash_agent_tmp` workdir, locked writes, orchestrator prompt, and skips warmup. `Agent(is_orchestrator=False)` restores the legacy single agent. |
+| `is_orchestrator` | `True` | Selects home-tree-hiding isolation (`TemporaryFileSystem=/home` + `BindPaths=.bash_agent_tmp`), `.bash_agent_tmp` workdir, locked writes, orchestrator prompt, and skips warmup. `Agent(is_orchestrator=False)` restores the legacy single agent. |
 | `is_subagent` | `False` | Marks a nested worker. Its `exit` raises `SubagentExit` (not `sys.exit`), it uses the subagent prompt section, and it persists to its own history file. |
 | `subagent_model` | `None` | Explicit subagent slug (CLI `--subagent-model`) → else `config.json subagent_model` → else `DEFAULT_SUBAGENT_MODEL`. |
 
@@ -472,6 +474,7 @@ overrides the orchestrator's model (alias of `--model` in orchestrator mode);
 - Orchestrators **skip warmup** (their sandbox cannot read the repo).
 - Subagents **never** `sys.exit`; they raise `SubagentExit`.
 - Subagent history is isolated in `history_subagent_<uuid8>.json`.
+- Orchestrator isolation uses `TemporaryFileSystem=/home` **plus** `BindPaths=.bash_agent_tmp` (`+ BindReadOnlyPaths` of the venv for `execute_python`) — **never `ProtectHome=yes`**. `ProtectHome=yes` masks the orchestrator's own working directory and breaks every command (`status=200/CHDIR`, empty output).
 
 ---
 
@@ -523,7 +526,7 @@ Agent.run() loop
 - The UUID is persisted in `history.json` for session resumption
 
 ### 2. File Paths
-- The agent's working directory is the project root (where `main.py` was invoked) **for subagents / `--direct` mode**. An **orchestrator**'s working directory and only writable path are `.bash_agent_tmp/` (its `ProtectHome=yes` hides the repo entirely).
+- The agent's working directory is the project root (where `main.py` was invoked) **for subagents / `--direct` mode**. An **orchestrator**'s working directory and only writable path are `.bash_agent_tmp/` (a `TemporaryFileSystem=/home` masks the repo entirely, with `.bash_agent_tmp/` bound back in).
 - `.bash_agent_tmp/` is the ONLY writable scratch space (besides the project root)
 - Subagent histories use `history_subagent_<uuid8>.json` so a nested run never overwrites the parent `history.json`
 - Temp files for sandbox execution MUST be created inside `.bash_agent_tmp/` (not host `/tmp`) because the sandbox's `PrivateTmp=yes` gives it an isolated `/tmp`
@@ -541,7 +544,7 @@ Agent.run() loop
 
 ### 5. Sandbox Properties
 - `ProtectSystem=strict`: /usr, /boot, /etc are read-only
-- `ProtectHome=read-only` (subagents / `--direct`) or **`ProtectHome=yes`** (orchestrators): /home is read-only, or fully hidden for orchestrators
+- `ProtectHome=read-only` for subagents / `--direct` (home read-only, project visible). Orchestrators instead use **`TemporaryFileSystem=/home` + `BindPaths=.bash_agent_tmp`** (home/project hidden, the scratch dir bound back in). **Never use `ProtectHome=yes` for orchestrators**: it also masks `.bash_agent_tmp`, causing every `systemd-run --working-directory=` call to die with `status=200/CHDIR` and return empty output.
 - `PrivateTmp=yes`: isolated /tmp and /var/tmp
 - `--working-directory=` is the project root for subagents and `.bash_agent_tmp/` for orchestrators
 - `ReadWritePaths`: dynamically expanded via `request-write` — which orchestrators are forbidden from using
