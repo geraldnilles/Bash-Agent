@@ -248,10 +248,10 @@ Wraps `bwrap` (bubblewrap) for isolated command execution.
 |---|---|---|
 | Working directory | `os.path.abspath(".")` (project root) | `os.path.abspath(".bash_agent_tmp")` |
 | `approved_write_paths` | `[project root]` | `[.bash_agent_tmp]` |
-| Home/project isolation | home read-only (system `--ro-bind / /`; project dir bound rw) | **`--tmpfs /home` + `--bind .bash_agent_tmp`** (home/project tree masked; scratch bound back in) |
+| Home/project isolation | home read-only (system `--ro-bind / /`; project dir bound rw) | **`--tmpfs /home` + `--bind .bash_agent_tmp`**, **plus read-only `--ro-bind` of `venv/` and `bash_agent/`** (home/project tree masked; scratch bound back in rw; venv + package source re-exposed ro so CLI tools like `vision` and package imports work) |
 | `request_write()` | normal interactive prompt | always rejected: `(False, "Orchestrator agent cannot request write access outside .bash_agent_tmp. Delegate file changes to a subagent.")` |
 
-The sandbox stores the working dir as `self._workdir`; both `execute()` and `execute_python()` build their `--chdir` and isolation flags from the role via `Sandbox._bwrap_common()` / `Sandbox._role_args()`. **Orchestrators mask `/home` with `--tmpfs /home`** — but `.bash_agent_tmp/` itself lives inside the home tree, so that scratch directory is then bound back in read/write via `--bind`. `execute_python()` additionally binds the project `venv/` back in read-only (`--ro-bind`), since the interpreter also lives under the masked tree.
+The sandbox stores the working dir as `self._workdir`; both `execute()` and `execute_python()` build their `--chdir` and isolation flags from the role via `Sandbox._bwrap_common()` / `Sandbox._role_args()`. **Orchestrators mask `/home` with `--tmpfs /home`** — but `.bash_agent_tmp/` itself lives inside the home tree, so that scratch directory is then bound back in read/write via `--bind`. **Both** `execute()` (BASH) and `execute_python()` additionally bind the project `venv/` **and** the `bash_agent/` package source back in read-only (`--ro-bind`) — the venv so CLI tools such as `vision` stay on `PATH`, and the package source because the editable install's import finder resolves `bash_agent` to `<cwd>/bash_agent`. These are the only read-only exceptions to the `/home` mask, and they never make anything outside `.bash_agent_tmp/` writable.
 
 **`execute(script_content: str, timeout: int = None) -> (exit_code, output)`**: Writes the script to a temp file in `.bash_agent_tmp/`, then runs:
 ```
@@ -259,6 +259,7 @@ bwrap --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --tmpfs /var/tmp \
   --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try --die-with-parent \
   {isolation: --bind {approved_paths}                      (subagent/direct)
             | --tmpfs /home + --bind .bash_agent_tmp       (orchestrator)} \
+  {+ --ro-bind venv/ + --ro-bind bash_agent/              (orchestrator)} \
   --setenv PATH {host_path} [--setenv OPENROUTER_API_KEY ...] \
   --chdir {self._workdir} /bin/bash {script_path}
 ```
@@ -314,9 +315,10 @@ Generates the massive system prompt that defines the agent's behavior. Key funct
 - Conditionally includes `role_text` if a `ROLE.md` file exists
 - Includes rules for: execution blocks, output metadata, special commands, file editing, semantic search, vision, transcription, PDF processing, scratchpad usage, workflow & error recovery
 
-**`get_orchestrator_system_prompt(uuid, scratchpad_path, subagent_model=None)`**:
+**`get_orchestrator_system_prompt(uuid, scratchpad_path, subagent_model=None, multimodal_capabilities=None)`**:
 - Returns the dedicated prompt for a top-level **Orchestrator** (`Agent(is_orchestrator=True)`).
 - Defines the persona (technical lead / project manager that delegates rather than edits), the home/project-tree-hidden / `.bash_agent_tmp`-only environment constraints, the `request-write` lockout, and the `subagent "<task>"` built-in (with a concrete example).
+- Advertises `vision` via a `## VISION CAPABILITIES` section (shares `_build_vision_section()` with `get_system_prompt()`, so it picks native-attach vs text-only wording from `multimodal_capabilities`).
 - Documents the orchestrator workflow: PLAN (persist the roadmap in `SCRATCHPAD.md`) → DISPATCH one `subagent` block per turn → REVIEW the last-2-messages summary → ITERATE → FINISH with `exit`.
 - Optionally states the subagent model via `subagent_model`.
 - Fence markers are assembled procedurally from `_S`/`_E`/`_U`/`_fence` helpers so no literal UUID-fenced sample is embedded in the source (keeps the protocol unambiguous).
@@ -421,6 +423,7 @@ task via the `subagent` built-in.
                           ▼
         Orchestrator  (is_orchestrator=True, expensive model)
           Sandbox: home tree masked (--tmpfs /home) + .bash_agent_tmp bound in,
+                   + ro-bind venv/ and bash_agent/ (vision CLI + imports),
                    workdir=.bash_agent_tmp, writes locked to .bash_agent_tmp
           Prompt:  get_orchestrator_system_prompt()   (NO warmup exchanges)
           Plans in .bash_agent_tmp/SCRATCHPAD.md
@@ -477,7 +480,7 @@ overrides the orchestrator's model (alias of `--model` in orchestrator mode);
 - Orchestrators **skip warmup** (their sandbox cannot read the repo).
 - Subagents **never** `sys.exit`; they raise `SubagentExit`.
 - Subagent history is isolated in `history_subagent_<uuid8>.json`.
-- Orchestrator isolation masks `/home` with `--tmpfs /home` **plus** `--bind .bash_agent_tmp` (`+ --ro-bind` of the venv for `execute_python`) — the scratch dir MUST be bound back in, because masking `/home` wholesale also hides the orchestrator's own working directory and would break every command.
+- Orchestrator isolation masks `/home` with `--tmpfs /home` **plus** `--bind .bash_agent_tmp`, **plus read-only `--ro-bind` of `venv/` and `bash_agent/` for BOTH `execute()` and `execute_python()`** — the scratch dir MUST be bound back in, because masking `/home` wholesale also hides the orchestrator's own working directory and would break every command; the venv/package ro-binds keep the `vision` CLI and package imports working without weakening isolation.
 
 ---
 
@@ -551,8 +554,12 @@ Agent.run() loop
   (from the read-only root bind) and only the project tree is bound back in
   read/write via `--bind`. Orchestrators instead mask `/home` with
   **`--tmpfs /home` + `--bind .bash_agent_tmp`** (home/project hidden, the
-  scratch dir bound back in). The scratch dir MUST be bound back in, because
-  masking `/home` also hides `.bash_agent_tmp` and would break every command.
+  scratch dir bound back in), **plus read-only `--ro-bind` of `venv/` and
+  `bash_agent/`** (for BOTH `execute()` and `execute_python()`) so the `vision`
+  CLI and package imports still work. The scratch dir MUST be bound back in,
+  because masking `/home` also hides `.bash_agent_tmp` and would break every
+  command. All added binds are read-only: nothing outside `.bash_agent_tmp/`
+  becomes writable.
 - `--tmpfs /tmp` + `--tmpfs /var/tmp`: throwaway, isolated temp filesystems
 - `--chdir` is the project root for subagents and `.bash_agent_tmp/` for orchestrators
 - writable `--bind` paths: dynamically expanded via `request-write` — which orchestrators are forbidden from using

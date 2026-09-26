@@ -208,5 +208,51 @@ class TestOrchestratorSandboxIsolation(unittest.TestCase):
                 os.remove(sentinel)
 
 
+@unittest.skipUnless(bwrap_available(), "bwrap unavailable")
+class TestOrchestratorVisionAvailability(unittest.TestCase):
+    """T-30c — the `vision` CLI and package source are reachable read-only.
+
+    The orchestrator masks /home with a tmpfs, but the project ``venv/`` and
+    ``bash_agent/`` package source are re-bound READ-ONLY for BOTH
+    ``execute()`` (bash) and ``execute_python()``. These checks must run from
+    the REPO ROOT (where ``./venv`` exists), unlike the scratch-dir-based T-30b
+    tests, so we chdir there for the duration and restore afterwards.
+    """
+
+    def setUp(self):
+        self._orig = os.getcwd()
+        self.repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+        os.chdir(self.repo_root)
+        self.sb = Sandbox("unused", uuid="orch-vision", is_orchestrator=True)
+
+    def tearDown(self):
+        os.chdir(self._orig)
+
+    def test_vision_cli_on_path_for_bash(self):
+        code, out = self.sb.execute("command -v vision || echo NO_VISION")
+        self.assertEqual(code, 0, msg=f"bash failed: {out!r}")
+        self.assertIn("vision", out)
+        self.assertNotIn("NO_VISION", out)
+
+    def test_bash_agent_package_importable_for_bash(self):
+        code, out = self.sb.execute(
+            "python3 -c \'import bash_agent.sandbox; print(\"PKG_IMPORT_OK\")\'"
+        )
+        self.assertEqual(code, 0, msg=f"import failed: {out!r}")
+        self.assertIn("PKG_IMPORT_OK", out)
+
+    def test_venv_and_package_binds_are_read_only(self):
+        # Writes into the re-bound paths must fail: isolation is preserved.
+        code, out = self.sb.execute(
+            "touch ./bash_agent/__probe__.txt 2>&1 || echo PKG_RO_OK; "
+            "touch ./venv/__probe__.txt 2>&1 || echo VENV_RO_OK"
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("PKG_RO_OK", out)
+        self.assertIn("VENV_RO_OK", out)
+
+
 if __name__ == "__main__":
     unittest.main()

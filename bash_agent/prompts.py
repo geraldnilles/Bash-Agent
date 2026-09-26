@@ -9,14 +9,17 @@ OBJECTIVE: Write a detailed step-by-step plan instructing a junior developer exa
 ## CHANGE REQUEST
 """
 
-def get_system_prompt(uuid: str, cwd: str, scratchpad_path: str, role_text: str = None, multimodal_capabilities: list = None, is_subagent: bool = False) -> str:
-    if not role_text:
-        role_text = "You are an expert, autonomous Linux Scripting Agent."
-    # Conditional vision section: native image attach mode if the model
-    # supports image input, otherwise text-only fallback.
+def _build_vision_section(multimodal_capabilities: list = None) -> str:
+    """Return the VISION CAPABILITIES section text.
+
+    Chooses native image-attach wording when the model supports image input,
+    otherwise the text-only LLM fallback wording.  Shared by both the standard
+    ``get_system_prompt()`` and ``get_orchestrator_system_prompt()`` so the
+    subagent and orchestrator advertise ``vision`` identically.
+    """
     has_image_capability = "image" in (multimodal_capabilities or [])
     if has_image_capability:
-        vision_section = """## VISION CAPABILITIES
+        return """## VISION CAPABILITIES
 ================================================================
 
 Use the `vision` command to attach an image (*.png or *.jpg, under 2MP) to the conversation.
@@ -24,8 +27,7 @@ Use the `vision` command to attach an image (*.png or *.jpg, under 2MP) to the c
 - You can execute `vision` as part of standard bash scripts, loops, or pipelines (e.g., convert PDF to image with `pdftoppm` or crop with `imagemagick`, then run `vision image.png`).
 - Attached images will automatically be added to your multimodal context for the next turn.
 """
-    else:
-        vision_section = """## VISION CAPABILITIES
+    return """## VISION CAPABILITIES
 ================================================================
 
 You have access to a vision tool that allows you to process and describe images. The `vision` script is available in your PATH.
@@ -34,6 +36,15 @@ You have access to a vision tool that allows you to process and describe images.
 - Input image should be `*.png` or `*.jpg` format"
 - Input image should be less than 2MP
 """
+
+
+def get_system_prompt(uuid: str, cwd: str, scratchpad_path: str, role_text: str = None, multimodal_capabilities: list = None, is_subagent: bool = False) -> str:
+    if not role_text:
+        role_text = "You are an expert, autonomous Linux Scripting Agent."
+    # Conditional vision section: native image attach mode if the model
+    # supports image input, otherwise text-only fallback.  Shared helper so
+    # the orchestrator prompt stays in parity with the standard prompt.
+    vision_section = _build_vision_section(multimodal_capabilities)
 
     # Conditional transcribe section: native audio attach mode if the model
     # supports audio input, otherwise text-only fallback.
@@ -249,7 +260,7 @@ The host machine has poppler-utils installed.  You can use this to directly extr
 
 
 
-def get_orchestrator_system_prompt(uuid: str, scratchpad_path: str, subagent_model: str = None) -> str:
+def get_orchestrator_system_prompt(uuid: str, scratchpad_path: str, subagent_model: str = None, multimodal_capabilities: list = None) -> str:
     """Build the system prompt for the top-level ORCHESTRATOR agent.
 
     The orchestrator is a high-level technical lead / project manager. It runs
@@ -280,6 +291,10 @@ def get_orchestrator_system_prompt(uuid: str, scratchpad_path: str, subagent_mod
         "BASH_COMMAND",
         'subagent "Find all instances of deprecated API calls in src/ and report back"',
     )
+    # Mirror the standard prompt's VISION advertising (native attach vs
+    # text-only fallback) so the orchestrator can also review images placed
+    # in .bash_agent_tmp/.
+    vision_section = _build_vision_section(multimodal_capabilities)
     return f"""You are an expert, autonomous ORCHESTRATOR agent.
 
 You are the top-level ORCHESTRATOR: a high-level technical lead and project
@@ -313,7 +328,9 @@ You run inside a STRICT bubblewrap sandbox (the user's home/project tree is hidd
 a working directory of `.bash_agent_tmp/`. This means:
 
 - You CANNOT read or modify the project source code, nor any file outside
-  `.bash_agent_tmp/`.
+  `.bash_agent_tmp/` -- with one deliberate READ-ONLY exception: the project
+  `venv/` and the `bash_agent/` package source are re-exposed so that CLI
+  tools (e.g. `vision`) and package imports work.
 - Your scratchpad and any planning/report files live in `.bash_agent_tmp/`.
 - `request-write` is DISABLED for you. If a task requires editing project
   files, you MUST delegate it to a subagent.
@@ -323,6 +340,7 @@ a working directory of `.bash_agent_tmp/`. This means:
 Do not waste turns trying to inspect or edit the project yourself. Plan here;
 delegate everything else.
 
+{vision_section}
 ================================================================
 ## THE `subagent` COMMAND
 ================================================================

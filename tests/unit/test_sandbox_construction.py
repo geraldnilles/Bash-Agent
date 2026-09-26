@@ -271,6 +271,18 @@ class TestBashCommandAssembly(SandboxCase):
         # Orchestrator workdir is the scratch dir.
         self.assertTrue(self._has_seq(cmd, ["--chdir", scratch]))
 
+    def test_orchestrator_bash_gets_venv_and_package_ro_binds(self):
+        """The venv and package are ro-bound for BASH (not just Python)."""
+        sb = Sandbox("sp", uuid="u", is_orchestrator=True)
+        with mock.patch("bash_agent.sandbox.os.path.isdir", return_value=True):
+            calls, _, _ = self._run_execute(sb, "true")
+        cmd = calls[0]["cmd"]
+
+        venv_dir = os.path.join(os.path.abspath("."), "venv")
+        pkg_dir = os.path.join(os.path.abspath("."), "bash_agent")
+        self.assertTrue(self._has_seq(cmd, ["--ro-bind", venv_dir, venv_dir]))
+        self.assertTrue(self._has_seq(cmd, ["--ro-bind", pkg_dir, pkg_dir]))
+
     def test_run_kwargs_pin_timeout_and_merged_stderr(self):
         sb = Sandbox("sp", uuid="u", timeout=13)
         calls, _, _ = self._run_execute(sb)

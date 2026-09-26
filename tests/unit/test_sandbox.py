@@ -286,7 +286,8 @@ class TestExecuteBash(SandboxTestCase):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")
         self._setup_success_run("output")
 
-        sb.execute("echo hello")
+        with mock.patch("bash_agent.sandbox.os.path.isdir", return_value=True):
+            sb.execute("echo hello")
 
         cmd = self._cmd()
         # /home is masked with a tmpfs...
@@ -298,6 +299,14 @@ class TestExecuteBash(SandboxTestCase):
         )
         # workdir for the orchestrator is .bash_agent_tmp.
         self.assertEqual(cmd[-4:-2], ["--chdir", "/home/user/.bash_agent_tmp"])
+        # venv + package source are re-exposed READ-ONLY even for BASH, so
+        # CLI tools like `vision` and package imports keep working.
+        ro_binds = [cmd[i:i + 3] for i in range(len(cmd) - 2) if cmd[i] == "--ro-bind"]
+        # os.getcwd is patched to /home/user in this harness.
+        self.assertIn(["--ro-bind", "/home/user/venv", "/home/user/venv"], ro_binds)
+        self.assertIn(
+            ["--ro-bind", "/home/user/bash_agent", "/home/user/bash_agent"], ro_binds
+        )
 
     def test_returns_exit_code_and_stdout_on_success(self):
         self._setup_mkstemp("/home/user/.bash_agent_tmp/script.sh")

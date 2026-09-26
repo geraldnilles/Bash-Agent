@@ -7,6 +7,10 @@ container:
   approved write directory (the project tree for subagents, or
   ``.bash_agent_tmp/`` for the orchestrator) is then bind-mounted back in
   read/write with ``--bind``.
+* The orchestrator additionally gets the project ``venv/`` and the
+  ``bash_agent/`` package source re-bound READ-ONLY (see ``_role_args``), so
+  CLI tools such as ``vision`` work for both BASH and Python execution while
+  the rest of the home tree stays masked.
 * A private ``/proc``, ``/dev`` and throwaway ``/tmp`` / ``/var/tmp`` keep
   the workload from observing or mutating host state.
 * ``--unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try`` give
@@ -73,10 +77,18 @@ class Sandbox:
         Orchestrators must see and write ONLY ``.bash_agent_tmp/`` -- but that
         directory lives *inside* the home tree.  A tmpfs is mounted over
         ``/home`` (masking the user's home / project tree) and the working
-        directory is bind-mounted back in read/write.
-        ``execute_python()`` additionally needs the project venv interpreter,
-        which also lives under the masked tree, so it is bound back in
-        read-only via ``with_venv=True``.
+        directory is bind-mounted back in read/write.  Two additional
+        read-only exceptions to the masking are always punched back in, for
+        BOTH ``execute()`` and ``execute_python()``:
+
+        * the project ``venv/`` -- so CLI tools installed there (e.g.
+          ``vision``) remain on ``PATH``; and
+        * the ``bash_agent/`` package source -- required because the editable
+          install's finder maps ``bash_agent`` to ``<cwd>/bash_agent``.
+
+        Both binds are READ-ONLY; nothing outside ``.bash_agent_tmp/`` ever
+        becomes writable.  The ``with_venv`` argument is retained only for
+        backward compatibility and no longer gates venv exposure.
         """
         if not self.is_orchestrator:
             args = []
@@ -87,10 +99,18 @@ class Sandbox:
         args = ["--tmpfs", "/home"]
         for path in self.approved_write_paths:
             args += ["--bind", path, path]
-        if with_venv:
-            venv_dir = os.path.join(os.getcwd(), "venv")
-            if os.path.isdir(venv_dir):
-                args += ["--ro-bind", venv_dir, venv_dir]
+        # Re-expose the project venv (for CLI tools such as ``vision``) and
+        # the ``bash_agent`` package source (needed because the editable
+        # install's import finder resolves ``bash_agent`` -> <cwd>/bash_agent,
+        # which the /home tmpfs would otherwise hide).  Both are bound
+        # READ-ONLY and are required for BOTH execute() (bash) and
+        # execute_python(), so this is intentionally NOT gated on with_venv.
+        venv_dir = os.path.join(os.getcwd(), "venv")
+        if os.path.isdir(venv_dir):
+            args += ["--ro-bind", venv_dir, venv_dir]
+        pkg_dir = os.path.join(os.getcwd(), "bash_agent")
+        if os.path.isdir(pkg_dir):
+            args += ["--ro-bind", pkg_dir, pkg_dir]
         return args
 
     def _resolve_timeout(self, timeout=None):

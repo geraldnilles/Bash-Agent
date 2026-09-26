@@ -420,6 +420,7 @@ class Agent:
                     self.uuid,
                     self.context.scratchpad_path,
                     subagent_model=self.subagent_model or DEFAULT_SUBAGENT_MODEL,
+                    multimodal_capabilities=self.multimodal_capabilities,
                 )
             else:
                 system_prompt = get_system_prompt(

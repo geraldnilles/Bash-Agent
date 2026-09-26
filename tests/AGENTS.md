@@ -75,11 +75,14 @@ a narrow seam (`llm._CLIENT_CACHE`, `urllib.request.urlopen`,
 - **Role-aware construction.** `Agent()` now defaults to `is_orchestrator=True`.
   Orchestrators skip the warmup exchanges and run in a home-tree-masking
   sandbox (`--tmpfs /home` + `--bind .bash_agent_tmp`, so the scratch dir is
-  bound back in)
+  bound back in; **plus read-only `--ro-bind` of `venv/` and `bash_agent/`**
+  for BOTH `execute()` and `execute_python()`, so the `vision` CLI and
+  package imports work under the mask)
   anchored at `.bash_agent_tmp/`, so any test that expects the legacy
   full loop with repo-root access MUST pass `is_orchestrator=False`. Subagent
   tests construct nested agents with `is_subagent=True` (and a faked child)
-  so no real LLM call happens.
+  so no real LLM call happens. Isolation assertions should confirm every added
+  bind is `--ro-bind` (nothing outside `.bash_agent_tmp/` writable).
 - Sandbox integration tests need `bwrap`; guard with
   `skipUnless(shutil.which("bwrap"), ...)` and keep each invocation well
   under the 60s harness timeout.
