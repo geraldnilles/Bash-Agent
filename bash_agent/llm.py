@@ -89,6 +89,41 @@ def create_chat_completion(model, messages, max_tokens=None, extra_body=None, re
     return response
 
 
+def extract_message_content(choice) -> str:
+    """Return the textual content of a response *choice*, reasoning-safe.
+
+    OpenAI-compatible reasoning models (e.g. the audio/vision-capable models
+    used by the standalone ``transcribe``/``vision`` tools) can return
+    ``choices[0].message.content is None`` while the actual text lives in the
+    reasoning channel (``message.reasoning`` or
+    ``message.model_extra["reasoning"]``). Reading ``.content`` raw therefore
+    prints the literal string ``"None"``.
+
+    This mirrors the fallback logic the Agent applies to its own responses
+    (``Agent._extract_message_content``) without the Agent-specific
+    ``tool_calls``/``length``/debug handling. Raises ``ValueError`` instead of
+    silently returning an empty/None answer.
+    """
+    message = choice.message
+
+    content = getattr(message, "content", None)
+    if content is not None:
+        return content
+
+    reasoning = getattr(message, "reasoning", None)
+    if not reasoning and getattr(message, "model_extra", None):
+        reasoning = message.model_extra.get("reasoning")
+    if reasoning and isinstance(reasoning, str):
+        return reasoning.strip()
+
+    finish_reason = getattr(choice, "finish_reason", None)
+    raise ValueError(
+        "API returned None for message content "
+        f"(finish_reason={finish_reason!r}); the model produced no usable text "
+        "or the request was filtered."
+    )
+
+
 def create_embedding(model, input_texts):
     """Wraps and normalizes OpenAI-compatible embedding calls."""
     client = get_llm_client()

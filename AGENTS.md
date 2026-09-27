@@ -377,6 +377,7 @@ Standalone CLI (`vision` command). Sends images to an LLM for description/analys
 3. `agent.py:_execute_script()` scans all sandbox output for these fences, strips the base64 from the visible output/context, and collects them in `self._pending_multimodal_images`.
 4. If images were collected, the user message is built as a structured content array with `image_url` blocks; otherwise it stays plain text.
 5. When the env vars are absent (standalone CLI or text-only model), `vision.py` runs its original OpenRouter call to a hosted vision endpoint.
+   The call passes `max_tokens=config.DEFAULT_MAX_TOKENS` and `reasoning_effort=config.DEFAULT_REASONING_EFFORT`, and the reply is unwrapped via the shared reasoning-safe helper `llm.extract_message_content(choice)` (falls back to `message.reasoning` / `message.model_extra["reasoning"]` when `.content` is `None`, and raises `ValueError` rather than printing the literal `None`).
 
 **Key functions:**
 - `encode_image(path)` — opens image, saves as PNG, base64-encodes
@@ -394,7 +395,7 @@ Standalone CLI (`transcribe` command). Sends audio files to an LLM for transcrip
 3. When `BASH_AGENT_MULTIMODAL` includes `audio` and a session UUID is present, emits a fenced base64 MP3 payload (`---START_ATTACHED_AUDIO-{uuid}---`) on stdout instead of calling the API.
 4. `agent.py:_execute_script()` scans all sandbox output for these fences, strips the base64 from the visible output/context, and collects them in `self._pending_multimodal_audio`.
 5. If audio was collected, the user message is built as a structured content array with `input_audio` blocks; otherwise it stays plain text.
-6. When the env vars are absent (standalone CLI or text-only model), base64-encodes and sends to the LLM with a transcription prompt (or custom prompt via `-p`). The fallback model defaults to `config.DEFAULT_AUDIO_MODEL` (module constant `transcribe.MODEL_ID`, surfaced as the `-m/--model` default) — the same audio-capable slug selected by `bagent --audio`; an explicit `-m/--model` overrides it.
+6. When the env vars are absent (standalone CLI or text-only model), base64-encodes and sends to the LLM with a transcription prompt (or custom prompt via `-p`). The fallback model defaults to `config.DEFAULT_AUDIO_MODEL` (module constant `transcribe.MODEL_ID`, surfaced as the `-m/--model` default) — the same audio-capable slug selected by `bagent --audio`; an explicit `-m/--model` overrides it. The call passes `max_tokens=config.DEFAULT_MAX_TOKENS` and `reasoning_effort=config.DEFAULT_REASONING_EFFORT`, and the reply is unwrapped via the shared reasoning-safe helper `llm.extract_message_content(choice)` (the default `xiaomi/mimo-v2.6-flash` is a reasoning model, so `.content` may be `None` with the text in the reasoning channel; a truly empty reply raises `ValueError` instead of printing `None`).
 7. Optional: includes context files (`-c file1.md file2.md -- audio.opus`)
 
 ---

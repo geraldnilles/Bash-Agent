@@ -179,8 +179,14 @@ def main():
                     ],
                 }
             ],
+            max_tokens=config.DEFAULT_MAX_TOKENS,
+            reasoning_effort=config.DEFAULT_REASONING_EFFORT,
         )
-        print(response.choices[0].message.content)
+        if not response or not response.choices:
+            raise ValueError("Empty choices in response.")
+        # Reasoning-safe extraction: reasoning models may return content=None
+        # with the text in the reasoning channel (see llm.extract_message_content).
+        print(llm.extract_message_content(response.choices[0]))
     except Exception as e:
         print(f"Error during API request: {e}", file=sys.stderr)
         sys.exit(1)
