@@ -100,6 +100,17 @@ DEFAULT_REASONING_EFFORT = "low"
 # Max output tokens
 DEFAULT_MAX_TOKENS = 1024*8
 
+# Orchestrator reasoning effort. None means "defer to the model's own built-in
+# default reasoning level" (the LLM call omits reasoning.effort), rather than
+# forcing a fixed level. Only the top-level orchestrator uses this; subagents
+# and standalone/direct agents keep DEFAULT_REASONING_EFFORT.
+DEFAULT_ORCHESTRATOR_REASONING_EFFORT = None
+
+# Orchestrator max output tokens (2x) so it has room for longer reasoning and
+# larger plan documents. Only the top-level orchestrator uses this; subagents
+# and standalone/direct agents keep DEFAULT_MAX_TOKENS.
+DEFAULT_ORCHESTRATOR_MAX_TOKENS = 1024*16
+
 # OpenRouter Provider Whitelists
 # Maps model slugs to approved list of providers
 MODEL_PROVIDERS = {

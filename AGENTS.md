@@ -149,8 +149,10 @@ All tunable constants. **Modify this file to change defaults.**
 | `DEFAULT_ORCHESTRATOR_BUDGET` | 0.20 USD | `config.py` — session cost limit applied to a top-level orchestrator (`-o`) with no explicit `--budget`/`budget=` |
 | `DEFAULT_SUBAGENT_BUDGET_FRACTION` | 0.25 | `config.py` — default share of the OVERALL parent budget granted to a spawned subagent, unless overridden by `--subagent-budget` or a per-command `subagent --budget N` |
 | `MIN_SUBAGENT_BUDGET` | 0.01 USD | `config.py` — absolute floor for any derived subagent budget |
-| `DEFAULT_REASONING_EFFORT` | `"low"` | `agent.py` — reasoning effort for OpenRouter |
-| `DEFAULT_MAX_TOKENS` | 8192 | `agent.py` — max output tokens |
+| `DEFAULT_REASONING_EFFORT` | `"low"` | `agent.py` — reasoning effort for OpenRouter (subagents / standalone agents) |
+| `DEFAULT_ORCHESTRATOR_REASONING_EFFORT` | `None` | `config.py` / `agent.py` — top-level orchestrator reasoning effort; `None` means defer to the model's own built-in default (the LLM call omits `reasoning.effort`) |
+| `DEFAULT_MAX_TOKENS` | 8192 | `agent.py` — max output tokens (subagents / standalone agents) |
+| `DEFAULT_ORCHESTRATOR_MAX_TOKENS` | 16384 | `config.py` / `agent.py` — max output tokens for the top-level orchestrator (2x, for longer reasoning + plan documents) |
 | `MAX_PIXELS` | 2,000,000 | `vision.py` — max image resolution |
 | `MODEL_PROVIDERS` | `{}` | `llm.py` — provider whitelist per model |
 | `APP_URL` | `"https://github.com/geraldnilles/Bash-Agent"` | `llm.py`, `agent.py`, `search.py` — OpenRouter App Attribution (`HTTP-Referer`) |
@@ -596,7 +598,7 @@ Settings resolve independently per key: CLI flag > `.bash_agent_tmp/config.json`
 2. Optional persistent file `.bash_agent_tmp/config.json` (loaded by `config_file.py`; survives tmp-folder cleanup). Model key order: `orchestrator_model` (in orchestrator mode) > `model`. `subagent_model` selects the worker slug.
 3. `OPENROUTER_MODEL` environment variable (model key only)
 4. `--audio` flag — selects `DEFAULT_AUDIO_MODEL` when no model was chosen above (model key only)
-5. Hard-coded defaults in `config.py` (`DEFAULT_ORCHESTRATOR_MODEL` for orchestrators, else `DEFAULT_MODEL` / `DEFAULT_AUDIO_MODEL`, `DEFAULT_MAX_TOKENS`; reasoning defaults to off)
+5. Hard-coded defaults in `config.py` (`DEFAULT_ORCHESTRATOR_MODEL` for orchestrators, else `DEFAULT_MODEL` / `DEFAULT_AUDIO_MODEL`; bounded by `DEFAULT_ORCHESTRATOR_MAX_TOKENS` (16384) for the top-level orchestrator, else `DEFAULT_MAX_TOKENS` (8192). Reasoning: the top-level orchestrator defaults to the model's own built-in reasoning level (`DEFAULT_ORCHESTRATOR_REASONING_EFFORT = None`), while subagents/standalone agents default to `DEFAULT_REASONING_EFFORT` (`"low"`))
 
 Note: an explicit CLI `--reasoning-effort default` is a real choice that overrides the file; inside the file it means "defer to the model's built-in default".
 

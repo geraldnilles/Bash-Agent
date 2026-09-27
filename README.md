@@ -331,8 +331,8 @@ Absolute counts accept an optional `K`/`M` suffix (metric: `256K` = 256,000 toke
 | `--subagent-model <name>` | Model slug subagents run on (default: a fast/cheap model). |
 | `-o, --orchestrator` | Enable the opt-in orchestrator/subagent hierarchy mode. Default: standalone single-agent (direct) mode. |
 | `--audio` | Use the audio-enabled default model instead of the standard default (ignored when `--model`, `config.json`, or `OPENROUTER_MODEL` select a model) |
-| `--reasoning-effort <level>` | Set reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `default` |
-| `--max-tokens <n>` | Override max output tokens (default: 8192) |
+| `--reasoning-effort <level>` | Set reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `default`. Default: `default` (model's own built-in level) for the orchestrator, `low` otherwise. |
+| `--max-tokens <n>` | Override max output tokens (default: 16384 in orchestrator mode, 8192 otherwise) |
 | `--token-budget <spec>` | Context-window token budget: absolute tokens (e.g. `327680`, `256K`, `1.5M`) or a percentage of the model's context window ending in `%` (e.g. `25%`). Defaults to 25% of the model window. |
 | `-t, --timeout <n>` | Session default command timeout in seconds (default: 60). A single BASH/PYTHON block may override this up to 600s via a first-line `# timeout: N` directive. |
 | `-b, --budget <n>` | Session cost budget in USD (default: $0.20 in orchestrator mode, $0.10 standalone) |
@@ -388,8 +388,8 @@ For settings you want on every session in a given project, create `.bash_agent_t
 | Key | Values | Notes |
 |-----|--------|-------|
 | `model` | OpenRouter slug | Overrides `OPENROUTER_MODEL`; loses to `--model` |
-| `max_tokens` | Positive integer | Overrides the 8192 default; loses to `--max-tokens` |
-| `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `default` | `default` defers to the model's built-in behavior; loses to `--reasoning-effort` |
+| `max_tokens` | Positive integer | Overrides the default (16384 orchestrator / 8192 otherwise); loses to `--max-tokens` |
+| `reasoning_effort` | `none`, `minimal`, `low`, `medium`, `high`, `default` | `default` defers to the model's built-in behavior (the orchestrator's own default); loses to `--reasoning-effort` |
 | `orchestrator_model` | OpenRouter slug | Model for the top-level orchestrator; loses to `--orchestrator-model`/`--model` |
 | `subagent_model` | OpenRouter slug | Model for spawned subagents; loses to `--subagent-model` |
 

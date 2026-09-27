@@ -12,7 +12,7 @@ import shlex
 from typing import List, Dict
 
 from bash_agent.prompts import get_system_prompt, get_orchestrator_system_prompt
-from bash_agent.config import DEFAULT_MODEL, DEFAULT_AUDIO_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_SUBAGENT_MODEL, SUBAGENT_HISTORY_PREFIX, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, DEFAULT_BUDGET, DEFAULT_ORCHESTRATOR_BUDGET, DEFAULT_SUBAGENT_BUDGET_FRACTION, MIN_SUBAGENT_BUDGET, BASH_TIMEOUT, MAX_COMMAND_TIMEOUT
+from bash_agent.config import DEFAULT_MODEL, DEFAULT_AUDIO_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_SUBAGENT_MODEL, SUBAGENT_HISTORY_PREFIX, OUTPUT_LIMIT, MAX_CODE_BLOCKS, COLOR_CMD, COLOR_OUT, COLOR_PY_CMD, COLOR_COST, COLOR_RESET, DEFAULT_REASONING_EFFORT, DEFAULT_MAX_TOKENS, DEFAULT_ORCHESTRATOR_REASONING_EFFORT, DEFAULT_ORCHESTRATOR_MAX_TOKENS, DEFAULT_BUDGET, DEFAULT_ORCHESTRATOR_BUDGET, DEFAULT_SUBAGENT_BUDGET_FRACTION, MIN_SUBAGENT_BUDGET, BASH_TIMEOUT, MAX_COMMAND_TIMEOUT
 from bash_agent.token_budget import parse_token_budget, resolve_budget
 from bash_agent.utils import cleanup_tmp_folder, copy_project_to_clipboard, get_clipboard_content, get_vim_prompt
 from bash_agent.config_file import load_config
@@ -378,14 +378,27 @@ class Agent:
             # 'default' in the file means: use the model's built-in default
             self.reasoning_effort = None if file_effort == 'default' else file_effort
         else:
-            self.reasoning_effort = DEFAULT_REASONING_EFFORT
+            # Top-level orchestrator defers to the model's own built-in
+            # reasoning default by using None (the LLM call then omits
+            # reasoning.effort). Subagents / standalone agents keep the
+            # global DEFAULT_REASONING_EFFORT.
+            if self.is_orchestrator and not self.is_subagent:
+                self.reasoning_effort = DEFAULT_ORCHESTRATOR_REASONING_EFFORT
+            else:
+                self.reasoning_effort = DEFAULT_REASONING_EFFORT
 
         if max_tokens is not None:
             self.max_tokens = max_tokens
         elif "max_tokens" in self.file_config:
             self.max_tokens = self.file_config["max_tokens"]
         else:
-            self.max_tokens = DEFAULT_MAX_TOKENS
+            # Top-level orchestrator gets 2x the max output tokens so its
+            # reasoning + plan documents have room. Subagents / standalone
+            # agents keep the global DEFAULT_MAX_TOKENS.
+            if self.is_orchestrator and not self.is_subagent:
+                self.max_tokens = DEFAULT_ORCHESTRATOR_MAX_TOKENS
+            else:
+                self.max_tokens = DEFAULT_MAX_TOKENS
         
         # Adjust reasoning_effort based on model capabilities
         if self.reasoning_effort == "none" and self.reasoning_mandatory:
