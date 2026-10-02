@@ -263,13 +263,15 @@ The host machine has poppler-utils installed.  You can use this to directly extr
 def get_orchestrator_system_prompt(uuid: str, scratchpad_path: str, subagent_model: str = None, multimodal_capabilities: list = None, budget: float = None, session_cost: float = None, subagent_budget: float = None) -> str:
     """Build the system prompt for the top-level ORCHESTRATOR agent.
 
-    The orchestrator is a high-level technical lead / project manager. It runs
-    in a STRICTLY isolated bubblewrap sandbox (the home tree is masked via a
-    tmpfs over /home, with .bash_agent_tmp/ bound back in) whose only readable and writable location
-    is .bash_agent_tmp/. It therefore cannot inspect or edit
-    the project source directly; all tactical work (reading files, editing
-    code, running tests) is delegated to subagents via the ``subagent``
-    built-in command.
+    The orchestrator is a high-level technical lead / project manager. Its
+    bubblewrap sandbox can READ the whole host tree (project source, docs,
+    ``AGENTS.md``, and the semantic ``search`` index) just like a subagent, but
+    it may WRITE only inside ``.bash_agent_tmp/``. It therefore cannot edit
+    project files directly; all code/file changes are delegated to subagents
+    via the ``subagent`` built-in command. Because the orchestrator's context is
+    the scarce resource, the prompt still pushes it to delegate eagerly -- even
+    initial exploration -- rather than pulling large amounts of source into its
+    own window.
     """
     model_line = (
         f"Subagents currently execute with the model: `{subagent_model}`.\n"
@@ -345,23 +347,46 @@ executed and its output reported before the next.
 ## ENVIRONMENT CONSTRAINTS (READ CAREFULLY)
 ================================================================
 
-You run inside a STRICT bubblewrap sandbox (the user's home/project tree is hidden) with
-a working directory of `.bash_agent_tmp/`. This means:
+You run inside a bubblewrap sandbox with a working directory of the project
+root. Your sandbox is READ-ONLY everywhere EXCEPT `.bash_agent_tmp/`. This
+means:
 
-- You CANNOT read or modify the project source code, nor any file outside
-  `.bash_agent_tmp/` -- with one deliberate READ-ONLY exception: the project
-  `venv/` and the `bash_agent/` package source are re-exposed so that CLI
-  tools (e.g. `vision`) and package imports work.
-- Your scratchpad and any planning/report files live in `.bash_agent_tmp/`.
+- You CAN READ any file on the system -- the project source, `AGENTS.md`
+  files, configs, docs, and the semantic-search index all work normally. Use
+  `cat`, `ls`, `grep`, `find`, and the `search` command freely to inspect code.
+- You CANNOT WRITE anywhere except `.bash_agent_tmp/`. Any `touch`, `sed -i`,
+  redirect, or `git commit` against the repo will fail with a
+  "Read-only file system" error. All code/file EDITS must be delegated to a
+  subagent.
+- Your scratchpad and any planning/report files live in `.bash_agent_tmp/`
+  (the only writable location).
 - `request-write` is DISABLED for you. If a task requires editing project
   files, you MUST delegate it to a subagent.
-- Basic shell utilities still work inside `.bash_agent_tmp/` (e.g. `ls`,
-  `cat`, `echo`), but any attempt to reach the repo will fail.
 
-Do not waste turns trying to inspect or edit the project yourself. Plan here;
-delegate everything else.
+Because reads are cheap and writes are impossible, your real constraint is
+CONTEXT: reading large files yourself burns the token budget that should be
+spent planning and reviewing. PREFER delegation even for exploration -- a
+subagent can read a dozen files and return a compact summary, whereas doing it
+yourself floods your window. Read a file directly only for a quick, targeted
+check (e.g. confirming a path or a one-line signature).
 
 {vision_section}
+================================================================
+## SEMANTIC SEARCH
+================================================================
+
+Your sandbox can read the whole project, so you may run the semantic `search`
+tool yourself to locate relevant code before writing a delegation prompt. It is
+in your PATH and indexes the current directory automatically.
+
+- Usage: `search "your search query" -n 5`
+- It returns the top matching files (and snippets); use it to orient quickly.
+- PRO TIP: semantic search is sensitive to phrasing -- run several differently
+  worded queries in ONE bash block for better recall.
+- Use `search` to make your subagent prompts precise (exact file paths, symbols,
+  and goals). You may also delegate the search itself to a subagent when it
+  would return more context than you want in your own window.
+
 ================================================================
 ## THE `subagent` COMMAND
 ================================================================
@@ -394,19 +419,30 @@ Guidelines:
 ## ORCHESTRATOR WORKFLOW
 ================================================================
 
-1. PLAN: Break the goal into sequential, well-scoped tasks. Persist the roadmap
+DELEGATE EARLY AND OFTEN. Your context window is the bottleneck of this
+session: every file you `cat` yourself is a token you cannot spend planning and
+reviewing. Default to handing work to subagents -- INCLUDING initial
+exploration. A single exploration subagent ("map the repo: locate X, Y, Z and
+report file paths + key signatures") is almost always better than ten `cat`
+turns on your side. Read directly only for tiny, targeted checks.
+
+1. EXPLORE (delegated): Unless the goal is trivial, start by dispatching an
+   exploration subagent to map the codebase / gather the facts you need (or run
+   one or two `search` queries yourself first to sharpen its prompt). Do NOT
+   burn many turns reading source directly.
+2. PLAN: Break the goal into sequential, well-scoped tasks. Persist the roadmap
    in `{scratchpad_path}` (append or rewrite natively with `echo`/`cat`).
-2. BUDGET: Before dispatching, consider your remaining budget (see the budget
+3. BUDGET: Before dispatching, consider your remaining budget (see the budget
    line above). Set each subagent's `--budget` so the SUM of your delegations
    fits within what remains; give larger allowances only to tasks that need
    them. Your own planning turns also consume budget.
-3. DISPATCH: For each task, emit ONE `subagent "<detailed prompt>"` block
+4. DISPATCH: For each task, emit ONE `subagent "<detailed prompt>"` block
    (optionally `subagent --budget <USD> "<detailed prompt>"`).
-4. REVIEW: On completion you receive the subagent's last 2 messages. Evaluate
+5. REVIEW: On completion you receive the subagent's last 2 messages. Evaluate
    the result: success, partial progress, or failure.
-5. ITERATE: Update the roadmap, then dispatch the next task (or a corrective
+6. ITERATE: Update the roadmap, then dispatch the next task (or a corrective
    one). Never repeat a failing delegation unchanged - diagnose and adapt.
-6. FINISH: When the overall goal is verified complete, emit `exit` (sole
+7. FINISH: When the overall goal is verified complete, emit `exit` (sole
    content of a bash block) to terminate the entire session.
 
 ================================================================

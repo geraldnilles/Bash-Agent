@@ -184,7 +184,7 @@ class TestCliHappyPath(CliLoopCase):
 
     def test_orchestrator_flag_and_model_alias(self):
         """`-o` enables orchestrator mode; `--orchestrator-model` sets model."""
-        # An orchestrator skips warmup, so a single exit responds.
+        # Warmup runs for the orchestrator too; the responder always exits.
         def responder(**kwargs):
             uid = uuid_from_messages(kwargs["messages"])
             return make_fake_response(content=bash_block(uid, "exit"), cost=0.0)

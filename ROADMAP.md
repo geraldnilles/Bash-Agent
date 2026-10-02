@@ -28,11 +28,11 @@ A scratchpad of planned features and ideas for Bash Agent. Items are roughly ord
   the agent runs in the default standalone single-agent (direct) mode.
   - Only the top-level orchestrator may spawn; a subagent trying to spawn a
     nested subagent is refused.
-  - The orchestrator runs in a STRICT, delegated bubblewrap sandbox
-    (home/project tree masked via a tmpfs over /home, working dir anchored at
-    `.bash_agent_tmp/`, writes locked there, and
-    `request-write` disabled) so it cannot touch project code directly; the
-    subagent runs with full project read/write in the standard sandbox.
+  - The orchestrator runs in a bubblewrap sandbox that can READ the whole
+    host tree (project source, docs, and the semantic `search` index) but may
+    WRITE only inside `.bash_agent_tmp/` (`request-write` disabled), so it
+    cannot edit project code directly and still delegates edits to subagents;
+    the subagent runs with full project read/write in the standard sandbox.
   - Each subagent is a nested in-process `Agent(is_subagent=True)` whose `exit`
     raises `SubagentExit` (instead of `sys.exit`) so the orchestrator regains
     control; its cumulative cost is folded into the parent session and its last

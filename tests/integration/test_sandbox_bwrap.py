@@ -17,12 +17,13 @@ prove the isolation guarantees AGENTS.md promises:
   * timeout case: `sleep 999` with timeout=2 -> exit 124 + banner, and the
     sandboxed process tree is torn down with it (--die-with-parent +
     --unshare-pid) so no runaway process leaks onto the host.
-  * ORCHESTRATOR isolation: commands run (exit 0) at all, the scratch
-    dir is writable, python works, and the project tree is hidden.
-    (Regression for the old isolation bug: masking the home tree wholesale
-    also hid .bash_agent_tmp itself, so EVERY orchestrator command returned
-    empty output. bwrap instead mounts a tmpfs over /home and binds
-    .bash_agent_tmp/ back in.)
+  * ORCHESTRATOR isolation: commands run (exit 0) at all, the whole project
+    tree is READABLE (so `search`/`cat`/`ls` work), the scratch dir is the
+    ONLY writable location (project-tree and /etc writes are refused), and
+    python works. (Regression for the old isolation bug: masking the home tree
+    wholesale also hid .bash_agent_tmp itself, so EVERY orchestrator command
+    returned empty output. The orchestrator now shares the read-only root bind
+    with every other role and differs only in its writable path.)
 
 Leak hygiene: subprocess.run SIGKILLs ONLY the bwrap client on timeout. With
 ``--die-with-parent`` the container dies with it and, because the workload
@@ -157,20 +158,27 @@ class TestRealSandboxSmoke(unittest.TestCase):
 class TestOrchestratorSandboxIsolation(unittest.TestCase):
     """T-30b — real round-trips for is_orchestrator=True.
 
-    Regression guard for the old isolation bug: the orchestrator's working
-    directory (``.bash_agent_tmp/``) lives INSIDE the home tree, so masking
-    the home tree wholesale also hid it and every orchestrator command
-    returned empty output. The bwrap fix masks ``/home`` with a tmpfs and
-    binds ``.bash_agent_tmp/`` back in read/write.
+    The orchestrator shares the read-only root bind with every role (so it can
+    READ the project tree / run ``search``) but its ONLY writable location is
+    ``.bash_agent_tmp/``. Regression guard for the old bug where masking the
+    home tree wholesale also hid the scratch dir and every orchestrator command
+    returned empty output.
     """
 
     def setUp(self):
-        self._chdir_cm = chdir_repo_tmp()
-        self.tmpdir = self._chdir_cm.__enter__()
+        # Run from the REPO ROOT (like production): the orchestrator's writable
+        # path is the cwd-relative ``.bash_agent_tmp/``, so a cwd nested inside
+        # ``.bash_agent_tmp/`` would resolve it incorrectly.
+        self._orig = os.getcwd()
+        self.repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+        os.chdir(self.repo_root)
+        self.scratch = os.path.join(self.repo_root, ".bash_agent_tmp")
         self.sb = Sandbox("unused-scratchpad-path", uuid="orch-uuid", is_orchestrator=True)
 
     def tearDown(self):
-        self._chdir_cm.__exit__(None, None, None)
+        os.chdir(self._orig)
 
     def test_orchestrator_commands_actually_run(self):
         # The headline regression: this used to return (200, "").
@@ -179,8 +187,9 @@ class TestOrchestratorSandboxIsolation(unittest.TestCase):
         self.assertIn("orchestrator-alive", out)
 
     def test_orchestrator_can_write_and_read_scratch_dir(self):
+        probe = os.path.join(self.scratch, "_orch_probe.txt")
         code, out = self.sb.execute(
-            "printf 'hello-from-orch' > hello.txt && cat hello.txt && rm -f hello.txt"
+            f"printf 'hello-from-orch' > {probe} && cat {probe} && rm -f {probe}"
         )
         self.assertEqual(code, 0, msg=f"scratch write/read failed: {out!r}")
         self.assertIn("hello-from-orch", out)
@@ -190,22 +199,47 @@ class TestOrchestratorSandboxIsolation(unittest.TestCase):
         self.assertEqual(code, 0, msg=f"orchestrator python failed: {out!r}")
         self.assertIn("orch-py-ok", out)
 
-    def test_orchestrator_cannot_see_project_tree(self):
+    def test_orchestrator_can_read_project_tree(self):
+        # The orchestrator shares the read-only root bind: project files are
+        # READABLE (so `cat`/`ls`/`grep`/`search` all work), unlike the old
+        # tmpfs-masked home tree.
         repo_root = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "..")
         )
-        sentinel = os.path.join(repo_root, "orch_hidden_probe.txt")
+        sentinel = os.path.join(repo_root, "orch_visible_probe.txt")
         with open(sentinel, "w") as f:
             f.write("project\n")
         try:
             code, out = self.sb.execute(
-                f"if [ -e {sentinel} ]; then echo VISIBLE; else echo HIDDEN; fi"
+                f"if [ -e {sentinel} ]; then cat {sentinel}; else echo HIDDEN; fi"
             )
             self.assertEqual(code, 0)
-            self.assertIn("HIDDEN", out)
+            self.assertIn("project", out)
+            self.assertNotIn("HIDDEN", out)
         finally:
             if os.path.exists(sentinel):
                 os.remove(sentinel)
+
+    def test_orchestrator_cannot_write_project_tree(self):
+        # Writes outside .bash_agent_tmp/ must fail: only the scratch dir is
+        # punched back in read/write.
+        repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+        target = os.path.join(repo_root, "orch_write_probe.txt")
+        code, out = self.sb.execute(
+            f"touch {target} 2>&1 || echo WRITE_DENIED"
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("WRITE_DENIED", out)
+        self.assertFalse(os.path.exists(target), "orchestrator wrote the repo tree")
+
+    def test_orchestrator_run_from_project_root(self):
+        # Workdir is the project root (not .bash_agent_tmp/), so relative paths
+        # resolve against the real project like any other role.
+        code, out = self.sb.execute("pwd")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), os.path.abspath("."))
 
 
 @unittest.skipUnless(bwrap_available(), "bwrap unavailable")

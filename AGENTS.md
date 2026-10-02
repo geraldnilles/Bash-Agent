@@ -81,7 +81,7 @@ This is the heart of the project. The `Agent` class:
 |--------|---------|
 | `__init__()` | Sets up UUID, model, sandbox, context, budget, and **role flags** (`is_orchestrator=True`, `is_subagent=False`, `subagent_model=None`). The role flags drive sandbox isolation (`Sandbox(is_orchestrator=...)`), prompt selection (`get_orchestrator_system_prompt` vs `get_system_prompt(..., is_subagent=...)`), and lifecycle. Model precedence: explicit `model` arg > (subagent) `subagent_model`/`config.json subagent_model`/`DEFAULT_SUBAGENT_MODEL` > (orchestrator) `config.json orchestrator_model` > `config.json model` > `OPENROUTER_MODEL` env > (audio) `DEFAULT_AUDIO_MODEL` > (orchestrator) `DEFAULT_ORCHESTRATOR_MODEL` > `DEFAULT_MODEL`. Subagents persist to their OWN `ContextManager` history file (`history_subagent_<uuid8>.json`). Handles `--resume`. Resolves the model's context ceiling — by default a quarter of the model's `context_length`, overridable via the `token_budget`/`--token-budget` arg — and passes it to `ContextManager`, threading the model slug as well so content accounting uses that model's tokenizer (see `_fetch_model_context_limit` / `token_budget.py`). |
 | `run(initial_task)` | The main loop. Sends prompts, parses responses, executes commands. |
-| `_run_warmup_exchanges()` | Protocol warmup: on FRESH sessions only (`--resume` skips it) **and only for non-orchestrators** (an orchestrator's sandbox hides the repo, so warmup early-returns when `is_orchestrator`). Pre-fills history with two scripted assistant turns from the `WARMUP_TURNS` constant (a PYTHON version check plus a listing of all installed 3rd-party PyPI packages, then a BASH `ls -la`). Each template is parsed via the production `_extract_blocks()` (raises if it ever fails to parse) and executed via `_execute_script()`, so the injected transcript is byte-for-byte identical in format to a live exchange. Called from `run()` right after the initial task is committed. |
+| `_run_warmup_exchanges()` | Protocol warmup: on FRESH sessions only (`--resume` skips it) and for **every role** — including the orchestrator, whose sandbox can now read the repo so the warmup listings are meaningful. Pre-fills history with two scripted assistant turns from the `WARMUP_TURNS` constant (a PYTHON version check plus a listing of all installed 3rd-party PyPI packages, then a BASH `ls -la`). Each template is parsed via the production `_extract_blocks()` (raises if it ever fails to parse) and executed via `_execute_script()`, so the injected transcript is byte-for-byte identical in format to a live exchange. Called from `run()` right after the initial task is committed. |
 | `parse_and_execute(agent_msg)` | Coordination pipeline: extracts blocks via `_extract_blocks()`, dispatches each to `_handle_special_command()` or `_execute_script()`, enforces `MAX_CODE_BLOCKS` limit, and commits results via `_commit_execution_feedback()`. Returns `(executed: bool, feedback: str)`. |
 | `_extract_blocks(response_text)` | Regex-parses the LLM response for `---START_BASH_COMMAND-{uuid}---` and `---START_PYTHON_COMMAND-{uuid}---` blocks. Returns `(blocks, None)` on success, or `([], warning_message)` when no blocks or malformed UUID fences are found. |
 | `_handle_special_command(cmd_type, script)` | Intercepts built-in agent commands (`subagent`, `exit`, `reset`, `request-write`, `ask-user`, `copy-to-clipboard`). Returns `(handled: bool, formatted_output: str)`. Commands that terminate the session (`exit`, `copy-to-clipboard`) call `sys.exit()` in-process — EXCEPT for a subagent, where `exit` raises `SubagentExit` instead (so the orchestrator regains control). Dispatches `subagent`/`subagent ...` to `_handle_subagent_command()`. |
@@ -252,20 +252,20 @@ Wraps `bwrap` (bubblewrap) for isolated command execution.
 
 | Aspect | Subagent / direct (`is_orchestrator=False`) | Orchestrator (`is_orchestrator=True`) |
 |---|---|---|
-| Working directory | `os.path.abspath(".")` (project root) | `os.path.abspath(".bash_agent_tmp")` |
+| Working directory | `os.path.abspath(".")` (project root) | `os.path.abspath(".")` (project root) |
+| Readable tree | whole host root, read-only (`--ro-bind / /`) | whole host root, read-only (identical) |
 | `approved_write_paths` | `[project root]` | `[.bash_agent_tmp]` |
-| Home/project isolation | home read-only (system `--ro-bind / /`; project dir bound rw) | **`--tmpfs /home` + `--bind .bash_agent_tmp`**, **plus read-only `--ro-bind` of `venv/` and `bash_agent/`** (home/project tree masked; scratch bound back in rw; venv + package source re-exposed ro so CLI tools like `vision` and package imports work) |
+| Writable tree | project tree (bound rw) | **only `.bash_agent_tmp/`** (bound rw); everything else stays read-only |
 | `request_write()` | normal interactive prompt | always rejected: `(False, "Orchestrator agent cannot request write access outside .bash_agent_tmp. Delegate file changes to a subagent.")` |
 
-The sandbox stores the working dir as `self._workdir`; both `execute()` and `execute_python()` build their `--chdir` and isolation flags from the role via `Sandbox._bwrap_common()` / `Sandbox._role_args()`. **Orchestrators mask `/home` with `--tmpfs /home`** — but `.bash_agent_tmp/` itself lives inside the home tree, so that scratch directory is then bound back in read/write via `--bind`. **Both** `execute()` (BASH) and `execute_python()` additionally bind the project `venv/` **and** the `bash_agent/` package source back in read-only (`--ro-bind`) — the venv so CLI tools such as `vision` stay on `PATH`, and the package source because the editable install's import finder resolves `bash_agent` to the package directory. Both re-exposed paths are resolved from the **package location** (`<project>/bash_agent` derived from `__file__`), not the launch cwd, so `bagent -o` works from any directory. These are the only read-only exceptions to the `/home` mask, and they never make anything outside `.bash_agent_tmp/` writable.
+The sandbox stores the working dir as `self._workdir`; both `execute()` and `execute_python()` build their `--chdir` and isolation flags from the role via `Sandbox._bwrap_common()` / `Sandbox._role_args()`. **Every role shares the same READABLE tree**: `_bwrap_common()` binds the whole host root read-only (`--ro-bind / /`), so the orchestrator can `cat`/`ls`/`grep` the project, read `AGENTS.md`, and run the semantic `search` tool exactly like a subagent. The ONLY role difference is which directory `_role_args()` punches back in as writable (`--bind`): the project tree for subagents/direct mode, or `.bash_agent_tmp/` for the orchestrator. Nothing outside `.bash_agent_tmp/` ever becomes writable for an orchestrator, so code edits are still delegated to subagents. The venv's `bin/` is prepended to `PATH` (resolved from the package location, not the launch cwd, so `bagent -o` works from any directory) so CLI tools such as `vision` stay discoverable.
 
 **`execute(script_content: str, timeout: int = None) -> (exit_code, output)`**: Writes the script to a temp file in `.bash_agent_tmp/`, then runs:
 ```
 bwrap --ro-bind / / --proc /proc --dev /dev --tmpfs /tmp --tmpfs /var/tmp \
   --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try --die-with-parent \
-  {isolation: --bind {approved_paths}                      (subagent/direct)
-            | --tmpfs /home + --bind .bash_agent_tmp       (orchestrator)} \
-  {+ --ro-bind venv/ + --ro-bind bash_agent/              (orchestrator)} \
+  --bind {approved_paths}   (subagent/direct: project root;
+                             orchestrator: .bash_agent_tmp only) \
   --setenv PATH {host_path} [--setenv OPENROUTER_API_KEY ...] \
   --chdir {self._workdir} /bin/bash {script_path}
 ```
@@ -323,9 +323,10 @@ Generates the massive system prompt that defines the agent's behavior. Key funct
 
 **`get_orchestrator_system_prompt(uuid, scratchpad_path, subagent_model=None, multimodal_capabilities=None)`**:
 - Returns the dedicated prompt for a top-level **Orchestrator** (`Agent(is_orchestrator=True)`).
-- Defines the persona (technical lead / project manager that delegates rather than edits), the home/project-tree-hidden / `.bash_agent_tmp`-only environment constraints, the `request-write` lockout, and the `subagent "<task>"` built-in (with a concrete example).
+- Defines the persona (technical lead / project manager that delegates rather than edits), the READ-ANYWHERE / WRITE-ONLY-`.bash_agent_tmp` environment constraints (including the "delegate even initial exploration" push), the `request-write` lockout, and the `subagent "<task>"` built-in (with a concrete example).
 - Advertises `vision` via a `## VISION CAPABILITIES` section (shares `_build_vision_section()` with `get_system_prompt()`, so it picks native-attach vs text-only wording from `multimodal_capabilities`).
-- Documents the orchestrator workflow: PLAN (persist the roadmap in `SCRATCHPAD.md`) → DISPATCH one `subagent` block per turn → REVIEW the last-2-messages summary → ITERATE → FINISH with `exit`.
+- Includes its own `## SEMANTIC SEARCH` section: because the orchestrator CAN read the tree, it may run `search` itself to sharpen delegation prompts (or delegate the search when it would flood its context).
+- Documents the orchestrator workflow: EXPLORE (prefer a delegated exploration subagent) → PLAN (persist the roadmap in `SCRATCHPAD.md`) → DISPATCH one `subagent` block per turn → REVIEW the last-2-messages summary → ITERATE → FINISH with `exit`.
 - Optionally states the subagent model via `subagent_model`.
 - Fence markers are assembled procedurally from `_S`/`_E`/`_U`/`_fence` helpers so no literal UUID-fenced sample is embedded in the source (keeps the protocol unambiguous).
 
@@ -429,11 +430,12 @@ task via the `subagent` built-in.
                           │
                           ▼
         Orchestrator  (is_orchestrator=True, expensive model)
-          Sandbox: home tree masked (--tmpfs /home) + .bash_agent_tmp bound in,
-                   + ro-bind venv/ and bash_agent/ (vision CLI + imports),
-                   workdir=.bash_agent_tmp, writes locked to .bash_agent_tmp
-          Prompt:  get_orchestrator_system_prompt()   (NO warmup exchanges)
-          Plans in .bash_agent_tmp/SCRATCHPAD.md
+          Sandbox: whole root READABLE (--ro-bind / /), writable ONLY
+                   .bash_agent_tmp/, workdir=project root,
+                   venv/bin on PATH (vision CLI + search + imports)
+          Prompt:  get_orchestrator_system_prompt()   (runs warmup exchanges)
+          Plans in .bash_agent_tmp/SCRATCHPAD.md; may read/search the repo
+          itself but delegates all edits
                           │  emits:  subagent "<task>"
                           ▼
         Subagent  (is_subagent=True, is_orchestrator=False, cheap model)
@@ -452,7 +454,7 @@ task via the `subagent` built-in.
 
 | Constructor arg | Default | Effect |
 |---|---|---|
-| `is_orchestrator` | `True` | Selects home-tree-hiding isolation (`TemporaryFileSystem=/home` + `BindPaths=.bash_agent_tmp`), `.bash_agent_tmp` workdir, locked writes, orchestrator prompt, and skips warmup. `Agent(is_orchestrator=False)` restores the legacy single agent. |
+| `is_orchestrator` | `True` | Selects write-locked isolation (whole root readable; only `.bash_agent_tmp/` writable), orchestrator prompt, and the delegated-workflow instructions. Warmup runs for every role (the orchestrator can read the repo, so the warmup listings are meaningful). `Agent(is_orchestrator=False)` restores the legacy single agent. |
 | `is_subagent` | `False` | Marks a nested worker. Its `exit` raises `SubagentExit` (not `sys.exit`), it uses the subagent prompt section, and it persists to its own history file. |
 | `subagent_model` | `None` | Explicit subagent slug (CLI `--subagent-model`) → else `config.json subagent_model` → else `DEFAULT_SUBAGENT_MODEL`. |
 | `subagent_budget` | `None` | Global default USD budget per spawned subagent (CLI `--subagent-budget`). When `None` a subagent gets `DEFAULT_SUBAGENT_BUDGET_FRACTION` (25%) of the overall budget; a per-command `subagent --budget N` still wins. |
@@ -496,10 +498,10 @@ overrides the orchestrator's model (alias of `--model` in orchestrator mode);
   hierarchy is opt-in via `-o`/`--orchestrator`. At the library level `Agent()`
   still defaults to `is_orchestrator=True`, so code/tests that need the
   single-agent loop pass `is_orchestrator=False` explicitly.
-- Orchestrators **skip warmup** (their sandbox cannot read the repo).
+- Warmup runs for **every role** (including orchestrators) — the orchestrator sandbox reads the whole root, so its warmup listings are meaningful.
 - Subagents **never** `sys.exit`; they raise `SubagentExit`.
 - Subagent history is isolated in `history_subagent_<uuid8>.json`.
-- Orchestrator isolation masks `/home` with `--tmpfs /home` **plus** `--bind .bash_agent_tmp`, **plus read-only `--ro-bind` of `venv/` and `bash_agent/` for BOTH `execute()` and `execute_python()`** — the scratch dir MUST be bound back in, because masking `/home` wholesale also hides the orchestrator's own working directory and would break every command; the venv/package ro-binds keep the `vision` CLI and package imports working without weakening isolation. These binds (and the sandbox `PATH` prefix) are resolved from the package location, so an orchestrator launched from a foreign directory still exposes them.
+- Orchestrator isolation = **read the whole host root, write ONLY `.bash_agent_tmp/`**. Every role shares `_bwrap_common()`'s `--ro-bind / /`; `_role_args()` binds just the approved write path back in rw (project root for subagents/direct mode, `.bash_agent_tmp/` for the orchestrator). This lets the orchestrator `cat`/`ls`/`grep` the repo and run `search` while still being unable to modify anything outside its scratch dir, so code edits are delegated to subagents. The venv's `bin/` is prepended to `PATH` (resolved from the package location) so `vision`/`search`/imports work for any launch cwd.
 
 ---
 
@@ -551,7 +553,7 @@ Agent.run() loop
 - The UUID is persisted in `history.json` for session resumption
 
 ### 2. File Paths
-- The agent's working directory is the project root (where `main.py` was invoked) **for subagents / direct (standalone) mode**. An **orchestrator**'s working directory and only writable path are `.bash_agent_tmp/` (a `TemporaryFileSystem=/home` masks the repo entirely, with `.bash_agent_tmp/` bound back in).
+- The agent's working directory is the project root (where `main.py` was invoked) for **every** role. The whole host root is readable inside the sandbox, but only the approved write path is writable: the project tree for subagents / direct (standalone) mode, or `.bash_agent_tmp/` for an **orchestrator** (everything else is read-only, so its repo writes fail).
 - `.bash_agent_tmp/` is the ONLY writable scratch space (besides the project root)
 - Subagent histories use `history_subagent_<uuid8>.json` so a nested run never overwrites the parent `history.json`
 - Temp files for sandbox execution MUST be created inside `.bash_agent_tmp/` (not host `/tmp`) because the sandbox mounts a throwaway `--tmpfs /tmp`, so a host `/tmp` path would be invisible inside the sandbox
@@ -568,19 +570,16 @@ Agent.run() loop
 - Old OUTPUT blocks are deleted first (biggest savings), then COMMAND blocks are truncated, then entire messages are dropped
 
 ### 5. Sandbox Properties
-- `--ro-bind / /`: the whole host filesystem is read-only inside the sandbox
-- Non-orchestrator (subagent / direct standalone mode): home stays read-only
-  (from the read-only root bind) and only the project tree is bound back in
-  read/write via `--bind`. Orchestrators instead mask `/home` with
-  **`--tmpfs /home` + `--bind .bash_agent_tmp`** (home/project hidden, the
-  scratch dir bound back in), **plus read-only `--ro-bind` of `venv/` and
-  `bash_agent/`** (for BOTH `execute()` and `execute_python()`) so the `vision`
-  CLI and package imports still work. The scratch dir MUST be bound back in,
-  because masking `/home` also hides `.bash_agent_tmp` and would break every
-  command. All added binds are read-only: nothing outside `.bash_agent_tmp/`
-  becomes writable.
+- `--ro-bind / /`: the whole host filesystem is READABLE but read-only inside
+  the sandbox — this applies to **every** role, so the orchestrator can read and
+  `search` the project just like a subagent.
+- `--bind {approved_write_paths}` punches the role's write directory back in
+  read/write: the project tree for subagents / direct standalone mode, or
+  `.bash_agent_tmp/` for the orchestrator. Nothing outside the approved path is
+  ever writable; an orchestrator's repo writes fail with "Read-only file
+  system".
 - `--tmpfs /tmp` + `--tmpfs /var/tmp`: throwaway, isolated temp filesystems
-- `--chdir` is the project root for subagents and `.bash_agent_tmp/` for orchestrators
+- `--chdir` is the project root for every role
 - writable `--bind` paths: dynamically expanded via `request-write` — which orchestrators are forbidden from using
 - `--unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try`: private
   namespaces; `--die-with-parent` ties the container to the client process so
@@ -664,7 +663,7 @@ To add a new tool (like `vision` or `search`):
   `bash_agent.context.count_tokens` too. (`tests/helpers/fakes.py` exposes the
   reusable `DeterministicTokenCounts` patcher that covers both seams.)
 - **Multimodal content format**: When `multimodal_capabilities` includes `"image"` and/or `"audio"`, images/audio attached via `vision.py`/`transcribe.py` cause the agent to construct content as a list of content blocks `[{"type": "text", ...}, {"type": "image_url", ...}, {"type": "input_audio", ...}]` instead of a plain string. The `ContextManager._content_tokens()` method and pruning logic must handle both formats.
-- **Orchestrator defaults**: at the library level `Agent()` is still an orchestrator by default (`is_orchestrator=True`), but the CLI now defaults to direct/standalone mode and opts into the hierarchy via `-o`/`--orchestrator`. If you add tests or code that exercises the standalone single-agent loop (warmup, repo-root writes, `request-write`), construct the agent with `is_orchestrator=False` — otherwise warmup is skipped and the sandbox cannot see the repo. Do not change the `Agent()` library default.
+- **Orchestrator defaults**: at the library level `Agent()` is still an orchestrator by default (`is_orchestrator=True`), but the CLI now defaults to direct/standalone mode and opts into the hierarchy via `-o`/`--orchestrator`. To exercise repo-root WRITES or `request-write`, construct the agent with `is_orchestrator=False` — an orchestrator can now READ the whole repo (and runs warmup), but its only writable path is `.bash_agent_tmp/`. Do not change the `Agent()` library default.
 - **Subagent `exit` must not `sys.exit`**: Inside `_handle_special_command`, the `exit` handler branches on `self.is_subagent` and raises `SubagentExit`. Keep that branch — a subagent calling `sys.exit(0)` would tear down the orchestrator's process.
 - **Cost aggregation is in a `finally`**: `_handle_subagent_command()` adds the child's `session_cost` to the parent even if the child raises. Don't move that line into the `try` body, or a crashed subagent's spend would be lost.
 - **`FakeSandbox` has no `.timeout`**: agent code reads `getattr(self.sandbox, "timeout", None)` when constructing a child; keep that defensive access.

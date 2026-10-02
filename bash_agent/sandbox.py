@@ -3,14 +3,18 @@
 Agent-generated BASH/PYTHON scripts are executed inside a bubblewrap
 container:
 
-* ``--ro-bind / /`` makes the whole host filesystem read-only; the one
-  approved write directory (the project tree for subagents, or
-  ``.bash_agent_tmp/`` for the orchestrator) is then bind-mounted back in
-  read/write with ``--bind``.
-* The orchestrator additionally gets the project ``venv/`` and the
-  ``bash_agent/`` package source re-bound READ-ONLY (see ``_role_args``), so
-  CLI tools such as ``vision`` work for both BASH and Python execution while
-  the rest of the home tree stays masked.
+* ``--ro-bind / /`` makes the whole host filesystem READ-ONLY readable; the
+  one approved write directory is then bind-mounted back in read/write with
+  ``--bind``. The readable tree is identical for every role; only the
+  approved-write path differs:
+
+  - subagents / standalone agents write the project tree (the launch cwd);
+  - the orchestrator writes ONLY ``.bash_agent_tmp/``.
+
+  Because the whole root is readable, the orchestrator can inspect any file
+  (e.g. run the semantic ``search`` tool, ``cat`` project source, list
+  directories) while still being unable to modify anything outside its
+  scratch directory.
 * A private ``/proc``, ``/dev`` and throwaway ``/tmp`` / ``/var/tmp`` keep
   the workload from observing or mutating host state.
 * ``--unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try`` give
@@ -30,10 +34,10 @@ from bash_agent.config import BASH_TIMEOUT
 
 
 # Resolve the project root from the PACKAGE LOCATION rather than the launch
-# cwd.  ``bagent -o`` may be launched from any directory, but the orchestrator
-# sandbox re-exposes the project ``venv/`` and ``bash_agent/`` package source
-# (which the ``--tmpfs /home`` masking would otherwise hide).  Deriving those
-# paths from ``__file__`` keeps them correct regardless of cwd.
+# cwd.  ``bagent -o`` may be launched from any directory, and the venv's
+# ``bin/`` directory is prepended to ``PATH`` so CLI tools such as ``vision``
+# stay discoverable regardless of where the process was started.  Deriving the
+# path from ``__file__`` keeps it correct even for a foreign launch cwd.
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))   # <project>/bash_agent
 _PROJECT_ROOT = os.path.dirname(_PKG_DIR)               # <project>
 
@@ -42,10 +46,10 @@ def _resolve_venv_dir() -> str:
     """Return the project ``venv/`` directory, resolved from the package
     location with a cwd-based fallback for unusual layouts.
 
-    The orchestrator re-exposes this directory READ-ONLY so CLI tools such as
-    ``vision`` stay on ``PATH`` even though ``--tmpfs /home`` masks the real
-    home tree.  Resolution must NOT depend on the launch cwd (``bagent -o`` can
-    be started anywhere), which is why ``_PROJECT_ROOT`` is preferred.
+    The venv's ``bin/`` is prepended to the sandbox ``PATH`` so CLI tools such
+    as ``vision`` stay discoverable for every role.  Resolution must NOT depend
+    on the launch cwd (``bagent -o`` can be started anywhere), which is why
+    ``_PROJECT_ROOT`` is preferred.
     """
     candidate = os.path.join(_PROJECT_ROOT, "venv")
     if os.path.isdir(candidate):
@@ -56,11 +60,14 @@ def _resolve_venv_dir() -> str:
 class Sandbox:
     def __init__(self, scratchpad_path: str = None, timeout: int = None, uuid: str = None, multimodal_capabilities: list = None, is_orchestrator: bool = False):
         self.is_orchestrator = is_orchestrator
-        self._workdir = os.path.abspath(".bash_agent_tmp" if is_orchestrator else ".")
+        # Every role reads the whole (read-only) host root and runs from the
+        # project directory, so tools like ``search``/``ls``/``cat`` see the
+        # real tree.  Only the approved WRITE path differs: the orchestrator may
+        # write solely inside ``.bash_agent_tmp/`` (delegating code edits to
+        # subagents), whereas subagents / standalone agents may write the
+        # project tree.
+        self._workdir = os.path.abspath(".")
         if is_orchestrator:
-            # Orchestrator is confined entirely to .bash_agent_tmp/: it may
-            # write ONLY there and cannot read the user's home / project tree.
-            # Tactical file work is delegated to subagents.
             self.approved_write_paths = [os.path.abspath(".bash_agent_tmp")]
         else:
             self.approved_write_paths = [os.path.abspath(".")]
@@ -94,55 +101,27 @@ class Sandbox:
     def _role_args(self, with_venv: bool = False) -> list:
         """Filesystem-isolation argv that depends on the agent's role.
 
-        Non-orchestrators keep the user's home read-only (the ``--ro-bind / /``
-        default): only the project tree is punched back in as writable, so the
-        rest of ``/home`` stays visible but read-only.
+        The readable tree is IDENTICAL for every role: ``_bwrap_common()``
+        already binds the whole host root read-only, so the orchestrator can
+        inspect any file (project source, ``AGENTS.md``, the semantic ``search``
+        index, ...) just like a subagent. The ONLY difference between roles is
+        which directory is punched back in as writable via ``--bind``:
 
-        Orchestrators must see and write ONLY ``.bash_agent_tmp/`` -- but that
-        directory lives *inside* the home tree.  A tmpfs is mounted over
-        ``/home`` (masking the user's home / project tree) and the working
-        directory is bind-mounted back in read/write.  Two additional
-        read-only exceptions to the masking are always punched back in, for
-        BOTH ``execute()`` and ``execute_python()``:
+        * subagents / standalone agents: the project tree (the launch cwd);
+        * orchestrators: ``.bash_agent_tmp/`` only.
 
-        * the project ``venv/`` -- so CLI tools installed there (e.g.
-          ``vision``) remain on ``PATH``; and
-        * the ``bash_agent/`` package source -- required because the editable
-          install's finder maps ``bash_agent`` to the package directory.
+        Nothing outside ``.bash_agent_tmp/`` ever becomes writable for an
+        orchestrator, so it is still heavily incentivized to delegate code
+        changes to a subagent -- but it no longer needs a subagent merely to
+        READ a file or run ``search``.
 
-        Both paths are resolved from the PACKAGE LOCATION (``_PROJECT_ROOT`` /
-        ``_PKG_DIR``, derived from ``__file__``) rather than the launch cwd, so
-        an orchestrator started from a foreign directory still punches them in.
-
-        Both binds are READ-ONLY; nothing outside ``.bash_agent_tmp/`` ever
-        becomes writable.  The ``with_venv`` argument is retained only for
-        backward compatibility and no longer gates venv exposure.
+        The ``with_venv`` argument is retained only for backward compatibility;
+        it no longer affects the argv because the read-only root bind already
+        exposes the project ``venv/`` (whose ``bin/`` is on ``PATH``).
         """
-        if not self.is_orchestrator:
-            args = []
-            for path in self.approved_write_paths:
-                args += ["--bind", path, path]
-            return args
-
-        args = ["--tmpfs", "/home"]
+        args = []
         for path in self.approved_write_paths:
             args += ["--bind", path, path]
-        # Re-expose the project venv (for CLI tools such as ``vision``) and
-        # the ``bash_agent`` package source (needed because the editable
-        # install's import finder resolves ``bash_agent`` -> <cwd>/bash_agent,
-        # which the /home tmpfs would otherwise hide).  Both are bound
-        # READ-ONLY and are required for BOTH execute() (bash) and
-        # execute_python(), so this is intentionally NOT gated on with_venv.
-        # NOTE: paths are resolved from the PACKAGE location, not os.getcwd(),
-        # because an orchestrator may be launched from any directory.  A
-        # cwd-based bind would silently vanish for a foreign launch directory,
-        # leaving /home an empty tmpfs and ``vision`` undiscoverable.
-        venv_dir = _resolve_venv_dir()
-        if os.path.isdir(venv_dir):
-            args += ["--ro-bind", venv_dir, venv_dir]
-        pkg_dir = _PKG_DIR
-        if os.path.isdir(pkg_dir):
-            args += ["--ro-bind", pkg_dir, pkg_dir]
         return args
 
     def _resolve_timeout(self, timeout=None):
@@ -154,6 +133,8 @@ class Sandbox:
 
     def request_write(self, path: str) -> bool:
         if self.is_orchestrator:
+            # The orchestrator may read anything but write ONLY inside
+            # .bash_agent_tmp/. Code/file edits must be delegated to a subagent.
             return (
                 False,
                 "Orchestrator agent cannot request write access outside "
@@ -208,8 +189,7 @@ class Sandbox:
             cmd += ["--setenv", "BASH_AGENT_UUID", self.uuid]
         cmd += ["--setenv", "BASH_AGENT_MULTIMODAL", ",".join(self.multimodal_capabilities)]
 
-        # Start the bash session in the project directory (orchestrator:
-        # confined to .bash_agent_tmp/).
+        # Start the bash session in the project directory (all roles).
         cmd += ["--chdir", self._workdir, "/bin/bash", script_path]
 
         try:

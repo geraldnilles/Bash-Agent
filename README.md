@@ -141,6 +141,11 @@ request-write /etc/nginx/nginx.conf
 
 You approve or deny interactively.
 
+In **orchestrator mode** (`-o`) the top-level agent can still *read* everything,
+but its write access is narrowed to `.bash_agent_tmp/` only (and `request-write`
+is disabled) — all project edits are delegated to subagents, which run with the
+full project read/write sandbox above.
+
 ---
 
 ## Key Features in Depth
@@ -150,12 +155,11 @@ You approve or deny interactively.
 By default the agent runs as a single **standalone agent** — one model does
 everything, with full project read/write access. The opt-in **two-tier
 hierarchy** is enabled with `-o` / `--orchestrator`. In that mode the top-level
-agent becomes an **Orchestrator**: a high-level planner that runs in a strict
-sandbox (home/project tree hidden, working directory locked to
-`.bash_agent_tmp/`, `request-write` disabled) and therefore cannot touch your
-project code directly. It delegates every tactical task — reading files, editing
-code, running tests — to focused **Subagents** via the built-in `subagent`
-command:
+agent becomes an **Orchestrator**: a high-level planner whose sandbox can READ
+your whole project (so it can `grep`, `cat`, and run the semantic `search` tool)
+but may WRITE only inside `.bash_agent_tmp/` (`request-write` disabled). Any
+edit to project code, and every heavy tactical task, is delegated to focused
+**Subagents** via the built-in `subagent` command:
 
 ```
 ---START_BASH_COMMAND-{uuid}---

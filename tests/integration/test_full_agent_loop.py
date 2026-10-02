@@ -384,8 +384,8 @@ class TestOrchestratorSubagentLoop(FullLoopCase):
     whose exit unwinds back into the orchestrator.
 
     Proves the whole hierarchy offline:
-      * the orchestrator (home tree hidden) runs NO warmup and delegates via
-        `subagent "<task>"`,
+      * the orchestrator runs the standard warmup exchanges (its sandbox can
+        read the whole tree) and then delegates via `subagent "<task>"`,
       * the spawned subagent constructs with is_subagent=True and executes a
         real bwrap bash command (a file appears on disk),
       * the subagent's `exit` raises SubagentExit (not SystemExit) so the
@@ -484,14 +484,15 @@ class TestOrchestratorSubagentLoop(FullLoopCase):
         h = self.history()
         self.assertEqual(h[0]["role"], "system")
         roles = [m["role"] for m in h]
-        # system, user(task), assistant(subagent cmd), user(summary), assistant(exit)
-        self.assertEqual(len(h), 5, "unexpected orchestrator history: %r" % roles)
+        # system, user(task), 2 warmup pairs (assistant+user),
+        # assistant(subagent cmd), user(summary), assistant(exit)
+        self.assertEqual(len(h), 9, "unexpected orchestrator history: %r" % roles)
 
-        deleg_cmd = h[2]["content"]
+        deleg_cmd = h[6]["content"]
         self.assertIn(_cmd_start("BASH", self.uid), deleg_cmd)
         self.assertIn("subagent", deleg_cmd)
 
-        summary = h[3]["content"]
+        summary = h[7]["content"]
         self.assertIn(_out_start("BASH", 0, self.uid), summary)
         self.assertIn("SUBAGENT", summary)
         self.assertIn("COMPLETED", summary)

@@ -467,9 +467,10 @@ class Agent:
                 with open(role_file_path, "r", encoding="utf-8") as f:
                     custom_role = f.read().strip()
             if self.is_orchestrator:
-                # Orchestrator runs confined to .bash_agent_tmp/ and delegates
-                # all tactical work to subagents. Thread the budget into the
-                # prompt so the model is budget-aware from the first turn.
+                # Orchestrator can READ the whole repo but may WRITE only inside
+                # .bash_agent_tmp/, so all edits are delegated to subagents.
+                # Thread the budget into the prompt so the model is
+                # budget-aware from the first turn.
                 system_prompt = get_orchestrator_system_prompt(
                     self.uuid,
                     self.context.scratchpad_path,
@@ -1424,12 +1425,10 @@ class Agent:
         byte-for-byte identical in format to a live exchange. Never called for
         resumed sessions (see self.resumed_session).
 
-        Skipped entirely for ORCHESTRATORS: the warmup scripts list the project
-        root, which is hidden under the orchestrator's sandbox, so running
-        them would only produce confusing errors.
+        Runs for BOTH roles: the orchestrator's sandbox can now read the whole
+        project tree (it only differs in WRITE access), so the warmup listings
+        are just as meaningful for it as for a standalone agent/subagent.
         """
-        if self.is_orchestrator:
-            return
         print("[System] Running protocol warmup exchanges...")
         for template in WARMUP_TURNS:
             agent_msg = template.format(uuid=self.uuid)

@@ -8,7 +8,7 @@ raising SubagentExit (NOT SystemExit). The orchestrator then folds the
 subagent's cost into its session and continues, finally exiting itself.
 
 Proves offline:
-  * orchestrator (default role) runs NO warmup,
+  * orchestrator runs the SAME 2 warmup exchanges as any other role,
   * role markers ("ORCHESTRATOR agent" / "SUBAGENT ROLE") select the role,
   * sibling subagents get distinct UUIDs and distinct history files,
   * a per-command `--budget` override is honored,
@@ -144,14 +144,14 @@ class TestOrchestratorSubagent(OrchestratorCase):
         self.assertNotEqual(seen_uuid["orch"], seen_uuid["sub"])
         self.assertEqual(seen_uuid["orch"], agent.uuid)
 
-        # Orchestrator history: system, task, assistant(delegation),
-        # user(subagent summary), assistant(exit).
+        # Orchestrator history: system, task, 2 warmup pairs (assistant+user),
+        # assistant(delegation), user(subagent summary), assistant(exit).
         h = self.history(agent)
         roles = [m["role"] for m in h]
-        self.assertEqual(len(h), 5, "orchestrator history shape: %r" % roles)
-        deleg = h[2]["content"]
+        self.assertEqual(len(h), 9, "orchestrator history shape: %r" % roles)
+        deleg = h[6]["content"]
         self.assertIn("subagent", deleg)
-        summary = h[3]["content"]
+        summary = h[7]["content"]
         self.assertIn("SUBAGENT", summary)
         self.assertIn("COMPLETED", summary)
         self.assertIn("ran-ok", summary)
