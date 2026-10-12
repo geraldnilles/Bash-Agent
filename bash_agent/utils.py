@@ -8,7 +8,7 @@ def cleanup_tmp_folder():
     if os.path.exists(tmp_path):
         for item in os.listdir(tmp_path):
             item_path = os.path.join(tmp_path, item)
-            if item in [ "SCRATCHPAD.md", "vim_prompt.tmp", "ROLE.md", "embeddings.json", "search_disabled", "history.json", "clipboard_blacklist.txt", "config.json" ]:
+            if item in [ "SCRATCHPAD.md", "vim_prompt.md", "ROLE.md", "embeddings.json", "search_disabled", "history.json", "clipboard_blacklist.txt", "config.json" ]:
                 continue  # Keep the scratchpad
             if os.path.isfile(item_path):
                 os.remove(item_path)
@@ -252,12 +252,12 @@ def copy_project_to_clipboard(file_paths=None, ignore=None, include=None):
     return full_text
 
 
-def get_vim_prompt(prompt_text: str = "OBJECTIVE:") -> str:
+def get_vim_prompt(prompt_text: str = "## OBJECTIVE\n\n\n") -> str:
     """Launch vim to get user input using a persistent file in .bash_agent_tmp."""
     tmp_dir = os.path.abspath(".bash_agent_tmp")
     os.makedirs(tmp_dir, exist_ok=True)
-    tmp_file = os.path.join(tmp_dir, "vim_prompt.tmp")
-    
+    tmp_file = os.path.join(tmp_dir, "vim_prompt.md")
+
     # Write initial content only if the file doesn't exist
     if not os.path.exists(tmp_file):
         with open(tmp_file, 'w') as f:
