@@ -25,7 +25,7 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 #DEFAULT_MODEL = "xiaomi/mimo-v2.5"
 
 #DEFAULT_MODEL = "xiaomi/mimo-v2.5-pro"
-DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash"
+DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash-1017"
 
 # Audio-enabled default model. Selected when the --audio CLI flag is passed,
 # overriding DEFAULT_MODEL (but still below an explicit --model / config.json /
@@ -38,8 +38,8 @@ DEFAULT_AUDIO_MODEL = "xiaomi/mimo-v2.6-flash"
 # SUBAGENTS (see AGENTS.md "Hierarchical Orchestrator / Subagent Mode").
 # These are the fallbacks used when neither the CLI nor config.json pins a
 # per-role model.
-DEFAULT_ORCHESTRATOR_MODEL = "deepseek/deepseek-v4.1-flash"
-DEFAULT_SUBAGENT_MODEL = "deepseek/deepseek-v4.1-flash"
+DEFAULT_ORCHESTRATOR_MODEL = DEFAULT_MODEL
+DEFAULT_SUBAGENT_MODEL = DEFAULT_MODEL
 
 # Prefix (relative to .bash_agent_tmp/) for subagent history files. Subagents
 # get their OWN history file so a nested run never overwrites the parent
@@ -118,7 +118,8 @@ MODEL_PROVIDERS = {
     "deepseek/deepseek-v4-pro-0813": ["deepseek"],
     "deepseek/deepseek-v4-flash-0731": ["fireworks","deepseek"],
     "deepseek/deepseek-v4-flash-vision-exp": ["fireworks"],
-    "deepseek/deepseek-v4.1-flash": ["deepseek","deepinfra","fireworks","novita"],
+    "deepseek/deepseek-v4.1-flash": ["deepseek","fireworks","novita"],
+    "deepseek/deepseek-v4.1-flash-1017": ["deepseek","fireworks","novita"],
     "xiaomi/mimo-v2.5-pro": ["novita","xiaomi"],
     "xiaomi/mimo-v2.5": ["deepinfra","novita","xiaomi" ],
     "moonshotai/kimi-k3": ["inference-net"],
